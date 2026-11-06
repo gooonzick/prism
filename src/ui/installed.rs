@@ -160,7 +160,7 @@ fn skill_row(s: &App, skill: &Skill, targets: &[usize], k: &Kit) -> El {
     let tick = Checkbox::new(ticked)
         .label(format!("Select {}", skill.name))
         .hide_label()
-        .on_toggle(move |s: &mut App| s.toggle_checked(&tick_name))
+        .on_toggle_tx(move |s: &mut App, tx: &mut Tx| s.click_tick(&tick_name, tx.mods()))
         .build(k)
         .key(format!("check-{}", skill.name));
     let mut chips = row().gap(4.0).center_y();
@@ -195,7 +195,7 @@ fn skill_row(s: &App, skill: &Skill, targets: &[usize], k: &Kit) -> El {
         .gap(12.0)
         .center_y()
         .radius(k.radius.md)
-        .on_press(move |s: &mut App| s.select(&name))
+        .on_press_tx(move |s: &mut App, tx: &mut Tx| s.click_row(&name, tx.mods()))
         .child(tick)
         .child(info)
         .child(chips);

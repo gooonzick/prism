@@ -47,6 +47,8 @@ pub struct App {
     pub preview: Option<String>,
     /// Skills ticked for a bulk sync or remove, in inventory order.
     pub checked: Vec<String>,
+    /// The row a Shift-click extends from: the last one clicked without Shift.
+    pub anchor: Option<String>,
     /// The open sync dialog's plan.
     pub sync_plan: Option<Plan>,
     /// The skills the open sync dialog is for; `None` syncs everything.
@@ -87,6 +89,7 @@ impl App {
             selected: None,
             preview: None,
             checked: Vec::new(),
+            anchor: None,
             sync_plan: None,
             sync_only: None,
             confirm_remove: None,
@@ -146,6 +149,7 @@ impl App {
             self.selected = None;
             self.preview = None;
             self.checked.clear();
+            self.anchor = None;
             self.filter = TextEdit::new("");
         }
         self.rescan();
@@ -280,9 +284,54 @@ impl App {
         if let Some(i) = self.checked.iter().position(|n| n == name) {
             self.checked.remove(i);
         } else {
-            self.checked.push(name.to_string());
-            let order: Vec<&str> = self.inv.skills.iter().map(|s| s.name.as_str()).collect();
-            self.checked.sort_by_key(|n| order.iter().position(|o| o == n));
+            self.tick([name.to_string()]);
+        }
+    }
+
+    fn tick(&mut self, names: impl IntoIterator<Item = String>) {
+        for n in names {
+            if !self.is_checked(&n) {
+                self.checked.push(n);
+            }
+        }
+        let order: Vec<&str> = self.inv.skills.iter().map(|s| s.name.as_str()).collect();
+        self.checked.sort_by_key(|n| order.iter().position(|o| o == n));
+    }
+
+    /// A click on a row: Cmd toggles its tick, Shift ticks every shown row from the anchor
+    /// to it, and a plain click opens it in the inspector.
+    pub fn click_row(&mut self, name: &str, mods: rune::Mods) {
+        if mods.shift {
+            self.tick_range(name);
+        } else if mods.cmd {
+            self.toggle_checked(name);
+            self.anchor = Some(name.to_string());
+        } else {
+            self.anchor = Some(name.to_string());
+            self.select(name);
+        }
+    }
+
+    /// A click on a row's checkbox: Shift ticks the range, otherwise it toggles.
+    pub fn click_tick(&mut self, name: &str, mods: rune::Mods) {
+        if mods.shift {
+            self.tick_range(name);
+        } else {
+            self.toggle_checked(name);
+            self.anchor = Some(name.to_string());
+        }
+    }
+
+    /// Ticks the shown rows between the anchor and `name`, both included. Without an anchor
+    /// still on screen, just `name`.
+    fn tick_range(&mut self, name: &str) {
+        let shown: Vec<String> = self.visible().into_iter().map(|i| self.inv.skills[i].name.clone()).collect();
+        let Some(to) = shown.iter().position(|n| n == name) else { return };
+        let from = self.anchor.as_ref().and_then(|a| shown.iter().position(|n| n == a)).unwrap_or(to);
+        let (lo, hi) = (from.min(to), from.max(to));
+        self.tick(shown[lo..=hi].iter().cloned());
+        if self.anchor.is_none() {
+            self.anchor = Some(name.to_string());
         }
     }
 
@@ -292,13 +341,7 @@ impl App {
         if !visible.is_empty() && visible.iter().all(|n| self.is_checked(n)) {
             self.checked.retain(|n| !visible.contains(n));
         } else {
-            for n in visible {
-                if !self.is_checked(&n) {
-                    self.checked.push(n);
-                }
-            }
-            let order: Vec<&str> = self.inv.skills.iter().map(|s| s.name.as_str()).collect();
-            self.checked.sort_by_key(|n| order.iter().position(|o| o == n));
+            self.tick(visible);
         }
     }
 

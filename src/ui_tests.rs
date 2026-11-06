@@ -215,6 +215,50 @@ fn tick_all_follows_the_filter_and_toggles_off() {
     assert!(h.rt.state.checked.is_empty(), "ticks belong to one scope");
 }
 
+impl Harness {
+    fn click_with(&mut self, key: &str, mods: rune::Mods) {
+        self.rt.physical_input(rune::PhysicalInput::Modifiers(mods));
+        self.rt.frame(0.0);
+        self.click(key);
+        self.rt.physical_input(rune::PhysicalInput::Modifiers(rune::Mods::default()));
+        self.rt.frame(0.0);
+    }
+}
+
+#[test]
+fn cmd_click_toggles_and_shift_click_ticks_a_range() {
+    let mut h = three_skills();
+    h.rescan();
+    let cmd = rune::Mods { cmd: true, ..rune::Mods::default() };
+    let shift = rune::Mods { shift: true, ..rune::Mods::default() };
+
+    h.click_with("skill-alpha", cmd);
+    assert_eq!(h.rt.state.checked, ["alpha"]);
+    assert_eq!(h.rt.state.selected, None, "a Cmd-click ticks instead of opening");
+
+    h.click_with("skill-gamma", shift);
+    assert_eq!(h.rt.state.checked, ["alpha", "beta", "gamma"], "Shift extends from the last row clicked");
+
+    h.click_with("skill-beta", cmd);
+    assert_eq!(h.rt.state.checked, ["alpha", "gamma"]);
+
+    // A plain click opens a row and moves the anchor, leaving ticks alone.
+    h.click("skill-review");
+    assert_eq!(h.rt.state.selected.as_deref(), Some("review"));
+    assert_eq!(h.rt.state.checked, ["alpha", "gamma"]);
+    h.click_with("skill-beta", shift);
+    assert_eq!(h.rt.state.checked, ["alpha", "beta", "gamma", "review"]);
+}
+
+#[test]
+fn shift_on_a_checkbox_ticks_a_range_too() {
+    let mut h = three_skills();
+    h.rescan();
+    h.click("check-alpha");
+    h.click_with("check-gamma", rune::Mods { shift: true, ..rune::Mods::default() });
+    assert_eq!(h.rt.state.checked, ["alpha", "beta", "gamma"]);
+}
+
 /// Installs a real skill from skills.sh through its CLI. Needs the network and Node:
 /// `cargo test -- --ignored`.
 #[test]
