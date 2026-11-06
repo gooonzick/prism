@@ -89,15 +89,20 @@ pub fn fetch_manifest(skill: &RemoteSkill) -> Result<String, String> {
     Err("SKILL.md not found in the usual places; open it on skills.sh".into())
 }
 
-/// How to run the `skills` CLI: the first of pnpx, npx and bunx found on `PATH`.
-pub fn runner() -> Option<(PathBuf, Vec<String>)> {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let mut dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
-    // A Finder-launched app gets a short PATH; look where Node usually lives too.
+/// Where Node and its runners live. A Finder-launched app gets a short `PATH`, so the usual
+/// install places are searched too.
+fn search_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
     dirs.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from));
     if let Some(home) = dirs::home_dir() {
-        dirs.extend([".bun/bin", ".volta/bin", ".local/bin"].map(|d| home.join(d)));
+        dirs.extend([".local/share/fnm/aliases/default/bin", ".volta/bin", ".bun/bin", ".local/bin"].map(|d| home.join(d)));
     }
+    dirs
+}
+
+/// How to run the `skills` CLI: the first of pnpx, npx and bunx found.
+pub fn runner() -> Option<(PathBuf, Vec<String>)> {
+    let dirs = search_dirs();
     let find = |exe: &str| dirs.iter().map(|d| d.join(exe)).find(|p| p.is_file());
     if let Some(p) = find("pnpx") {
         return Some((p, vec!["--silent".into(), "skills".into()]));
@@ -211,10 +216,11 @@ pub fn parse_listing(out: &str) -> Vec<(String, String)> {
     skills
 }
 
-/// `PATH` with the runner's folder first, so its `node` is found from a Finder launch.
+/// `PATH` with the runner's folder first, then the usual Node places, so its `node` is
+/// found from a Finder launch.
 fn path_with(dir: Option<&Path>) -> std::ffi::OsString {
     let mut dirs: Vec<PathBuf> = dir.map(Path::to_path_buf).into_iter().collect();
-    dirs.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+    dirs.extend(search_dirs());
     std::env::join_paths(dirs).unwrap_or_default()
 }
 

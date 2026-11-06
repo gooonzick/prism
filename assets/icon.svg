@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b2f3a"/>
+      <stop offset="1" stop-color="#14161c"/>
+    </linearGradient>
+    <linearGradient id="a" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7cc4ff"/>
+      <stop offset="1" stop-color="#3a7bff"/>
+    </linearGradient>
+    <linearGradient id="b" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffb86b"/>
+      <stop offset="1" stop-color="#ff7a45"/>
+    </linearGradient>
+    <linearGradient id="c" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8be0a4"/>
+      <stop offset="1" stop-color="#2fb36b"/>
+    </linearGradient>
+  </defs>
+  <!-- macOS icon grid: an 824 pt squircle-ish tile centred in 1024 -->
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#bg)"/>
+  <rect x="100.5" y="100.5" width="823" height="823" rx="185.5" fill="none" stroke="#ffffff" stroke-opacity="0.08"/>
+  <!-- Three skill cards, one per agent, stacked and fanned -->
+  <g transform="translate(512 520)">
+    <rect x="-190" y="-215" width="300" height="370" rx="44" fill="url(#c)" transform="rotate(-14)" opacity="0.92"/>
+    <rect x="-150" y="-200" width="300" height="370" rx="44" fill="url(#b)" transform="rotate(-2)" opacity="0.95"/>
+    <rect x="-110" y="-185" width="300" height="370" rx="44" fill="url(#a)" transform="rotate(10)"/>
+    <g transform="rotate(10) translate(40 0)" fill="none" stroke="#0b1530" stroke-opacity="0.55" stroke-width="22" stroke-linecap="round">
+      <path d="M-70 -95 H70"/>
+      <path d="M-70 -35 H40"/>
+      <path d="M-70 25 H70"/>
+      <path d="M-70 85 H10"/>
+    </g>
+  </g>
+</svg>
