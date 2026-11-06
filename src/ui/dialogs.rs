@@ -1,11 +1,51 @@
 //! Modal dialogs: the sync preview and the remove confirmation.
 
-use rune::{El, ScrollSpec, col, row, text};
-use rune_kit::{Button, ButtonVariant, Checkbox, Dialog, Kit};
+use rune::{El, ScrollSpec, col, icon, row, text};
+use rune_kit::{Button, ButtonVariant, Checkbox, Dialog, Kit, glyphs};
 
-use super::{dot, heading};
+use super::heading;
 use crate::agents::{AGENTS, CANONICAL};
 use crate::app::App;
+use crate::sync::Action;
+
+/// The plan's actions per skill, in order, each as a short phrase; links to several agents
+/// collapse into one phrase.
+fn group_actions(actions: &[Action], targets: usize) -> Vec<(String, Vec<String>)> {
+    let mut groups: Vec<(String, Vec<String>, Vec<&str>)> = Vec::new();
+    for a in actions {
+        let (skill, phrase, link) = match a {
+            Action::Adopt { skill, from } => (skill, Some(format!("move into .agents from {}", AGENTS[*from].name)), None),
+            Action::AdoptLink { skill, from } => (skill, Some(format!("point .agents where {} links", AGENTS[*from].name)), None),
+            Action::Link { skill, agent } => (skill, None, Some(AGENTS[*agent].name)),
+            Action::Replace { skill, agent } => (skill, Some(format!("replace {}'s copy with a link", AGENTS[*agent].name)), None),
+        };
+        if groups.last().is_none_or(|g| &g.0 != skill) {
+            groups.push((skill.clone(), Vec::new(), Vec::new()));
+        }
+        let g = groups.last_mut().unwrap();
+        g.1.extend(phrase);
+        g.2.extend(link);
+    }
+    groups
+        .into_iter()
+        .map(|(skill, mut phrases, links)| {
+            match links.len() {
+                0 => {}
+                n if n == targets && n > 2 => phrases.push(format!("link into all {n} agents")),
+                _ => phrases.push(format!("link into {}", links.join(", "))),
+            }
+            (skill, phrases)
+        })
+        .collect()
+}
+
+fn changes_heading(changes: usize, skills: usize) -> String {
+    match (changes, skills) {
+        (0, _) => "Changes".into(),
+        (c, 1) => format!("{c} change{} to 1 skill", if c == 1 { "" } else { "s" }),
+        (c, n) => format!("{c} changes to {n} skills"),
+    }
+}
 
 pub fn sync(s: &App, k: &Kit, layer: &mut Vec<El>) {
     let Some(plan) = &s.sync_plan else { return };
@@ -25,21 +65,40 @@ pub fn sync(s: &App, k: &Kit, layer: &mut Vec<El>) {
         agents = agents.child(cb.build(k).key(format!("target-{}", agent.id)));
     }
 
-    let mut changes = col().key("sync-changes").gap(6.0).w_full();
+    let linkable = targets.iter().filter(|&&t| !s.inv.shares_canonical[t]).count();
+    let groups = group_actions(&plan.actions, linkable);
+    let mut changes = col().key("sync-changes").gap(10.0).w_full();
     if plan.is_empty() {
         changes = changes.child(text("Everything is in sync.").font(k.ty.small).color(k.c.text_muted));
     }
-    for a in &plan.actions {
-        changes = changes.child(row().gap(8.0).center_y().child(dot(k.c.success.icon)).child(text(a.describe()).font(k.ty.small).color(k.c.text_base).wrap()));
-    }
-    for c in &plan.conflicts {
+    for (skill, parts) in &groups {
         changes = changes.child(
-            row()
-                .gap(8.0)
-                .center_y()
-                .child(dot(k.c.warning.icon))
-                .child(text(format!("Skipped {}: {}", c.skill, c.reason)).font(k.ty.small).color(k.c.text_muted).wrap()),
+            col()
+                .w_full()
+                .gap(2.0)
+                .child(text(skill.clone()).font(k.ty.small_medium).color(k.c.text_base))
+                .child(text(parts.join(" · ")).font(k.ty.small).color(k.c.text_muted).wrap()),
         );
+    }
+    if !plan.conflicts.is_empty() {
+        changes = changes.child(heading(&format!("Skipped ({})", plan.conflicts.len()), k));
+        for c in &plan.conflicts {
+            changes = changes.child(
+                row()
+                    .w_full()
+                    .gap(8.0)
+                    .items_start()
+                    .child(icon(&glyphs::CIRCLE_X, 14.0).color(k.c.warning.icon))
+                    .child(
+                        col()
+                            .grow(1.0)
+                            .min_w(0.0)
+                            .gap(2.0)
+                            .child(text(c.skill.clone()).font(k.ty.small_medium).color(k.c.text_base))
+                            .child(text(c.reason.clone()).font(k.ty.small).color(k.c.text_muted).wrap()),
+                    ),
+            );
+        }
     }
 
     let n = plan.actions.len();
@@ -65,7 +124,7 @@ pub fn sync(s: &App, k: &Kit, layer: &mut Vec<El>) {
                 .grow(1.0)
                 .min_w(0.0)
                 .gap(6.0)
-                .child(heading("Changes", k))
+                .child(heading(&changes_heading(plan.actions.len(), groups.len()), k))
                 .child(col().w_full().h(260.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(changes)),
         );
     let title = match s.sync_only.as_deref() {

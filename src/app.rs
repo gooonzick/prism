@@ -47,6 +47,8 @@ pub struct App {
     pub preview: Option<String>,
     /// Skills ticked for a bulk sync or remove, in inventory order.
     pub checked: Vec<String>,
+    /// The inspector lists every agent, not only the relevant ones.
+    pub show_all_agents: bool,
     /// The row a Shift-click extends from: the last one clicked without Shift.
     pub anchor: Option<String>,
     /// The open sync dialog's plan.
@@ -90,6 +92,7 @@ impl App {
             preview: None,
             checked: Vec::new(),
             anchor: None,
+            show_all_agents: false,
             sync_plan: None,
             sync_only: None,
             confirm_remove: None,

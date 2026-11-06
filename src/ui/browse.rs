@@ -115,7 +115,7 @@ fn result_row(s: &App, skill: &RemoteSkill, k: &Kit) -> El {
         .child(text(skill.name.clone()).font(k.ty.ui_medium).color(k.c.text_base).truncate())
         .child(text(skill.source.clone()).font(k.ty.small).color(k.c.text_muted).truncate());
     if s.installed_in(&skill.name) {
-        info = info.child(row().child(Badge::new("installed").variant(BadgeVariant::Accent).build(k)));
+        info = info.child(row().child(Badge::new("installed").variant(BadgeVariant::Subtle).build(k)));
     }
     let r = row()
         .key(format!("result-{}", skill.id))

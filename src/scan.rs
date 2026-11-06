@@ -28,10 +28,10 @@ impl Placement {
 
     pub fn label(&self) -> &'static str {
         match self {
-            Placement::Missing => "not installed",
-            Placement::Dir => "folder",
-            Placement::Linked => "linked to .agents",
-            Placement::Link(_) => "linked elsewhere",
+            Placement::Missing => "not linked",
+            Placement::Dir => "its own copy",
+            Placement::Linked => "linked",
+            Placement::Link(_) => "links elsewhere",
             Placement::Broken(_) => "broken link",
         }
     }

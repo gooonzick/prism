@@ -3,11 +3,11 @@
 use rune::{Color, El, Tx, col, row, text};
 use rune_kit::shell::Toolbar;
 use rune_kit::{
-    Badge, BadgeVariant, Button, ButtonVariant, Checkbox, ControlSize, Divider, IconButton, IconButtonVariant, Kit, Markdown, Switch, TextInput,
+    Button, ButtonVariant, Checkbox, ControlSize, Divider, IconButton, IconButtonVariant, Kit, Markdown, Switch, TextInput,
     glyphs,
 };
 
-use super::{REFRESH, SYNC, dot, empty, field, heading, inspector_body, mono, row_gap, scroll_pane};
+use super::{REFRESH, SYNC, dot, empty, field, heading, inspector_body, mono, scroll_pane};
 use crate::agents::{AGENTS, CANONICAL, Scope, tilde};
 use crate::app::App;
 use crate::scan::{Placement, Skill};
@@ -35,14 +35,19 @@ pub fn page(s: &App, k: &Kit, _layer: &mut Vec<El>) -> (El, Toolbar, El) {
                     .key("rescan"),
             )
             .child(
-                Button::new(if unsynced == 0 { "Sync".to_string() } else { format!("Sync {unsynced}") })
-                    .icon(&SYNC)
-                    .variant(if unsynced == 0 { ButtonVariant::Ghost } else { ButtonVariant::Contrast })
-                    .control_size(ControlSize::Regular)
-                    .help("Link every skill from .agents into the selected agents")
-                    .on_press(|s: &mut App| s.open_sync())
-                    .build(k)
-                    .key("sync"),
+                Button::new(match unsynced {
+                    0 => "Sync".to_string(),
+                    1 => "Sync 1 skill".to_string(),
+                    n => format!("Sync {n} skills"),
+                })
+                .icon(&SYNC)
+                // The one primary action, unless skills are ticked: then the bulk bar's is.
+                .variant(if unsynced == 0 || !s.checked.is_empty() { ButtonVariant::Ghost } else { ButtonVariant::Contrast })
+                .control_size(ControlSize::Regular)
+                .help("Link every skill from .agents into your sync targets")
+                .on_press(|s: &mut App| s.open_sync())
+                .build(k)
+                .key("sync"),
             ),
     );
 
@@ -119,20 +124,12 @@ fn list_header(s: &App, visible: &[usize], summary: String, filter: El, k: &Kit)
             .child(
                 Button::new(format!("Sync {n}"))
                     .icon(&SYNC)
-                    .variant(ButtonVariant::Outline)
+                    .variant(ButtonVariant::Contrast)
                     .control_size(ControlSize::Small)
                     .help("Sync only the selected skills")
                     .on_press(|s: &mut App| s.open_sync_checked())
                     .build(k)
                     .key("bulk-sync"),
-            )
-            .child(
-                Button::new(format!("Remove {n}…"))
-                    .variant(ButtonVariant::Danger)
-                    .control_size(ControlSize::Small)
-                    .on_press(|s: &mut App| s.confirm_remove_checked())
-                    .build(k)
-                    .key("bulk-remove"),
             )
             .child(
                 Button::new("Clear")
@@ -143,13 +140,36 @@ fn list_header(s: &App, visible: &[usize], summary: String, filter: El, k: &Kit)
                     .build(k)
                     .key("bulk-clear"),
             )
+            .child(row().grow(1.0))
+            .child(
+                Button::new(format!("Remove {n}…"))
+                    .variant(ButtonVariant::Danger)
+                    .control_size(ControlSize::Small)
+                    .on_press(|s: &mut App| s.confirm_remove_checked())
+                    .build(k)
+                    .key("bulk-remove"),
+            )
     };
     row().w_full().h(36.0).px(12.0).gap(12.0).center_y().child(all).child(middle).child(filter)
 }
 
-/// The agents a row shows chips for: `.agents` and every agent that has it.
+/// The agents a row shows chips for: every agent that has it, `.agents` first.
 fn shown_agents(skill: &Skill) -> Vec<usize> {
-    (0..AGENTS.len()).filter(|&a| a == CANONICAL || skill.placements[a] != Placement::Missing).collect()
+    (0..AGENTS.len()).filter(|&a| skill.placements[a] != Placement::Missing).collect()
+}
+
+/// A skill's sync state in a few words, its colour, and the detail for its tooltip.
+fn sync_status(skill: &Skill, targets: &[usize], k: &Kit) -> (String, Color, String) {
+    let missing: Vec<&str> = targets.iter().filter(|&&t| skill.placements[t] == Placement::Missing).map(|&t| AGENTS[t].name).collect();
+    match skill.canonical() {
+        Placement::Broken(_) => ("broken in .agents".into(), k.c.danger.icon, "Its .agents entry is a link to nothing".into()),
+        Placement::Missing if !skill.placements.iter().any(Placement::present) => {
+            ("broken links".into(), k.c.danger.icon, "Every copy is a link to nothing".into())
+        }
+        Placement::Missing => ("not in .agents".into(), k.c.warning.icon, "Sync moves it into .agents and links it back".into()),
+        _ if missing.is_empty() => ("synced".into(), k.c.success.icon, "Linked into every sync target".into()),
+        _ => (format!("{} to link", missing.len()), k.c.text_faint, format!("Not linked into {}", missing.join(", "))),
+    }
 }
 
 fn skill_row(s: &App, skill: &Skill, targets: &[usize], k: &Kit) -> El {
@@ -167,19 +187,16 @@ fn skill_row(s: &App, skill: &Skill, targets: &[usize], k: &Kit) -> El {
     for a in shown_agents(skill) {
         chips = chips.child(chip(AGENTS[a].short, &skill.placements[a], s.inv.shares_canonical[a], k));
     }
-    let missing: Vec<&str> = targets.iter().filter(|&&t| skill.placements[t] == Placement::Missing).map(|&t| AGENTS[t].name).collect();
-    if !missing.is_empty() {
-        chips = chips.child(
-            row()
-                .h(20.0)
-                .px(6.0)
-                .center_y()
-                .radius(k.radius.sm)
-                .border(1.0, k.c.border_weak)
-                .help(format!("Not in {}", missing.join(", ")))
-                .child(text(format!("+{} missing", missing.len())).font(k.ty.small).color(k.c.text_faint)),
-        );
-    }
+    let (status, color, why) = sync_status(skill, targets, k);
+    let status = row()
+        .key("status")
+        .w(104.0)
+        .gap(6.0)
+        .center_y()
+        .justify_end()
+        .help(why)
+        .child(dot(color))
+        .child(text(status).font(k.ty.small).color(k.c.text_muted));
     let mut info = col().gap(2.0).grow(1.0).min_w(120.0).child(text(skill.name.clone()).font(k.ty.ui_medium).color(k.c.text_base).truncate());
     if !skill.description.is_empty() {
         info = info.child(text(skill.description.clone()).font(k.ty.small).color(k.c.text_muted).truncate());
@@ -198,7 +215,8 @@ fn skill_row(s: &App, skill: &Skill, targets: &[usize], k: &Kit) -> El {
         .on_press_tx(move |s: &mut App, tx: &mut Tx| s.click_row(&name, tx.mods()))
         .child(tick)
         .child(info)
-        .child(chips);
+        .child(chips)
+        .child(status);
     match (selected, ticked) {
         (true, _) => r.fill(k.c.layer_02),
         (false, true) => r.fill(k.c.layer_01).hover(k.c.hover),
@@ -216,25 +234,25 @@ fn placement_color(p: &Placement, k: &Kit) -> Option<Color> {
     }
 }
 
+/// Where an agent has the skill: a quiet label, with a dot for how.
 fn chip(label: &str, p: &Placement, shared: bool, k: &Kit) -> El {
-    let present = p.present() || matches!(p, Placement::Broken(_));
     let mut c = row()
         .h(20.0)
         .px(6.0)
         .gap(4.0)
         .center_y()
         .radius(k.radius.sm)
-        .border(1.0, if present { k.c.border_base } else { k.c.border_weak })
+        .border(1.0, k.c.border_weak)
         .help(format!("{label}: {}", if shared { "same folder as .agents" } else { p.label() }));
     if let Some(color) = placement_color(p, k) {
         c = c.child(dot(color));
     }
-    c.child(text(label.to_string()).font(k.ty.small).color(if present { k.c.text_base } else { k.c.text_faint }))
+    c.child(text(label.to_string()).font(k.ty.small).color(k.c.text_muted))
 }
 
 fn details(s: &App, k: &Kit) -> El {
     let Some(skill) = s.selected.as_deref().and_then(|n| s.inv.get(n)) else {
-        return inspector_body(k).child(empty("No skill selected", "Pick one to see where it's installed.", k));
+        return inspector_body(k).child(empty("No skill selected", "Click a skill to see where it's installed and change it.", k));
     };
     let mut body = inspector_body(k).child(text(skill.name.clone()).font(k.ty.body_medium).color(k.c.text_base).wrap());
     if !skill.description.is_empty() {
@@ -244,12 +262,17 @@ fn details(s: &App, k: &Kit) -> El {
         body = body.child(field("Folder", mono(tilde(src, &s.paths), k), k));
     }
 
+    // Reveal on the left, the destructive action apart from it on the right.
     let (reveal, remove) = (skill.source.clone(), skill.name.clone());
     body = body.child(
-        row_gap()
+        row()
+            .w_full()
+            .center_y()
+            .justify_between()
             .child(
                 Button::new("Reveal in Finder")
                     .variant(ButtonVariant::Outline)
+                    .control_size(ControlSize::Small)
                     .disabled(reveal.is_none())
                     .on_press(move |_: &mut App| {
                         if let Some(p) = &reveal {
@@ -262,14 +285,39 @@ fn details(s: &App, k: &Kit) -> El {
             .child(
                 Button::new("Remove…")
                     .variant(ButtonVariant::Danger)
+                    .control_size(ControlSize::Small)
                     .on_press(move |s: &mut App| s.confirm_remove = Some(vec![remove.clone()]))
                     .build(k)
                     .key("remove"),
             ),
     );
-    let mut agents = col().key("placements").w_full().gap(10.0).child(heading("Agents", k));
-    for a in 0..AGENTS.len() {
+
+    // The agents that matter here: .agents, the sync targets and any that has the skill.
+    let targets = s.targets();
+    let (shown, hidden): (Vec<usize>, Vec<usize>) =
+        (0..AGENTS.len()).partition(|&a| a == CANONICAL || targets.contains(&a) || skill.placements[a] != Placement::Missing);
+    let mut agents = col().key("placements").w_full().gap(12.0).child(heading("Agents", k));
+    for &a in &shown {
         agents = agents.child(placement_row(s, skill, a, k));
+    }
+    if !hidden.is_empty() {
+        if s.show_all_agents {
+            for &a in &hidden {
+                agents = agents.child(placement_row(s, skill, a, k));
+            }
+        }
+        let label = if s.show_all_agents { "Show fewer agents".to_string() } else { format!("Show {} more agents", hidden.len()) };
+        // A text control, so it lines up with the agent names above it.
+        agents = agents.child(
+            row()
+                .key("more-agents")
+                .role("button")
+                .label(label.clone())
+                .focusable(true)
+                .cursor(rune::Cursor::Pointer)
+                .on_press(|s: &mut App| s.show_all_agents = !s.show_all_agents)
+                .child(text(label).font(k.ty.small_medium).color(k.c.text_muted)),
+        );
     }
     body = body.child(agents);
 
@@ -290,35 +338,35 @@ fn placement_row(s: &App, skill: &Skill, a: usize, k: &Kit) -> El {
     let agent = &AGENTS[a];
     let p = &skill.placements[a];
     let shared = s.inv.shares_canonical[a];
-    let mut label = col()
-        .gap(1.0)
+    let status = match (a == CANONICAL, p) {
+        _ if shared => "same folder as .agents",
+        (true, Placement::Dir | Placement::Link(_)) => "the skill's home",
+        (true, Placement::Missing) => "not here yet",
+        _ => p.label(),
+    };
+    let mut title = row().gap(6.0).center_y().child(text(agent.name).font(k.ty.ui_medium).color(k.c.text_base));
+    if let Some(c) = placement_color(p, k) {
+        title = title.child(dot(c));
+    }
+    let label = col()
+        .gap(2.0)
         .grow(1.0)
         .min_w(0.0)
-        .child(
-            row()
-                .gap(6.0)
-                .center_y()
-                .child(text(agent.name).font(k.ty.ui_medium).color(k.c.text_base))
-                .child(match placement_color(p, k) {
-                    Some(c) => dot(c),
-                    None => row(),
-                }),
-        )
-        .child(text(agent.dir_label(&s.inv.scope, &s.paths)).font(k.ty.small).color(k.c.text_faint).truncate());
-    let status = if shared { "same folder as .agents".to_string() } else { p.label().to_string() };
-    label = label.child(text(status).font(k.ty.small).color(k.c.text_muted));
+        .child(title)
+        .child(text(format!("{} · {status}", agent.dir_label(&s.inv.scope, &s.paths))).font(k.ty.small).color(k.c.text_faint).truncate());
 
     let name = skill.name.clone();
     let control: El = if a == CANONICAL {
-        if p.present() {
-            Badge::new("source").variant(BadgeVariant::Subtle).build(k)
+        if p.present() || matches!(p, Placement::Broken(_)) {
+            row()
         } else {
-            Button::new("Move here")
+            Button::new("Move into .agents")
                 .variant(ButtonVariant::Outline)
                 .control_size(ControlSize::Small)
-                .help("Move the agent's copy into .agents and link it back")
+                .help("Move the agent's copy into .agents and leave a link behind")
                 .on_press(move |s: &mut App| s.replace_with_link(&name, CANONICAL))
                 .build(k)
+                .key("adopt")
         }
     } else if shared {
         row()
@@ -326,11 +374,12 @@ fn placement_row(s: &App, skill: &Skill, a: usize, k: &Kit) -> El {
         let other = name.clone();
         row()
             .gap(4.0)
+            .center_y()
             .child(
-                Button::new("Link")
+                Button::new("Use link")
                     .variant(ButtonVariant::Outline)
                     .control_size(ControlSize::Small)
-                    .help("Replace this copy with a link to .agents (the copy goes to the trash)")
+                    .help("Replace this copy with a link to .agents; the copy goes to the trash")
                     .on_press(move |s: &mut App| s.replace_with_link(&name, a))
                     .build(k),
             )
@@ -343,7 +392,11 @@ fn placement_row(s: &App, skill: &Skill, a: usize, k: &Kit) -> El {
                     .build(k),
             )
     } else {
-        Switch::new(matches!(p, Placement::Linked | Placement::Link(_)))
+        let switch = Switch::new(matches!(p, Placement::Linked | Placement::Link(_)));
+        // Off, the compact switch vanishes on a light pane and the standard one on a dark
+        // pane; each theme gets the one that stays visible.
+        let switch = if k.dark { switch } else { switch.standard() };
+        switch
             .label(format!("Link {} into {}", skill.name, agent.name))
             .hide_label()
             .on_toggle(move |s: &mut App| s.toggle_link(&name, a))
