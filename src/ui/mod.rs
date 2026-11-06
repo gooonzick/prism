@@ -3,6 +3,7 @@
 
 mod browse;
 mod dialogs;
+mod inspector;
 mod installed;
 
 use rune::{Chrome, Color, Cx, El, Icon, KeyEvent, ScrollSpec, Spring, Tx, col, el, row, text};
@@ -38,6 +39,12 @@ pub static SYNC: Icon = Icon {
     body: r#"<path d="M3 6.5H12L9.5 4M13 9.5H4L6.5 12" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#,
 };
 
+pub static UPDATE: Icon = Icon {
+    name: "se-update",
+    view: 16.0,
+    body: r#"<path d="M8 10.5V3.5M5 6.5L8 3.5L11 6.5M3.5 12.5H12.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#,
+};
+
 pub fn chrome() -> Chrome {
     Chrome { full_size_content: true, traffic_lights: Some((16.0, 25.0)), drag_regions: true }
 }
@@ -51,10 +58,16 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     };
     dialogs::sync(s, &k, &mut layer);
     dialogs::remove(s, &k, &mut layer);
+    dialogs::copy(s, &k, &mut layer);
+    dialogs::new_skill(s, &k, &mut layer);
+    dialogs::found(s, &k, &mut layer);
     if let Some(n) = &s.notice {
         let mut toast = Toast::new("notice", n.title.clone()).closable().on_close(|s: &mut App| s.notice = None);
         if !n.detail.is_empty() {
             toast = toast.description(n.detail.clone());
+        }
+        if n.undo {
+            toast = toast.action(&k, "Undo", false, |s: &mut App, _: &mut Tx| s.undo());
         }
         toast = toast.icon(&k, if n.error { &glyphs::CIRCLE_X } else { &glyphs::CHECK });
         layer.push(ToastRegion::new().toast(toast.build(&k)).build(&k));
@@ -76,9 +89,12 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
 
 fn sidebar(s: &App, k: &Kit) -> El {
     let installed = s.page == Page::Installed;
-    let global = SidebarRow::new("Global")
-        .icon(&HOME)
-        .detail("~")
+    // The badge counts what needs attention: skills not linked into every target.
+    let counted = |row: SidebarRow, scope: &Scope| {
+        let stats = s.stats.get(scope).copied().unwrap_or_default();
+        if stats.unsynced > 0 { row.badge(stats.unsynced.to_string()) } else { row }
+    };
+    let global = counted(SidebarRow::new("Global").icon(&HOME), &Scope::Global)
         .height(32.0)
         .selected(installed && s.scope == Scope::Global)
         .on_select(|s: &mut App, _| s.open_scope(Scope::Global))
@@ -93,9 +109,12 @@ fn sidebar(s: &App, k: &Kit) -> El {
         .key("browse");
     let projects = s.settings.projects.iter().enumerate().map(|(i, p)| {
         let (open, forget) = (p.clone(), p.clone());
-        SidebarRow::new(Scope::Project(p.clone()).title())
+        counted(SidebarRow::new(Scope::Project(p.clone()).title()), &Scope::Project(p.clone()))
             .icon(&glyphs::FOLDER)
-            .subtitle(tilde(p.parent().unwrap_or(p), &s.paths))
+            .subtitle({
+                let n = s.stats.get(&Scope::Project(p.clone())).map_or(0, |x| x.total);
+                format!("{} · {n} skill{}", tilde(p.parent().unwrap_or(p), &s.paths), if n == 1 { "" } else { "s" })
+            })
             .height(40.0)
             .selected(installed && s.scope == Scope::Project(p.clone()))
             .on_select(move |s: &mut App, _| s.open_scope(Scope::Project(open.clone())))
@@ -116,6 +135,27 @@ fn sidebar(s: &App, k: &Kit) -> El {
         })
         .build(k)
         .key("add-project");
+    let find = SidebarRow::new(if s.discovering { "Finding projects…" } else { "Find projects…" })
+        .icon(&glyphs::SEARCH)
+        .height(32.0)
+        .on_select(|s: &mut App, tx: &mut Tx| {
+            if s.discovering {
+                return;
+            }
+            let dev = s.paths.home.join("Development");
+            let options = rune::FileDialogOptions {
+                title: "Look for projects with skills in…".into(),
+                directory: Some(if dev.is_dir() { dev } else { s.paths.home.clone() }),
+                ..Default::default()
+            };
+            tx.open_folder(options, |s: &mut App, result, _| match result {
+                Ok(Some(dir)) => s.discover_in(dir),
+                Ok(None) => {}
+                Err(e) => s.notify("Couldn't open the folder picker".into(), e.to_string(), true),
+            });
+        })
+        .build(k)
+        .key("find-projects");
     Sidebar::new()
         .label("Scopes")
         .inset(0.0)
@@ -124,7 +164,7 @@ fn sidebar(s: &App, k: &Kit) -> El {
         .row_gap(2.0)
         .header(global)
         .header(browse)
-        .section(SidebarSection::new("Projects").key("projects").count(s.settings.projects.len()).rows(projects).row(add))
+        .section(SidebarSection::new("Projects").key("projects").count(s.settings.projects.len()).rows(projects).row(add).row(find))
         .build(k)
 }
 
@@ -152,7 +192,7 @@ pub fn empty(title: &str, detail: &str, k: &Kit) -> El {
         .child(text(detail.to_string()).font(k.ty.small).color(k.c.text_faint).wrap())
 }
 
-pub fn on_key(s: &mut App, ev: &KeyEvent, _: &mut Tx) -> bool {
+pub fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if shell::is_sidebar_toggle(ev) {
         s.sidebar.toggle();
         return true;
@@ -163,6 +203,30 @@ pub fn on_key(s: &mut App, ev: &KeyEvent, _: &mut Tx) -> bool {
     }
     if ev.is_command('a') && s.page == Page::Installed && !s.filter.focused {
         s.toggle_all_visible();
+        return true;
+    }
+    if ev.is_command('z') && s.last_change.is_some() {
+        s.undo();
+        return true;
+    }
+    if ev.is_command('n') && s.page == Page::Installed {
+        s.open_new_skill();
+        return true;
+    }
+    let in_list = s.page == Page::Installed && !s.filter.focused && s.sync_plan.is_none() && s.confirm_remove.is_none();
+    if in_list && matches!(ev.key, rune::Key::Up | rune::Key::Down) && !ev.mods.cmd {
+        let delta = if ev.key == rune::Key::Down { 1 } else { -1 };
+        if let Some(key) = s.step_selection(delta, ev.mods.shift) {
+            tx.scroll_into_view(&key);
+        }
+        return true;
+    }
+    if in_list
+        && ev.key == rune::Key::Text(" ".into())
+        && !ev.mods.cmd
+        && let Some(name) = s.selected.clone()
+    {
+        s.toggle_checked(&name);
         return true;
     }
     if ev.is_command('r') {

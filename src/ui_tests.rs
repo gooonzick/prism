@@ -33,6 +33,7 @@ impl Harness {
         app.add_project(project);
         let env = Env { system_dark: false, scale: 2.0 };
         let mut rt = Runtime::new(app, crate::ui::view, (1180.0, 760.0), env);
+        rt.on_key = Some(crate::ui::on_key);
         rt.frame(0.0);
         Harness { _home: home, root, rt }
     }
@@ -257,6 +258,132 @@ fn shift_on_a_checkbox_ticks_a_range_too() {
     h.click("check-alpha");
     h.click_with("check-gamma", rune::Mods { shift: true, ..rune::Mods::default() });
     assert_eq!(h.rt.state.checked, ["alpha", "beta", "gamma"]);
+}
+
+fn key(h: &mut Harness, key: rune::Key, mods: rune::Mods) {
+    h.rt.key(rune::KeyEvent { key, mods });
+    h.settle();
+}
+
+#[test]
+fn status_filters_and_broken_link_cleanup_with_undo() {
+    let mut h = three_skills();
+    let claude = h.project_dir().join(".claude/skills");
+    std::os::unix::fs::symlink("/nowhere/gone", claude.join("gone")).unwrap();
+    h.rescan();
+    h.rt.update(|s, _| s.set_status_filter(crate::app::Filter::Broken));
+    h.settle();
+    assert_eq!(h.rt.state.visible().len(), 1);
+    assert!(h.rt.find("skill-gone").is_some() && h.rt.find("skill-alpha").is_none());
+
+    h.click("clean-broken");
+    assert!(h.rt.state.inv.get("gone").is_none());
+    assert_eq!(h.rt.state.status_filter, crate::app::Filter::All, "the filter it emptied lets go");
+    assert!(h.rt.state.notice.as_ref().is_some_and(|n| n.undo));
+
+    key(&mut h, rune::Key::Command('z'), rune::Mods { cmd: true, ..rune::Mods::default() });
+    assert!(h.rt.state.inv.get("gone").is_some(), "Undo puts the link back");
+}
+
+#[test]
+fn a_sync_is_undone_in_one_step() {
+    let mut h = Harness::project();
+    h.click("sync");
+    h.click("sync-apply");
+    assert_eq!(h.placement("review", "codex"), Placement::Linked);
+    h.rt.update(|s, _| s.undo());
+    h.settle();
+    assert_eq!(h.placement("review", "agents"), Placement::Missing);
+    assert_eq!(h.placement("review", "claude"), Placement::Dir);
+    assert_eq!(h.placement("review", "codex"), Placement::Missing);
+    assert!(h.rt.state.last_change.is_none());
+}
+
+#[test]
+fn copy_a_project_skill_to_global() {
+    let mut h = Harness::project();
+    h.click("skill-review");
+    h.click("copy");
+    assert!(h.rt.state.copy_dialog.is_some());
+    h.click("copy-to-0");
+    assert!(h.root.join(".agents/skills/review/SKILL.md").is_file());
+    assert_eq!(fs::read_link(h.root.join(".claude/skills/review")).unwrap(), PathBuf::from("../../.agents/skills/review"));
+    assert_eq!(h.rt.state.stats[&Scope::Global].total, 1);
+    assert!(h.project_dir().join(".claude/skills/review/SKILL.md").is_file(), "the original stays");
+
+    h.click("scope-global");
+    h.click("project-0");
+    assert!(h.rt.find("shadow-tag").is_some(), "the project copy is marked as also global");
+}
+
+#[test]
+fn a_new_skill_is_written_linked_and_selected() {
+    let mut h = Harness::project();
+    h.click("new-skill");
+    h.rt.update(|s, _| {
+        let f = s.new_skill.as_mut().unwrap();
+        f.name = rune::TextEdit::new("Bad Name");
+    });
+    h.click("new-create");
+    assert!(h.rt.state.new_skill.as_ref().unwrap().error.is_some());
+
+    h.rt.update(|s, _| {
+        let f = s.new_skill.as_mut().unwrap();
+        f.name = rune::TextEdit::new("pdf-tools");
+        f.description = rune::TextEdit::new("Use when: working with PDFs");
+    });
+    h.click("new-create");
+    assert!(h.rt.state.new_skill.is_none());
+    let md = fs::read_to_string(h.project_dir().join(".agents/skills/pdf-tools/SKILL.md")).unwrap();
+    assert_eq!(crate::skill::parse(&md).description.as_deref(), Some("Use when: working with PDFs"));
+    assert_eq!(h.placement("pdf-tools", "claude"), Placement::Linked);
+    assert_eq!(h.rt.state.selected.as_deref(), Some("pdf-tools"));
+}
+
+#[test]
+fn arrows_move_the_selection_and_space_ticks() {
+    let mut h = three_skills();
+    h.rescan();
+    let none = rune::Mods::default();
+    key(&mut h, rune::Key::Down, none);
+    assert_eq!(h.rt.state.selected.as_deref(), Some("alpha"));
+    key(&mut h, rune::Key::Down, none);
+    assert_eq!(h.rt.state.selected.as_deref(), Some("beta"));
+    key(&mut h, rune::Key::Text(" ".into()), none);
+    assert_eq!(h.rt.state.checked, ["beta"]);
+    key(&mut h, rune::Key::Down, rune::Mods { shift: true, ..none });
+    assert_eq!(h.rt.state.checked, ["beta", "gamma"]);
+    key(&mut h, rune::Key::Up, none);
+    key(&mut h, rune::Key::Up, none);
+    key(&mut h, rune::Key::Up, none);
+    assert_eq!(h.rt.state.selected.as_deref(), Some("alpha"), "it stops at the top");
+}
+
+#[test]
+fn found_projects_are_added_as_ticked() {
+    let mut h = Harness::project();
+    let (a, b) = (h.root.join("dev/a"), h.root.join("dev/b"));
+    h.rt.update(move |s, _| s.land_discovery_for_test(a, b));
+    h.settle();
+    assert!(h.rt.find("found-dialog").is_some() || h.rt.state.found.is_some());
+    h.click("found-1");
+    h.click("found-add");
+    assert_eq!(h.rt.state.settings.projects.len(), 2, "the project already listed, plus the one left ticked");
+}
+
+#[test]
+fn updates_show_as_tags_and_a_filter() {
+    let mut h = three_skills();
+    h.rescan();
+    let scope = h.rt.state.scope.clone();
+    h.rt.update(move |s, _| s.updates.insert(scope, vec!["beta".into()]).map(|_| ()).unwrap_or(()));
+    h.settle();
+    assert_eq!(h.rt.state.filter_count(crate::app::Filter::Updates), 1);
+    assert!(h.rt.find("update-tag").is_some(), "beta wears an update tag");
+    h.click("check-beta");
+    assert!(h.rt.find("bulk-update").is_some());
+    h.click("skill-beta");
+    assert!(h.rt.find("update-banner").is_some());
 }
 
 /// Installs a real skill from skills.sh through its CLI. Needs the network and Node:

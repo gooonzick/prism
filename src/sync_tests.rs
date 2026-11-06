@@ -3,6 +3,10 @@ use crate::agents::index_of;
 use crate::scan::scan;
 use std::os::unix::fs::symlink;
 
+fn run(scope: &Scope, paths: &Paths, actions: &[Action]) -> Result<usize, (usize, String)> {
+    apply(scope, paths, actions, &mut Journal::default())
+}
+
 struct Fixture {
     home: tempfile::TempDir,
     paths: Paths,
@@ -53,7 +57,7 @@ fn sync_adopts_a_lone_copy_and_links_it_everywhere() {
             Action::Link { skill: "alpha".into(), agent: index_of("opencode").unwrap() },
         ]
     );
-    assert_eq!(apply(&Scope::Global, &f.paths, &plan.actions), Ok(3));
+    assert_eq!(run(&Scope::Global, &f.paths, &plan.actions), Ok(3));
 
     assert_eq!(f.placement("alpha", "agents"), Placement::Dir);
     for agent in ["claude", "codex", "opencode"] {
@@ -78,7 +82,7 @@ fn identical_copies_become_links_and_different_ones_are_conflicts() {
     assert_eq!(plan.conflicts.len(), 1);
     assert_eq!(plan.conflicts[0].skill, "diff");
 
-    apply(&Scope::Global, &f.paths, &plan.actions).unwrap();
+    run(&Scope::Global, &f.paths, &plan.actions).unwrap();
     assert_eq!(f.placement("same", "codex"), Placement::Linked);
     assert!(f.paths.home.join(".Trash/same/SKILL.md").is_file() || !cfg!(target_os = "macos"), "the copy went to the trash");
     assert_eq!(f.placement("diff", "codex"), Placement::Dir, "a conflict is left alone");
@@ -105,7 +109,7 @@ fn a_link_to_an_outside_folder_is_adopted_as_a_link() {
 
     let plan = plan(&f.inv(), &ids(&["opencode", "claude"]), &f.paths);
     assert_eq!(plan.actions[0], Action::AdoptLink { skill: "prompting".into(), from: index_of("opencode").unwrap() });
-    apply(&Scope::Global, &f.paths, &plan.actions).unwrap();
+    run(&Scope::Global, &f.paths, &plan.actions).unwrap();
     assert_eq!(fs::canonicalize(f.dir("agents").join("prompting")).unwrap(), fs::canonicalize(&outside).unwrap());
     assert_eq!(f.placement("prompting", "opencode"), Placement::Linked);
     assert_eq!(f.placement("prompting", "claude"), Placement::Linked);
@@ -120,7 +124,7 @@ fn broken_links_are_replaced() {
     symlink("/nowhere/alpha", f.dir("claude").join("alpha")).unwrap();
     let plan = plan(&f.inv(), &ids(&["claude"]), &f.paths);
     assert_eq!(plan.actions, [Action::Replace { skill: "alpha".into(), agent: index_of("claude").unwrap() }]);
-    apply(&Scope::Global, &f.paths, &plan.actions).unwrap();
+    run(&Scope::Global, &f.paths, &plan.actions).unwrap();
     assert_eq!(f.placement("alpha", "claude"), Placement::Linked);
 }
 
@@ -130,17 +134,17 @@ fn link_unlink_and_remove_one_skill() {
     f.skill("agents", "alpha", "A");
     let codex = index_of("codex").unwrap();
 
-    link(&f.inv(), &f.paths, "alpha", codex).unwrap();
+    link(&f.inv(), &f.paths, "alpha", codex, &mut Journal::default()).unwrap();
     assert_eq!(f.placement("alpha", "codex"), Placement::Linked);
-    unlink(&Scope::Global, &f.paths, "alpha", codex).unwrap();
+    unlink(&Scope::Global, &f.paths, "alpha", codex, &mut Journal::default()).unwrap();
     assert_eq!(f.placement("alpha", "codex"), Placement::Missing);
-    assert!(unlink(&Scope::Global, &f.paths, "alpha", CANONICAL).is_err());
+    assert!(unlink(&Scope::Global, &f.paths, "alpha", CANONICAL, &mut Journal::default()).is_err());
 
     f.skill("claude", "beta", "B");
-    assert!(unlink(&Scope::Global, &f.paths, "beta", index_of("claude").unwrap()).is_err(), "a real folder is not unlinked");
+    assert!(unlink(&Scope::Global, &f.paths, "beta", index_of("claude").unwrap(), &mut Journal::default()).is_err(), "a real folder is not unlinked");
 
-    link(&f.inv(), &f.paths, "alpha", codex).unwrap();
-    remove(&f.inv(), &f.paths, "alpha").unwrap();
+    link(&f.inv(), &f.paths, "alpha", codex, &mut Journal::default()).unwrap();
+    remove(&f.inv(), &f.paths, "alpha", &mut Journal::default()).unwrap();
     assert!(f.inv().get("alpha").is_none());
 }
 
@@ -153,14 +157,51 @@ fn projects_sync_inside_the_project() {
     let scope = Scope::Project(project.clone());
     let inv = scan(&scope, &f.paths);
     let plan = plan(&inv, &ids(&["claude", "codex"]), &f.paths);
-    apply(&scope, &f.paths, &plan.actions).unwrap();
+    run(&scope, &f.paths, &plan.actions).unwrap();
     assert!(project.join(".agents/skills/review/SKILL.md").is_file());
     assert_eq!(fs::read_link(project.join(".codex/skills/review")).unwrap(), PathBuf::from("../../.agents/skills/review"));
     assert!(!f.paths.home.join(".agents").exists(), "global folders are untouched");
 }
 
 #[test]
-fn relative_paths() {
-    assert_eq!(relative(Path::new("/h/.claude/skills"), Path::new("/h/.agents/skills/a")), PathBuf::from("../../.agents/skills/a"));
-    assert_eq!(relative(Path::new("/h/a"), Path::new("/h/a/b")), PathBuf::from("b"));
+fn a_sync_can_be_undone() {
+    let f = Fixture::new();
+    f.skill("claude", "alpha", "A");
+    let plan = plan(&f.inv(), &ids(&["claude", "codex"]), &f.paths);
+    let mut j = Journal::default();
+    apply(&Scope::Global, &f.paths, &plan.actions, &mut j).unwrap();
+    assert_eq!(f.placement("alpha", "codex"), Placement::Linked);
+    j.undo(&f.paths).unwrap();
+    assert_eq!(f.placement("alpha", "agents"), Placement::Missing);
+    assert_eq!(f.placement("alpha", "claude"), Placement::Dir);
+    assert_eq!(f.placement("alpha", "codex"), Placement::Missing);
+}
+
+#[test]
+fn broken_links_are_cleaned_up_and_come_back_on_undo() {
+    let f = Fixture::new();
+    fs::create_dir_all(f.dir("opencode")).unwrap();
+    symlink("/nowhere/one", f.dir("opencode").join("one")).unwrap();
+    symlink("/nowhere/two", f.dir("opencode").join("two")).unwrap();
+    f.skill("agents", "fine", "F");
+    assert_eq!(broken_links(&f.inv()).len(), 2);
+    let mut j = Journal::default();
+    assert_eq!(remove_broken(&f.inv(), &f.paths, &mut j), Ok(2));
+    assert!(broken_links(&f.inv()).is_empty());
+    assert!(f.inv().get("fine").is_some());
+    j.undo(&f.paths).unwrap();
+    assert_eq!(broken_links(&f.inv()).len(), 2);
+}
+
+#[test]
+fn copy_to_another_scope_lands_in_its_agents_and_links() {
+    let f = Fixture::new();
+    f.skill("agents", "alpha", "A");
+    let project = f.paths.home.join("work/app");
+    fs::create_dir_all(&project).unwrap();
+    let dest = Scope::Project(project.clone());
+    copy_to(&f.inv(), &f.paths, "alpha", &dest, &ids(&["claude"]), &mut Journal::default()).unwrap();
+    assert!(project.join(".agents/skills/alpha/SKILL.md").is_file());
+    assert_eq!(fs::read_link(project.join(".claude/skills/alpha")).unwrap(), PathBuf::from("../../.agents/skills/alpha"));
+    assert!(copy_to(&f.inv(), &f.paths, "alpha", &dest, &[], &mut Journal::default()).is_err(), "an existing copy is kept");
 }

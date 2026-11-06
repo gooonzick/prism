@@ -2,11 +2,11 @@
 
 use rune::{El, Tx, col, row, text};
 use rune_kit::shell::Toolbar;
-use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, ControlSize, Divider, Kit, Markdown, Select, Spinner, TextInput, glyphs};
+use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, Checkbox, ControlSize, Divider, Kit, Markdown, Select, Spinner, TextInput, glyphs};
 
 use super::{empty, field, heading, inspector_body, mono, row_gap, scroll_pane};
 use crate::agents::Scope;
-use crate::app::App;
+use crate::app::{App, RepoListing};
 use crate::remote::RemoteSkill;
 
 /// The scopes installs can go to, as labels: global first, then the projects.
@@ -82,8 +82,18 @@ pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>) -> (El, Toolbar, El) {
         .center_y()
         .child(col().grow(1.0).min_w(0.0).child(source))
         .child(
-            Button::new("Install")
+            Button::new("Show skills")
                 .variant(ButtonVariant::Outline)
+                .help("List the skills in this repository to pick from")
+                .disabled(s.source.text.trim().is_empty())
+                .on_press(|s: &mut App| s.list_repo())
+                .build(k)
+                .key("list-source"),
+        )
+        .child(
+            Button::new("Install all")
+                .variant(ButtonVariant::Ghost)
+                .help("Install every skill in it (or the one named after @)")
                 .disabled(installing || s.source.text.trim().is_empty())
                 .on_press(|s: &mut App| s.install_source())
                 .build(k)
@@ -161,6 +171,9 @@ fn details(s: &App, k: &Kit) -> El {
         };
         body = body.child(field(title, mono(out.trim().to_string(), k), k).key("install-log"));
     }
+    if let Some(repo) = &s.repo {
+        return body.child(repo_listing(s, repo, k));
+    }
     let Some(r) = &s.remote else {
         if s.installing.is_none() && s.install_log.is_none() {
             body = body.child(empty("No skill selected", "Pick a search result to preview and install it.", k));
@@ -215,6 +228,52 @@ fn details(s: &App, k: &Kit) -> El {
             .build(k)
             .key("remote-md"),
     })
+}
+
+
+/// A repository's skills with a tick each, and one button to install the ticked ones.
+fn repo_listing(s: &App, repo: &RepoListing, k: &Kit) -> El {
+    let mut body = col()
+        .key("repo")
+        .w_full()
+        .gap(12.0)
+        .child(text(repo.source.clone()).font(k.ty.body_medium).color(k.c.text_base).wrap());
+    let skills = match &repo.skills {
+        None => return body.child(row_gap().child(Spinner::new().build(k)).child(text("Reading the repository…").font(k.ty.small).color(k.c.text_muted))),
+        Some(Err(e)) => return body.child(text(e.clone()).font(k.ty.small).color(k.c.text_muted).wrap()),
+        Some(Ok(v)) => v,
+    };
+    let picked = skills.iter().filter(|r| r.2).count();
+    body = body.child(
+        row_gap()
+            .child(
+                Button::new(match picked {
+                    0 => "Pick skills to install".to_string(),
+                    1 => "Install 1 skill".to_string(),
+                    n => format!("Install {n} skills"),
+                })
+                .variant(if s.installing.is_some() { ButtonVariant::Loading } else { ButtonVariant::Contrast })
+                .control_size(ControlSize::Regular)
+                .disabled(picked == 0 || s.installing.is_some())
+                .help(format!("Install into {}", s.scope_label(&s.scope)))
+                .on_press(|s: &mut App| s.install_repo_ticked())
+                .build(k)
+                .key("install-ticked"),
+            )
+            .child(Button::new("Close").variant(ButtonVariant::Ghost).on_press(|s: &mut App| s.repo = None).build(k).key("repo-close")),
+    );
+    let mut list = col().w_full().gap(10.0);
+    for (i, (name, desc, on)) in skills.iter().enumerate() {
+        let mut cb = Checkbox::new(*on).label(name.clone()).on_toggle(move |s: &mut App| s.toggle_repo_skill(i));
+        if !desc.is_empty() {
+            cb = cb.description(desc.clone());
+        }
+        if s.installed_in(name) {
+            cb = cb.label(format!("{name} (installed)"));
+        }
+        list = list.child(cb.build(k).key(format!("repo-skill-{i}")));
+    }
+    body.child(list)
 }
 
 #[cfg(test)]

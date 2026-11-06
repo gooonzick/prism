@@ -6,6 +6,7 @@
 
 mod agents;
 mod app;
+mod fsops;
 mod remote;
 mod scan;
 mod skill;
@@ -90,6 +91,30 @@ static SCENES: &[Scene] = &[
         s.inspector.toggle();
     }),
     ("notice", |s| s.notify("Synced: 3 changes".into(), String::new(), false)),
+    ("updates", |s| {
+        let names: Vec<String> = s.inv.skills.iter().take(2).map(|x| x.name.clone()).collect();
+        s.updates.insert(s.scope.clone(), names.clone());
+        names.iter().for_each(|n| s.toggle_checked(n));
+        s.select(&names[0]);
+    }),
+    ("new-skill", |s| s.open_new_skill()),
+    ("copy", |s| {
+        let names: Vec<String> = s.inv.skills.iter().take(2).map(|x| x.name.clone()).collect();
+        s.open_copy(names);
+    }),
+    ("repo", |s| {
+        s.open_browse();
+        s.source = rune::TextEdit::new("vercel-labs/agent-skills");
+        s.repo = Some(app::RepoListing {
+            source: "vercel-labs/agent-skills".into(),
+            skills: Some(Ok(vec![
+                ("vercel-react-best-practices".into(), "React and Next.js performance guidelines.".into(), true),
+                ("deploy-to-vercel".into(), "Deploy applications and websites to Vercel.".into(), false),
+                ("web-design-guidelines".into(), "Review UI code for interface guidelines.".into(), true),
+            ])),
+        });
+        s.inspector.toggle();
+    }),
 ];
 
 fn main() {

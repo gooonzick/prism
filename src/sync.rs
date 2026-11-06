@@ -7,9 +7,10 @@
 
 use std::fs;
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use crate::agents::{AGENTS, CANONICAL, Paths, Scope};
+use crate::fsops::Journal;
 use crate::scan::{Inventory, Placement, Skill};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -125,15 +126,16 @@ fn plan_skill(inv: &Inventory, skill: &Skill, targets: &[usize], paths: &Paths, 
     }
 }
 
-/// Applies actions in order, stopping at the first failure. Returns how many succeeded.
-pub fn apply(scope: &Scope, paths: &Paths, actions: &[Action]) -> Result<usize, (usize, String)> {
+/// Applies actions in order, recording each change in `j`, stopping at the first failure.
+/// Returns how many succeeded.
+pub fn apply(scope: &Scope, paths: &Paths, actions: &[Action], j: &mut Journal) -> Result<usize, (usize, String)> {
     for (done, action) in actions.iter().enumerate() {
-        apply_one(scope, paths, action).map_err(|e| (done, format!("{}: {e}", action.describe())))?;
+        apply_one(scope, paths, action, j).map_err(|e| (done, format!("{}: {e}", action.describe())))?;
     }
     Ok(actions.len())
 }
 
-fn apply_one(scope: &Scope, paths: &Paths, action: &Action) -> io::Result<()> {
+fn apply_one(scope: &Scope, paths: &Paths, action: &Action, j: &mut Journal) -> io::Result<()> {
     let path = |agent: usize, skill: &str| AGENTS[agent].dir(scope, paths).join(skill);
     match action {
         Action::Adopt { skill, from } => {
@@ -141,39 +143,37 @@ fn apply_one(scope: &Scope, paths: &Paths, action: &Action) -> io::Result<()> {
             if fs::symlink_metadata(&dst).is_ok() {
                 return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} already exists", dst.display())));
             }
-            fs::create_dir_all(dst.parent().unwrap())?;
-            move_dir(&src, &dst)?;
-            make_link(&src, &dst)
+            j.move_to(&src, &dst)?;
+            j.link(&src, &dst)
         }
         Action::AdoptLink { skill, from } => {
             let real = fs::canonicalize(path(*from, skill))?;
             let dst = path(CANONICAL, skill);
-            fs::create_dir_all(dst.parent().unwrap())?;
-            std::os::unix::fs::symlink(&real, &dst)?;
+            j.symlink(&real, &dst)?;
             // The agent's own link now goes through .agents like the rest.
-            fs::remove_file(path(*from, skill))?;
-            make_link(&path(*from, skill), &dst)
+            j.remove_link(&path(*from, skill))?;
+            j.link(&path(*from, skill), &dst)
         }
-        Action::Link { skill, agent } => make_link(&path(*agent, skill), &path(CANONICAL, skill)),
+        Action::Link { skill, agent } => j.link(&path(*agent, skill), &path(CANONICAL, skill)),
         Action::Replace { skill, agent } => {
             let at = path(*agent, skill);
-            discard(&at, paths)?;
-            make_link(&at, &path(CANONICAL, skill))
+            j.discard(&at, paths)?;
+            j.link(&at, &path(CANONICAL, skill))
         }
     }
 }
 
 /// Links `skill` into `agent`, moving it into `.agents` first if it isn't there yet.
-pub fn link(inv: &Inventory, paths: &Paths, skill: &str, agent: usize) -> Result<(), String> {
+pub fn link(inv: &Inventory, paths: &Paths, skill: &str, agent: usize, j: &mut Journal) -> Result<(), String> {
     let plan = plan_one(inv, skill, &[agent], paths);
     if let Some(c) = plan.conflicts.first() {
         return Err(c.reason.clone());
     }
-    apply(&inv.scope, paths, &plan.actions).map(|_| ()).map_err(|(_, e)| e)
+    apply(&inv.scope, paths, &plan.actions, j).map(|_| ()).map_err(|(_, e)| e)
 }
 
 /// Removes `agent`'s symlink to `skill`. Real folders are left alone: see [`trash_copy`].
-pub fn unlink(scope: &Scope, paths: &Paths, skill: &str, agent: usize) -> Result<(), String> {
+pub fn unlink(scope: &Scope, paths: &Paths, skill: &str, agent: usize, j: &mut Journal) -> Result<(), String> {
     if agent == CANONICAL {
         return Err("The .agents copy is the skill itself; remove the skill instead".into());
     }
@@ -182,17 +182,17 @@ pub fn unlink(scope: &Scope, paths: &Paths, skill: &str, agent: usize) -> Result
     if !meta.file_type().is_symlink() {
         return Err(format!("{} is a folder, not a link", at.display()));
     }
-    fs::remove_file(&at).map_err(|e| format!("{}: {e}", at.display()))
+    j.remove_link(&at).map_err(|e| format!("{}: {e}", at.display()))
 }
 
 /// Moves `agent`'s own folder for `skill` to the trash.
-pub fn trash_copy(scope: &Scope, paths: &Paths, skill: &str, agent: usize) -> Result<(), String> {
+pub fn trash_copy(scope: &Scope, paths: &Paths, skill: &str, agent: usize, j: &mut Journal) -> Result<(), String> {
     let at = AGENTS[agent].dir(scope, paths).join(skill);
-    discard(&at, paths).map_err(|e| format!("{}: {e}", at.display()))
+    j.discard(&at, paths).map_err(|e| format!("{}: {e}", at.display()))
 }
 
 /// Removes the skill from the scope: every link goes, every folder goes to the trash.
-pub fn remove(inv: &Inventory, paths: &Paths, skill: &str) -> Result<(), String> {
+pub fn remove(inv: &Inventory, paths: &Paths, skill: &str, j: &mut Journal) -> Result<(), String> {
     let s = inv.get(skill).ok_or_else(|| format!("{skill} is not installed here"))?;
     // Links first, so none is left pointing at a trashed folder.
     let mut order: Vec<usize> = (0..AGENTS.len()).filter(|&a| !inv.shares_canonical[a]).collect();
@@ -202,92 +202,44 @@ pub fn remove(inv: &Inventory, paths: &Paths, skill: &str) -> Result<(), String>
             continue;
         }
         let at = AGENTS[a].dir(&inv.scope, paths).join(skill);
-        discard(&at, paths).map_err(|e| format!("{}: {e}", at.display()))?;
+        j.discard(&at, paths).map_err(|e| format!("{}: {e}", at.display()))?;
     }
     Ok(())
 }
 
-/// Removes a symlink, or moves a folder to the trash.
-fn discard(path: &Path, paths: &Paths) -> io::Result<()> {
-    let meta = fs::symlink_metadata(path)?;
-    if meta.file_type().is_symlink() || meta.is_file() {
-        return fs::remove_file(path);
-    }
-    let trash = trash_dir(paths);
-    fs::create_dir_all(&trash)?;
-    let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-    let mut dst = trash.join(&name);
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let mut n = 0;
-    while fs::symlink_metadata(&dst).is_ok() {
-        n += 1;
-        dst = trash.join(format!("{name} {stamp}-{n}"));
-    }
-    move_dir(path, &dst)
+/// Every broken link in the scope, as (skill, agent).
+pub fn broken_links(inv: &Inventory) -> Vec<(String, usize)> {
+    inv.skills
+        .iter()
+        .flat_map(|s| (0..AGENTS.len()).filter(|&a| matches!(s.placements[a], Placement::Broken(_))).map(move |a| (s.name.clone(), a)))
+        .filter(|(_, a)| !inv.shares_canonical[*a])
+        .collect()
 }
 
-fn trash_dir(paths: &Paths) -> PathBuf {
-    if cfg!(target_os = "macos") {
-        paths.home.join(".Trash")
-    } else {
-        std::env::var_os("XDG_DATA_HOME").map_or_else(|| paths.home.join(".local/share"), PathBuf::from).join("Trash/files")
+/// Removes every broken link in the scope. Returns how many went.
+pub fn remove_broken(inv: &Inventory, paths: &Paths, j: &mut Journal) -> Result<usize, String> {
+    let broken = broken_links(inv);
+    for (skill, a) in &broken {
+        let at = AGENTS[*a].dir(&inv.scope, paths).join(skill);
+        j.remove_link(&at).map_err(|e| format!("{}: {e}", at.display()))?;
     }
+    Ok(broken.len())
 }
 
-/// A relative symlink at `at` to `target`, as the `skills` CLI writes them.
-fn make_link(at: &Path, target: &Path) -> io::Result<()> {
-    let parent = at.parent().ok_or_else(|| io::Error::other("link has no parent folder"))?;
-    fs::create_dir_all(parent)?;
-    let from = fs::canonicalize(parent)?;
-    let to = match (target.parent().map(fs::canonicalize), target.file_name()) {
-        (Some(Ok(dir)), Some(name)) => dir.join(name),
-        _ => target.to_path_buf(),
-    };
-    std::os::unix::fs::symlink(relative(&from, &to), at)
-}
-
-/// `to` written relative to the folder `from`. Both are absolute and normalised.
-pub fn relative(from: &Path, to: &Path) -> PathBuf {
-    let a: Vec<Component> = from.components().collect();
-    let b: Vec<Component> = to.components().collect();
-    let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
-    let mut out = PathBuf::new();
-    for _ in common..a.len() {
-        out.push("..");
+/// Copies `skill` from `inv`'s scope into `dest`'s `.agents/skills` and links it into
+/// `targets` there. A skill already in `dest` is left alone.
+pub fn copy_to(inv: &Inventory, paths: &Paths, skill: &str, dest: &Scope, targets: &[usize], j: &mut Journal) -> Result<(), String> {
+    let s = inv.get(skill).ok_or_else(|| format!("{skill} is not installed here"))?;
+    let src = s.source.as_ref().and_then(|p| fs::canonicalize(p).ok()).ok_or_else(|| format!("{skill} has no readable folder"))?;
+    let dst = AGENTS[CANONICAL].dir(dest, paths).join(skill);
+    if fs::symlink_metadata(&dst).is_ok() {
+        return Err(format!("{skill} is already in {}", dst.display()));
     }
-    for c in &b[common..] {
-        out.push(c);
-    }
-    out
-}
-
-fn move_dir(src: &Path, dst: &Path) -> io::Result<()> {
-    match fs::rename(src, dst) {
-        Ok(()) => Ok(()),
-        // Another volume: copy, then remove the original.
-        Err(e) if e.raw_os_error() == Some(18) => {
-            copy_dir(src, dst)?;
-            fs::remove_dir_all(src)
-        }
-        Err(e) => Err(e),
-    }
-}
-
-pub fn copy_dir(src: &Path, dst: &Path) -> io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let (from, to) = (entry.path(), dst.join(entry.file_name()));
-        let ty = entry.file_type()?;
-        if ty.is_symlink() {
-            std::os::unix::fs::symlink(fs::read_link(&from)?, &to)?;
-        } else if ty.is_dir() {
-            copy_dir(&from, &to)?;
-        } else {
-            fs::copy(&from, &to)?;
-        }
-    }
-    Ok(())
+    j.copy(&src, &dst).map_err(|e| format!("{}: {e}", dst.display()))?;
+    let there = crate::scan::scan(dest, paths);
+    let plan = plan_one(&there, skill, targets, paths);
+    let links: Vec<Action> = plan.actions.into_iter().filter(|a| matches!(a, Action::Link { .. })).collect();
+    apply(dest, paths, &links, j).map(|_| ()).map_err(|(_, e)| e)
 }
 
 /// The two folders hold the same files with the same bytes (`.DS_Store` aside).
