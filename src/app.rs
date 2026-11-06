@@ -45,10 +45,14 @@ pub struct App {
     pub selected: Option<String>,
     /// The selected installed skill's `SKILL.md` body.
     pub preview: Option<String>,
+    /// Skills ticked for a bulk sync or remove, in inventory order.
+    pub checked: Vec<String>,
     /// The open sync dialog's plan.
     pub sync_plan: Option<Plan>,
-    /// The skill a "Remove" is waiting to be confirmed for.
-    pub confirm_remove: Option<String>,
+    /// The skills the open sync dialog is for; `None` syncs everything.
+    pub sync_only: Option<Vec<String>>,
+    /// The skills a "Remove" is waiting to be confirmed for.
+    pub confirm_remove: Option<Vec<String>>,
     pub notice: Option<Notice>,
     /// When the notice went up, on the app clock.
     pub notice_at: Option<f64>,
@@ -82,7 +86,9 @@ impl App {
             filter: TextEdit::new(""),
             selected: None,
             preview: None,
+            checked: Vec::new(),
             sync_plan: None,
+            sync_only: None,
             confirm_remove: None,
             notice: None,
             notice_at: None,
@@ -139,6 +145,7 @@ impl App {
             self.scope = scope;
             self.selected = None;
             self.preview = None;
+            self.checked.clear();
             self.filter = TextEdit::new("");
         }
         self.rescan();
@@ -164,6 +171,8 @@ impl App {
         if self.selected.as_deref().is_some_and(|n| self.inv.get(n).is_none()) {
             self.selected = None;
         }
+        let inv = &self.inv;
+        self.checked.retain(|n| inv.get(n).is_some());
         self.load_preview();
     }
 
@@ -186,7 +195,7 @@ impl App {
         self.settings.targets = Some(t.iter().map(|&a| AGENTS[a].id.to_string()).collect());
         self.settings.save();
         if self.sync_plan.is_some() {
-            self.open_sync();
+            self.open_sync_for(self.sync_only.clone());
         }
     }
 
@@ -242,24 +251,106 @@ impl App {
         self.rescan();
     }
 
-    pub fn remove(&mut self, skill: &str) {
+    /// Removes every skill in `names`, going on past failures.
+    pub fn remove(&mut self, names: &[String]) {
         self.confirm_remove = None;
-        let result = sync::remove(&self.inv, &self.paths, skill);
-        self.report(result, Some(format!("Removed {skill}; its folders are in the trash")));
+        let mut failed = Vec::new();
+        for name in names {
+            if let Err(e) = sync::remove(&self.inv, &self.paths, name) {
+                failed.push(e);
+            }
+        }
+        let removed = names.len() - failed.len();
+        match (failed.is_empty(), names) {
+            (true, [one]) => self.notify(format!("Removed {one}"), "Its folders are in the trash".into(), false),
+            (true, _) => self.notify(format!("Removed {removed} skills"), "Their folders are in the trash".into(), false),
+            (false, _) => self.notify(format!("Removed {removed} of {}", names.len()), failed.join("\n"), true),
+        }
+        self.checked.retain(|n| !names.contains(n));
         self.rescan();
     }
 
+    // Multi-select.
+
+    pub fn is_checked(&self, name: &str) -> bool {
+        self.checked.iter().any(|n| n == name)
+    }
+
+    pub fn toggle_checked(&mut self, name: &str) {
+        if let Some(i) = self.checked.iter().position(|n| n == name) {
+            self.checked.remove(i);
+        } else {
+            self.checked.push(name.to_string());
+            let order: Vec<&str> = self.inv.skills.iter().map(|s| s.name.as_str()).collect();
+            self.checked.sort_by_key(|n| order.iter().position(|o| o == n));
+        }
+    }
+
+    /// Ticks every skill the filter shows, or clears them all when they already are.
+    pub fn toggle_all_visible(&mut self) {
+        let visible: Vec<String> = self.visible().into_iter().map(|i| self.inv.skills[i].name.clone()).collect();
+        if !visible.is_empty() && visible.iter().all(|n| self.is_checked(n)) {
+            self.checked.retain(|n| !visible.contains(n));
+        } else {
+            for n in visible {
+                if !self.is_checked(&n) {
+                    self.checked.push(n);
+                }
+            }
+            let order: Vec<&str> = self.inv.skills.iter().map(|s| s.name.as_str()).collect();
+            self.checked.sort_by_key(|n| order.iter().position(|o| o == n));
+        }
+    }
+
+    pub fn clear_checked(&mut self) {
+        self.checked.clear();
+    }
+
+    pub fn confirm_remove_checked(&mut self) {
+        if !self.checked.is_empty() {
+            self.confirm_remove = Some(self.checked.clone());
+        }
+    }
+
+    // Sync.
+
     pub fn open_sync(&mut self) {
+        self.open_sync_for(None);
+    }
+
+    pub fn open_sync_checked(&mut self) {
+        if !self.checked.is_empty() {
+            self.open_sync_for(Some(self.checked.clone()));
+        }
+    }
+
+    fn open_sync_for(&mut self, only: Option<Vec<String>>) {
         self.rescan();
-        self.sync_plan = Some(sync::plan(&self.inv, &self.targets(), &self.paths));
+        let targets = self.targets();
+        self.sync_plan = Some(match &only {
+            Some(names) => sync::plan_many(&self.inv, names, &targets, &self.paths),
+            None => sync::plan(&self.inv, &targets, &self.paths),
+        });
+        self.sync_only = only;
+    }
+
+    pub fn close_sync(&mut self) {
+        self.sync_plan = None;
+        self.sync_only = None;
     }
 
     pub fn apply_sync(&mut self) {
         let Some(plan) = self.sync_plan.take() else { return };
+        let only = self.sync_only.take();
         let n = plan.actions.len();
         let result = sync::apply(&self.scope, &self.paths, &plan.actions);
         match result {
-            Ok(_) => self.notify(format!("Synced: {n} change{}", if n == 1 { "" } else { "s" }), String::new(), false),
+            Ok(_) => {
+                self.notify(format!("Synced: {n} change{}", if n == 1 { "" } else { "s" }), String::new(), false);
+                if only.is_some() {
+                    self.checked.clear();
+                }
+            }
             Err((done, e)) => self.notify(format!("Sync stopped after {done} of {n}"), e, true),
         }
         self.rescan();

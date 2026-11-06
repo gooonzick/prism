@@ -47,7 +47,7 @@ pub fn sync(s: &App, k: &Kit, layer: &mut Vec<El>) {
         .w_full()
         .gap(8.0)
         .justify_end()
-        .child(Button::new("Cancel").variant(ButtonVariant::Ghost).on_press(|s: &mut App| s.sync_plan = None).build(k).key("sync-cancel"))
+        .child(Button::new("Cancel").variant(ButtonVariant::Ghost).on_press(|s: &mut App| s.close_sync()).build(k).key("sync-cancel"))
         .child(
             Button::new(if n == 0 { "Nothing to do".to_string() } else { format!("Apply {n} change{}", if n == 1 { "" } else { "s" }) })
                 .variant(ButtonVariant::Contrast)
@@ -68,33 +68,58 @@ pub fn sync(s: &App, k: &Kit, layer: &mut Vec<El>) {
                 .child(heading("Changes", k))
                 .child(col().w_full().h(260.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(changes)),
         );
-    Dialog::new("sync-dialog", format!("Sync {}", s.scope_label(&s.inv.scope)))
+    let title = match s.sync_only.as_deref() {
+        Some([one]) => format!("Sync {one}"),
+        Some(names) => format!("Sync {} selected skills", names.len()),
+        None => format!("Sync {}", s.scope_label(&s.inv.scope)),
+    };
+    Dialog::new("sync-dialog", title)
         .width(760.0)
         .fit()
         .open(true)
-        .on_close(|s: &mut App| s.sync_plan = None)
+        .on_close(|s: &mut App| s.close_sync())
         .child(dialog_body().child(note(SYNC_NOTE, k)).child(body).child(buttons))
         .build(k, layer);
 }
 
 pub fn remove(s: &App, k: &Kit, layer: &mut Vec<El>) {
-    let Some(name) = &s.confirm_remove else { return };
-    let Some(skill) = s.inv.get(name) else { return };
-    let places: Vec<&str> = (0..AGENTS.len()).filter(|&a| skill.placements[a].present()).map(|a| AGENTS[a].name).collect();
-    let target = name.clone();
-    let message = format!(
-        "Removes it from {} in {}. Links are deleted; folders move to the trash.",
-        if places.is_empty() { "every agent".to_string() } else { places.join(", ") },
-        s.scope_label(&s.inv.scope)
-    );
+    let Some(names) = &s.confirm_remove else { return };
+    let skills: Vec<_> = names.iter().filter_map(|n| s.inv.get(n)).collect();
+    let scope = s.scope_label(&s.inv.scope);
+    let (title, message) = match skills.as_slice() {
+        [] => return,
+        [skill] => {
+            let places: Vec<&str> = (0..AGENTS.len()).filter(|&a| skill.placements[a].present()).map(|a| AGENTS[a].name).collect();
+            let from = if places.is_empty() { "every agent".to_string() } else { places.join(", ") };
+            (format!("Remove {}?", skill.name), format!("Removes it from {from} in {scope}. Links are deleted; folders move to the trash."))
+        }
+        many => {
+            const SHOWN: usize = 8;
+            let mut list = many.iter().take(SHOWN).map(|x| x.name.as_str()).collect::<Vec<_>>().join(", ");
+            if many.len() > SHOWN {
+                list.push_str(&format!(" and {} more", many.len() - SHOWN));
+            }
+            (
+                format!("Remove {} skills?", many.len()),
+                format!("Removes {list} from every agent in {scope}. Links are deleted; folders move to the trash."),
+            )
+        }
+    };
+    let targets: Vec<String> = skills.iter().map(|x| x.name.clone()).collect();
     let buttons = row()
         .w_full()
         .gap(8.0)
         .justify_end()
         .child(Button::new("Cancel").variant(ButtonVariant::Ghost).on_press(|s: &mut App| s.confirm_remove = None).build(k).key("remove-cancel"))
-        .child(Button::new("Remove").variant(ButtonVariant::Danger).on_press(move |s: &mut App| s.remove(&target)).build(k).key("remove-confirm"));
-    Dialog::new("remove-dialog", format!("Remove {name}?"))
-        .width(440.0)
+        .child(
+            Button::new(if targets.len() == 1 { "Remove".to_string() } else { format!("Remove {}", targets.len()) })
+                .variant(ButtonVariant::Danger)
+                .on_press(move |s: &mut App| s.remove(&targets))
+                .build(k)
+                .key("remove-confirm"),
+        );
+    Dialog::new("remove-dialog", title)
+        .width(460.0)
         .fit()
         .open(true)
         .on_close(|s: &mut App| s.confirm_remove = None)

@@ -103,7 +103,7 @@ fn remove_asks_first_then_clears_every_agent() {
     let mut h = Harness::project();
     h.click("skill-review");
     h.click("remove");
-    assert_eq!(h.rt.state.confirm_remove.as_deref(), Some("review"));
+    assert_eq!(h.rt.state.confirm_remove, Some(vec!["review".to_string()]));
     h.click("remove-cancel");
     assert!(h.rt.state.inv.get("review").is_some());
 
@@ -128,6 +128,91 @@ fn the_sidebar_switches_scopes_and_pages() {
 
     h.click("project-0");
     assert_eq!(h.rt.state.scope, Scope::Project(h.project_dir()));
+}
+
+/// A project with `alpha`, `beta` and `gamma`, each only in Claude's folder.
+fn three_skills() -> Harness {
+    let h = Harness::project();
+    for name in ["alpha", "beta", "gamma"] {
+        skill(&h.project_dir().join(".claude/skills"), name);
+    }
+    h
+}
+
+impl Harness {
+    fn rescan(&mut self) {
+        self.rt.update(|s, _| s.rescan());
+        self.settle();
+    }
+}
+
+#[test]
+fn ticked_skills_sync_alone() {
+    let mut h = three_skills();
+    h.rescan();
+    h.click("check-alpha");
+    h.click("check-gamma");
+    assert_eq!(h.rt.state.checked, ["alpha", "gamma"]);
+    assert!(h.rt.find("bulk-bar").is_some());
+    assert_eq!(h.rt.state.selected, None, "ticking doesn't open the inspector");
+
+    h.click("bulk-sync");
+    let plan = h.rt.state.sync_plan.clone().unwrap();
+    let skills: std::collections::BTreeSet<&str> = plan.actions.iter().map(|a| match a {
+        crate::sync::Action::Adopt { skill, .. }
+        | crate::sync::Action::AdoptLink { skill, .. }
+        | crate::sync::Action::Link { skill, .. }
+        | crate::sync::Action::Replace { skill, .. } => skill.as_str(),
+    }).collect();
+    assert_eq!(skills.into_iter().collect::<Vec<_>>(), ["alpha", "gamma"]);
+
+    // Changing the targets keeps the dialog on the ticked skills.
+    h.click("target-opencode");
+    assert_eq!(h.rt.state.sync_only.as_deref(), Some(&["alpha".to_string(), "gamma".to_string()][..]));
+    h.click("sync-apply");
+
+    for name in ["alpha", "gamma"] {
+        assert_eq!(h.placement(name, "codex"), Placement::Linked, "{name}");
+    }
+    assert_eq!(h.placement("beta", "codex"), Placement::Missing, "unticked skills are left alone");
+    assert_eq!(h.placement("review", "codex"), Placement::Missing);
+    assert!(h.rt.state.checked.is_empty(), "a finished sync clears the ticks");
+}
+
+#[test]
+fn ticked_skills_are_removed_together_after_one_confirmation() {
+    let mut h = three_skills();
+    h.rescan();
+    h.click("check-alpha");
+    h.click("check-beta");
+    h.click("bulk-remove");
+    assert_eq!(h.rt.state.confirm_remove, Some(vec!["alpha".to_string(), "beta".to_string()]));
+    h.click("remove-confirm");
+
+    let names: Vec<&str> = h.rt.state.inv.skills.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["gamma", "review"]);
+    assert!(h.rt.state.checked.is_empty());
+    assert!(h.rt.state.notice.as_ref().is_some_and(|n| n.title == "Removed 2 skills"));
+}
+
+#[test]
+fn tick_all_follows_the_filter_and_toggles_off() {
+    let mut h = three_skills();
+    h.rescan();
+    h.rt.update(|s, _| s.filter = rune::TextEdit::new("a"));
+    h.settle();
+    h.click("check-all");
+    assert_eq!(h.rt.state.checked, ["alpha", "beta", "gamma"], "review has no a in its name or description");
+    h.click("check-all");
+    assert!(h.rt.state.checked.is_empty());
+
+    h.click("check-beta");
+    h.click("bulk-clear");
+    assert!(h.rt.state.checked.is_empty());
+
+    h.click("check-beta");
+    h.click("scope-global");
+    assert!(h.rt.state.checked.is_empty(), "ticks belong to one scope");
 }
 
 /// Installs a real skill from skills.sh through its CLI. Needs the network and Node:

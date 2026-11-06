@@ -157,6 +157,14 @@ pub fn on_key(s: &mut App, ev: &KeyEvent, _: &mut Tx) -> bool {
         s.sidebar.toggle();
         return true;
     }
+    if ev.key == rune::Key::Escape && !s.checked.is_empty() && s.sync_plan.is_none() && s.confirm_remove.is_none() {
+        s.clear_checked();
+        return true;
+    }
+    if ev.is_command('a') && s.page == Page::Installed && !s.filter.focused {
+        s.toggle_all_visible();
+        return true;
+    }
     if ev.is_command('r') {
         s.rescan();
         return true;

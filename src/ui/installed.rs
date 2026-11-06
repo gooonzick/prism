@@ -3,7 +3,8 @@
 use rune::{Color, El, Tx, col, row, text};
 use rune_kit::shell::Toolbar;
 use rune_kit::{
-    Badge, BadgeVariant, Button, ButtonVariant, ControlSize, Divider, IconButton, IconButtonVariant, Kit, Markdown, Switch, TextInput, glyphs,
+    Badge, BadgeVariant, Button, ButtonVariant, Checkbox, ControlSize, Divider, IconButton, IconButtonVariant, Kit, Markdown, Switch, TextInput,
+    glyphs,
 };
 
 use super::{REFRESH, SYNC, dot, empty, field, heading, inspector_body, mono, row_gap, scroll_pane};
@@ -71,6 +72,7 @@ pub fn page(s: &App, k: &Kit, _layer: &mut Vec<El>) -> (El, Toolbar, El) {
     } else if visible.is_empty() {
         list = list.child(empty("Nothing matches", "Try another word.", k));
     }
+    let header = list_header(s, &visible, summary, filter, k);
     for i in visible {
         list = list.child(skill_row(s, &s.inv.skills[i], &targets, k));
     }
@@ -81,16 +83,68 @@ pub fn page(s: &App, k: &Kit, _layer: &mut Vec<El>) -> (El, Toolbar, El) {
         .min_h(0.0)
         .padding(16.0)
         .gap(12.0)
-        .child(
-            row()
-                .w_full()
-                .gap(12.0)
-                .center_y()
-                .child(text(summary).font(k.ty.small).color(k.c.text_muted).grow(1.0).truncate())
-                .child(filter),
-        )
+        .child(header)
         .child(scroll_pane("skills-scroll", list).grow(1.0));
     (main, toolbar, details(s, k))
+}
+
+/// Above the list: a tick-all box, then either the scope's summary or, with skills ticked,
+/// what can be done to them all; the filter on the right.
+fn list_header(s: &App, visible: &[usize], summary: String, filter: El, k: &Kit) -> El {
+    let ticked = visible.iter().filter(|&&i| s.is_checked(&s.inv.skills[i].name)).count();
+    let partial = ticked > 0 && ticked < visible.len();
+    let mut all = Checkbox::new(!visible.is_empty() && ticked == visible.len()).indeterminate(partial);
+    if partial {
+        // The kit draws its check for a mixed state unless given another mark.
+        all = all.icon(&glyphs::DASH);
+    }
+    let all = all
+        .label(if ticked == visible.len() && ticked > 0 { "Untick all" } else { "Tick all shown" })
+        .hide_label()
+        .disabled(visible.is_empty())
+        .on_toggle(|s: &mut App| s.toggle_all_visible())
+        .build(k)
+        .key("check-all");
+    let n = s.checked.len();
+    let middle = if n == 0 {
+        row().grow(1.0).min_w(0.0).child(text(summary).font(k.ty.small).color(k.c.text_muted).truncate())
+    } else {
+        row()
+            .key("bulk-bar")
+            .grow(1.0)
+            .min_w(0.0)
+            .gap(8.0)
+            .center_y()
+            .child(text(format!("{n} selected")).font(k.ty.small_medium).color(k.c.text_base))
+            .child(
+                Button::new(format!("Sync {n}"))
+                    .icon(&SYNC)
+                    .variant(ButtonVariant::Outline)
+                    .control_size(ControlSize::Small)
+                    .help("Sync only the selected skills")
+                    .on_press(|s: &mut App| s.open_sync_checked())
+                    .build(k)
+                    .key("bulk-sync"),
+            )
+            .child(
+                Button::new(format!("Remove {n}…"))
+                    .variant(ButtonVariant::Danger)
+                    .control_size(ControlSize::Small)
+                    .on_press(|s: &mut App| s.confirm_remove_checked())
+                    .build(k)
+                    .key("bulk-remove"),
+            )
+            .child(
+                Button::new("Clear")
+                    .variant(ButtonVariant::GhostMuted)
+                    .control_size(ControlSize::Small)
+                    .help("Untick everything (Esc)")
+                    .on_press(|s: &mut App| s.clear_checked())
+                    .build(k)
+                    .key("bulk-clear"),
+            )
+    };
+    row().w_full().h(36.0).px(12.0).gap(12.0).center_y().child(all).child(middle).child(filter)
 }
 
 /// The agents a row shows chips for: `.agents` and every agent that has it.
@@ -100,7 +154,15 @@ fn shown_agents(skill: &Skill) -> Vec<usize> {
 
 fn skill_row(s: &App, skill: &Skill, targets: &[usize], k: &Kit) -> El {
     let selected = s.selected.as_deref() == Some(skill.name.as_str());
+    let ticked = s.is_checked(&skill.name);
     let name = skill.name.clone();
+    let tick_name = skill.name.clone();
+    let tick = Checkbox::new(ticked)
+        .label(format!("Select {}", skill.name))
+        .hide_label()
+        .on_toggle(move |s: &mut App| s.toggle_checked(&tick_name))
+        .build(k)
+        .key(format!("check-{}", skill.name));
     let mut chips = row().gap(4.0).center_y();
     for a in shown_agents(skill) {
         chips = chips.child(chip(AGENTS[a].short, &skill.placements[a], s.inv.shares_canonical[a], k));
@@ -122,7 +184,7 @@ fn skill_row(s: &App, skill: &Skill, targets: &[usize], k: &Kit) -> El {
     if !skill.description.is_empty() {
         info = info.child(text(skill.description.clone()).font(k.ty.small).color(k.c.text_muted).truncate());
     }
-    let mut r = row()
+    let r = row()
         .key(format!("skill-{}", skill.name))
         .role("button")
         .label(skill.name.clone())
@@ -134,10 +196,14 @@ fn skill_row(s: &App, skill: &Skill, targets: &[usize], k: &Kit) -> El {
         .center_y()
         .radius(k.radius.md)
         .on_press(move |s: &mut App| s.select(&name))
+        .child(tick)
         .child(info)
         .child(chips);
-    r = if selected { r.fill(k.c.layer_02) } else { r.hover(k.c.hover) };
-    r
+    match (selected, ticked) {
+        (true, _) => r.fill(k.c.layer_02),
+        (false, true) => r.fill(k.c.layer_01).hover(k.c.hover),
+        (false, false) => r.hover(k.c.hover),
+    }
 }
 
 fn placement_color(p: &Placement, k: &Kit) -> Option<Color> {
@@ -196,7 +262,7 @@ fn details(s: &App, k: &Kit) -> El {
             .child(
                 Button::new("Remove…")
                     .variant(ButtonVariant::Danger)
-                    .on_press(move |s: &mut App| s.confirm_remove = Some(remove.clone()))
+                    .on_press(move |s: &mut App| s.confirm_remove = Some(vec![remove.clone()]))
                     .build(k)
                     .key("remove"),
             ),

@@ -64,8 +64,13 @@ pub fn plan(inv: &Inventory, targets: &[usize], paths: &Paths) -> Plan {
 
 /// The plan for one skill alone.
 pub fn plan_one(inv: &Inventory, name: &str, targets: &[usize], paths: &Paths) -> Plan {
+    plan_many(inv, &[name.to_string()], targets, paths)
+}
+
+/// The plan for the named skills only, in inventory order.
+pub fn plan_many(inv: &Inventory, names: &[String], targets: &[usize], paths: &Paths) -> Plan {
     let mut plan = Plan::default();
-    if let Some(skill) = inv.get(name) {
+    for skill in inv.skills.iter().filter(|s| names.contains(&s.name)) {
         plan_skill(inv, skill, targets, paths, &mut plan);
     }
     plan

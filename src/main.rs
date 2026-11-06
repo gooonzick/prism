@@ -60,7 +60,16 @@ static SCENES: &[Scene] = &[
         }
     }),
     ("sync", |s| s.open_sync()),
-    ("remove", |s| s.confirm_remove = s.inv.skills.first().map(|x| x.name.clone())),
+    ("remove", |s| s.confirm_remove = s.inv.skills.first().map(|x| vec![x.name.clone()])),
+    ("bulk", |s| {
+        let names: Vec<String> = s.inv.skills.iter().take(3).map(|x| x.name.clone()).collect();
+        names.iter().for_each(|n| s.toggle_checked(n));
+    }),
+    ("bulk-remove", |s| {
+        let names: Vec<String> = s.inv.skills.iter().take(3).map(|x| x.name.clone()).collect();
+        names.iter().for_each(|n| s.toggle_checked(n));
+        s.confirm_remove_checked();
+    }),
     ("browse", |s| {
         s.open_browse();
         s.query = rune::TextEdit::new("react");
