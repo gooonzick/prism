@@ -17,11 +17,21 @@ pub struct Settings {
 }
 
 fn file() -> Option<PathBuf> {
-    Some(dirs::config_dir()?.join("skills-explorer/settings.json"))
+    Some(dirs::config_dir()?.join("dev.prism.skills/settings.json"))
+}
+
+/// Settings from before the rename to Prism move over on first launch.
+fn migrate() {
+    let (Some(new), Some(config)) = (file(), dirs::config_dir()) else { return };
+    let old = config.join("skills-explorer");
+    if !new.exists() && old.join("settings.json").exists() {
+        let _ = std::fs::rename(&old, new.parent().unwrap());
+    }
 }
 
 impl Settings {
     pub fn load() -> Settings {
+        migrate();
         file().and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice(&b).ok()).map(|s: Settings| Settings { persist: true, ..s })
             .unwrap_or(Settings { persist: true, ..Settings::default() })
     }

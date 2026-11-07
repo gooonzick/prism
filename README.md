@@ -1,4 +1,4 @@
-# Skills Explorer
+# Prism
 
 Нативное приложение на Rust + [Rune](https://github.com/anomalyco/rune) для работы со скиллами агентов:
 
@@ -19,7 +19,7 @@
 - одинаковая копия у агента заменяется ссылкой (копия уходит в корзину);
 - разные копии и чужие ссылки не трогаются, а показываются как пропущенные.
 
-Агенты для синка выбираются в диалоге Sync. По умолчанию это те, чья папка конфигурации есть на машине. Выбор сохраняется в `~/Library/Application Support/skills-explorer/settings.json` вместе со списком проектов.
+Агенты для синка выбираются в диалоге Sync. По умолчанию это те, чья папка конфигурации есть на машине. Выбор сохраняется в `~/Library/Application Support/dev.prism.skills/settings.json` вместе со списком проектов.
 
 **Undo.** Каждая ссылка, удаление ссылки и перемещение пишутся в журнал. Последнее изменение (синк, удаление, очистка, копирование) откатывается кнопкой Undo в уведомлении или ⌘Z. Ничего не удаляется насовсем: папки уходят в корзину.
 
@@ -60,7 +60,7 @@
 Нужен Rust 1.99.1 (закреплён в `rust-toolchain.toml`) и Node.js (pnpx, npx или bunx) для skills.sh.
 
 ```bash
-./scripts/bundle-macos.sh --install   # собрать «Skills Explorer.app» и положить в ~/Applications
+./scripts/bundle-macos.sh --install   # собрать «Prism.app» и положить в ~/Applications
 ```
 
 ```bash
@@ -74,7 +74,7 @@ cargo run --release -- ~/path/to/project   # из терминала, сразу
 ```bash
 cargo test                       # ядро + UI в headless-режиме на временном $HOME
 cargo test -- --ignored          # с сетью: установка из skills.sh, список репозитория, проверка обновлений
-./target/debug/skills-explorer --snap out.png --scene sync --theme dark   # снимок без окна
+./target/debug/prism --snap out.png --scene sync --theme dark   # снимок без окна
 ```
 
 Сцены: `detail`, `sync`, `remove`, `bulk`, `bulk-remove`, `updates`, `copy`, `new-skill`, `browse`, `repo`, `notice`.

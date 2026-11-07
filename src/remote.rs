@@ -40,7 +40,7 @@ struct SearchResponse {
 }
 
 fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(15)).user_agent(concat!("skills-explorer/", env!("CARGO_PKG_VERSION"))).build()
+    ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(15)).user_agent(concat!("prism/", env!("CARGO_PKG_VERSION"))).build()
 }
 
 /// Searches skills.sh. An empty query returns nothing.

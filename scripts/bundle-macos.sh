@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Builds "Skills Explorer.app" in target/release, and with --install copies it to
+# Builds "Prism.app" in target/release, and with --install copies it to
 # ~/Applications. Besides cargo it needs only iconutil and codesign, which macOS ships.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-NAME="Skills Explorer"
-ID="dev.skills-explorer"
+NAME="Prism"
+ID="dev.prism.skills"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 APP="target/release/$NAME.app"
 
@@ -24,7 +24,7 @@ iconutil -c icns "$WORK/icon.iconset" -o "$WORK/AppIcon.icns"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp target/release/skills-explorer "$APP/Contents/MacOS/skills-explorer"
+cp target/release/prism "$APP/Contents/MacOS/prism"
 cp "$WORK/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -36,7 +36,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key><string>$ID</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
-  <key>CFBundleExecutable</key><string>skills-explorer</string>
+  <key>CFBundleExecutable</key><string>prism</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>

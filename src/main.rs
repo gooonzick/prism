@@ -1,4 +1,4 @@
-//! Skills Explorer: browse the agent skills on this machine, install more from skills.sh, and
+//! Prism: browse the agent skills on this machine, install more from skills.sh, and
 //! keep `.agents/skills` linked into `.claude`, `.codex`, `.opencode` and the other agents,
 //! globally or per project.
 //!
@@ -125,7 +125,7 @@ fn main() {
         on_key: Some(ui::on_key),
         min_size: Some((820.0, 520.0)),
         scenes: SCENES,
-        ..AppSpec::new("Skills Explorer", (1180.0, 760.0), init, ui::view)
+        ..AppSpec::new("Prism", (1180.0, 760.0), init, ui::view)
     };
     rune::App::new(spec).chrome(ui::chrome()).run();
 }

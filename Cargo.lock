@@ -2475,6 +2475,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8cf8e6a8aa66ce33f63993ffc4ea4271eb5b0530a9002db8455ea6050c77bfa"
 
 [[package]]
+name = "prism"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "notify",
+ "resvg",
+ "rune",
+ "rune-kit",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "ureq",
+]
+
+[[package]]
 name = "proc-macro-crate"
 version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3042,21 +3057,6 @@ name = "siphasher"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
-
-[[package]]
-name = "skills-explorer"
-version = "0.1.0"
-dependencies = [
- "dirs",
- "notify",
- "resvg",
- "rune",
- "rune-kit",
- "serde",
- "serde_json",
- "tempfile",
- "ureq",
-]
 
 [[package]]
 name = "skrifa"

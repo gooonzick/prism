@@ -1,5 +1,5 @@
 [package]
-name = "skills-explorer"
+name = "prism"
 version = "0.1.0"
 edition = "2024"
 description = "Browse, install and sync agent skills across .agents, .claude, .codex, .opencode and more"

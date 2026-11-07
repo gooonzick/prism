@@ -1,35 +1,32 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#2b2f3a"/>
-      <stop offset="1" stop-color="#14161c"/>
+      <stop offset="0" stop-color="#2a2d36"/>
+      <stop offset="1" stop-color="#121318"/>
     </linearGradient>
-    <linearGradient id="a" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#7cc4ff"/>
-      <stop offset="1" stop-color="#3a7bff"/>
-    </linearGradient>
-    <linearGradient id="b" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#ffb86b"/>
-      <stop offset="1" stop-color="#ff7a45"/>
-    </linearGradient>
-    <linearGradient id="c" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#8be0a4"/>
-      <stop offset="1" stop-color="#2fb36b"/>
+    <linearGradient id="glass" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.06"/>
     </linearGradient>
   </defs>
-  <!-- macOS icon grid: an 824 pt squircle-ish tile centred in 1024 -->
+  <!-- macOS icon grid: an 824 pt tile centred in 1024 -->
   <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#bg)"/>
   <rect x="100.5" y="100.5" width="823" height="823" rx="185.5" fill="none" stroke="#ffffff" stroke-opacity="0.08"/>
-  <!-- Three skill cards, one per agent, stacked and fanned -->
-  <g transform="translate(512 520)">
-    <rect x="-190" y="-215" width="300" height="370" rx="44" fill="url(#c)" transform="rotate(-14)" opacity="0.92"/>
-    <rect x="-150" y="-200" width="300" height="370" rx="44" fill="url(#b)" transform="rotate(-2)" opacity="0.95"/>
-    <rect x="-110" y="-185" width="300" height="370" rx="44" fill="url(#a)" transform="rotate(10)"/>
-    <g transform="rotate(10) translate(40 0)" fill="none" stroke="#0b1530" stroke-opacity="0.55" stroke-width="22" stroke-linecap="round">
-      <path d="M-70 -95 H70"/>
-      <path d="M-70 -35 H40"/>
-      <path d="M-70 25 H70"/>
-      <path d="M-70 85 H10"/>
-    </g>
+  <!-- One beam in: the skill in .agents -->
+  <path d="M150 585 L396 508" stroke="#ffffff" stroke-width="34" stroke-linecap="round"/>
+  <!-- Four rays out, each landing in an agent -->
+  <g stroke-width="30" stroke-linecap="round" fill="none">
+    <path d="M612 471 L800 330" stroke="#ff6b4a"/>
+    <path d="M612 471 L800 430" stroke="#ffb340"/>
+    <path d="M612 471 L800 530" stroke="#2fc48d"/>
+    <path d="M612 471 L800 630" stroke="#4a9bff"/>
   </g>
+  <circle cx="808" cy="324" r="46" fill="#ff6b4a"/>
+  <circle cx="808" cy="428" r="46" fill="#ffb340"/>
+  <circle cx="808" cy="532" r="46" fill="#2fc48d"/>
+  <circle cx="808" cy="636" r="46" fill="#4a9bff"/>
+  <!-- The prism -->
+  <path d="M512 250 L296 724 L728 724 Z" fill="#1c1e25"/>
+  <path d="M512 250 L296 724 L728 724 Z" fill="url(#glass)" stroke="#ffffff" stroke-width="36" stroke-linejoin="round"/>
+  <path d="M396 508 L612 471" stroke="#ffffff" stroke-opacity="0.45" stroke-width="24" stroke-linecap="round"/>
 </svg>
