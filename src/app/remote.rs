@@ -160,9 +160,10 @@ impl App {
     }
 
 
-    /// Checks the current scope for updates once a session, in the background.
+    /// Checks the current scope for updates once a session, in the background. Without Node
+    /// there is nothing to check with; that only gets reported when asked for.
     pub(super) fn check_updates_once(&mut self) {
-        if self.waker.is_some() && !self.checked_once.contains(&self.scope) {
+        if self.waker.is_some() && !self.checked_once.contains(&self.scope) && remote::runner().is_some() {
             self.check_updates();
         }
     }

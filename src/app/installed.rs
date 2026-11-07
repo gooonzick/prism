@@ -380,15 +380,32 @@ impl App {
 pub fn open_path(path: &std::path::Path) {
     // Tests click the buttons that call this; they must not open windows on the machine.
     if cfg!(not(test)) {
-        let _ = std::process::Command::new("open").arg(path).spawn();
+        let _ = std::process::Command::new(if cfg!(target_os = "macos") { "open" } else { "xdg-open" }).arg(path).spawn();
     }
 }
 
-/// Shows a file or folder in Finder.
+/// Shows a file or folder in Finder, or the desktop's file manager.
 pub fn reveal_path(path: &std::path::Path) {
-    if cfg!(not(test)) {
-        let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+    if cfg!(test) {
+        return;
     }
+    if cfg!(target_os = "macos") {
+        let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+        return;
+    }
+    // The file manager's FileManager1 interface selects the item; without one, open its folder.
+    let (path, uri) = (path.to_path_buf(), format!("array:string:file://{}", crate::fsops::uri_escape(path)));
+    std::thread::spawn(move || {
+        let shown = std::process::Command::new("dbus-send")
+            .args(["--session", "--print-reply", "--dest=org.freedesktop.FileManager1", "--type=method_call", "/org/freedesktop/FileManager1", "org.freedesktop.FileManager1.ShowItems", &uri, "string:"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if !shown {
+            let _ = std::process::Command::new("xdg-open").arg(path.parent().unwrap_or(&path)).spawn();
+        }
+    });
 }
 
 /// Skill names as agents accept them: lowercase letters, digits and single hyphens.

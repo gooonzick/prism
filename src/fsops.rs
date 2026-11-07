@@ -14,8 +14,10 @@ enum Step {
     Linked(PathBuf),
     /// A symlink was removed; it pointed at `target` (as written, relative or not).
     Unlinked { at: PathBuf, target: PathBuf },
-    /// A folder or file was moved, to the trash or into `.agents`.
+    /// A folder or file was moved into `.agents`.
     Moved { from: PathBuf, to: PathBuf },
+    /// A folder or file went to the trash. `info` is its freedesktop `.trashinfo`, off macOS.
+    Trashed { from: PathBuf, to: PathBuf, info: Option<PathBuf> },
     /// A folder was copied here.
     Copied(PathBuf),
 }
@@ -83,8 +85,9 @@ impl Journal {
         if meta.file_type().is_symlink() {
             return self.remove_link(path);
         }
-        let dst = trash_slot(path, paths)?;
-        self.move_to(path, &dst)
+        let (to, info) = trash(path, paths)?;
+        self.steps.push(Step::Trashed { from: path.to_path_buf(), to, info });
+        Ok(())
     }
 
     /// Reverses every step, last first. Stops at the first step that can't be reversed (the
@@ -106,7 +109,15 @@ impl Journal {
                     Ok(_) => Err(io::Error::other(format!("{} exists again", from.display()))),
                     Err(_) => move_path(to, from),
                 },
-                Step::Copied(at) => trash_slot(at, paths).and_then(|dst| move_path(at, &dst)),
+                Step::Trashed { from, to, info } => match fs::symlink_metadata(from) {
+                    Ok(_) => Err(io::Error::other(format!("{} exists again", from.display()))),
+                    Err(_) => move_path(to, from).map(|()| {
+                        if let Some(info) = info {
+                            let _ = fs::remove_file(info);
+                        }
+                    }),
+                },
+                Step::Copied(at) => trash(at, paths).map(|_| ()),
             };
             result.map_err(|e| format!("Undid {done} of {n} steps: {e}"))?;
         }
@@ -114,27 +125,74 @@ impl Journal {
     }
 }
 
-/// A free path in the trash for `path`'s name.
-fn trash_slot(path: &Path, paths: &Paths) -> io::Result<PathBuf> {
-    let trash = trash_dir(paths);
-    fs::create_dir_all(&trash)?;
+/// Moves `path` to the trash. Returns where it went and, in a freedesktop trash, its info file.
+fn trash(path: &Path, paths: &Paths) -> io::Result<(PathBuf, Option<PathBuf>)> {
+    if cfg!(target_os = "macos") {
+        let dst = free_slot(&paths.trash, path, |_| true)?;
+        move_path(path, &dst)?;
+        Ok((dst, None))
+    } else {
+        trash_freedesktop(path, &paths.trash).map(|(dst, info)| (dst, Some(info)))
+    }
+}
+
+/// The trash file managers on Linux use: the item in `files/`, and in `info/` a `.trashinfo`
+/// with its original path, so it can be put back from there too.
+fn trash_freedesktop(path: &Path, trash: &Path) -> io::Result<(PathBuf, PathBuf)> {
+    let (files, infos) = (trash.join("files"), trash.join("info"));
+    fs::create_dir_all(&infos)?;
+    let info_for = |dst: &Path| infos.join(format!("{}.trashinfo", dst.file_name().unwrap_or_default().to_string_lossy()));
+    let dst = free_slot(&files, path, |dst| fs::symlink_metadata(info_for(dst)).is_err())?;
+    let info = info_for(&dst);
+    let original = std::path::absolute(path)?;
+    let body = format!("[Trash Info]\nPath={}\nDeletionDate={}\n", uri_escape(&original), local_now());
+    // The info file comes first and is created exclusively: it reserves the name.
+    fs::OpenOptions::new().write(true).create_new(true).open(&info).and_then(|mut f| io::Write::write_all(&mut f, body.as_bytes()))?;
+    if let Err(e) = move_path(path, &dst) {
+        let _ = fs::remove_file(&info);
+        return Err(e);
+    }
+    Ok((dst, info))
+}
+
+/// A path in `dir` for `path`'s name that is free, and that `ok` accepts.
+fn free_slot(dir: &Path, path: &Path, ok: impl Fn(&Path) -> bool) -> io::Result<PathBuf> {
+    fs::create_dir_all(dir)?;
     let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-    let mut dst = trash.join(&name);
+    let mut dst = dir.join(&name);
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let mut n = 0;
-    while fs::symlink_metadata(&dst).is_ok() {
+    while fs::symlink_metadata(&dst).is_ok() || !ok(&dst) {
         n += 1;
-        dst = trash.join(format!("{name} {stamp}-{n}"));
+        dst = dir.join(format!("{name} {stamp}-{n}"));
     }
     Ok(dst)
 }
 
-fn trash_dir(paths: &Paths) -> PathBuf {
-    if cfg!(target_os = "macos") {
-        paths.home.join(".Trash")
-    } else {
-        std::env::var_os("XDG_DATA_HOME").map_or_else(|| paths.home.join(".local/share"), PathBuf::from).join("Trash/files")
+/// A path as a URI path: unreserved bytes and `/` as they are, the rest percent-encoded.
+pub fn uri_escape(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut out = String::new();
+    for &b in path.as_os_str().as_bytes() {
+        if b.is_ascii_alphanumeric() || b"/-._~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
     }
+    out
+}
+
+/// The local time as a `.trashinfo` wants it: `2026-11-07T14:05:09`.
+fn local_now() -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as libc::time_t;
+    // SAFETY: `localtime_r` only writes the `tm` it is given.
+    let tm = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&now, &mut tm);
+        tm
+    };
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec)
 }
 
 /// `to` written relative to the folder `from`. Both are absolute and normalised.
@@ -227,6 +285,27 @@ mod tests {
         assert!(!skill.exists());
         j.undo(&paths).unwrap();
         assert!(skill.is_dir());
+    }
+
+    #[test]
+    fn the_freedesktop_trash_keeps_where_things_came_from() {
+        let home = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(home.path()).unwrap();
+        let trash = root.join(".local/share/Trash");
+        let skill = root.join("my skills/x");
+        fs::create_dir_all(&skill).unwrap();
+        let (dst, info) = trash_freedesktop(&skill, &trash).unwrap();
+        assert_eq!(dst, trash.join("files/x"));
+        assert!(dst.is_dir() && !skill.exists());
+        let text = fs::read_to_string(&info).unwrap();
+        assert!(text.starts_with("[Trash Info]\n"));
+        assert!(text.contains(&format!("Path={}/my%20skills/x\n", uri_escape(&root))), "{text}");
+        assert!(text.contains("DeletionDate=20"), "{text}");
+
+        fs::create_dir_all(&skill).unwrap();
+        let (second, info2) = trash_freedesktop(&skill, &trash).unwrap();
+        assert_ne!(second, dst, "a second x gets its own name");
+        assert_eq!(info2.file_name().unwrap().to_string_lossy(), format!("{}.trashinfo", second.file_name().unwrap().to_string_lossy()));
     }
 
     #[test]

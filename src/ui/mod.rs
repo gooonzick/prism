@@ -245,6 +245,16 @@ pub fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 /// The row of a key-value field in the inspector.
+/// `key` with the platform's command modifier, as shortcut hints show it: "⌘N", or "Ctrl+N".
+pub fn key_label(key: &str) -> String {
+    if cfg!(target_os = "macos") { format!("⌘{key}") } else { format!("Ctrl+{key}") }
+}
+
+/// How to pick several rows with the mouse.
+pub fn pick_hint() -> &'static str {
+    if cfg!(target_os = "macos") { "⌘- or ⇧-click" } else { "Ctrl- or Shift-click" }
+}
+
 pub fn field(label: &str, value: El, k: &Kit) -> El {
     col().gap(3.0).w_full().child(heading(label, k)).child(value)
 }

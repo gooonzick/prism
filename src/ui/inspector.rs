@@ -85,7 +85,7 @@ fn actions(s: &App, skill: &Skill, k: &Kit) -> El {
         )
         .child(
             small("Reveal")
-                .help("Show the folder in Finder")
+                .help(if cfg!(target_os = "macos") { "Show the folder in Finder" } else { "Show the folder in the file manager" })
                 .disabled(folder.is_none())
                 .on_press(move |_: &mut App| {
                     if let Some(p) = &folder {

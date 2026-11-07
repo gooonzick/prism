@@ -16,6 +16,8 @@ pub struct Paths {
     pub claude: PathBuf,
     /// `$CODEX_HOME`, else `~/.codex`.
     pub codex: PathBuf,
+    /// The trash: `~/.Trash` on macOS, the freedesktop trash (`$XDG_DATA_HOME/Trash`) elsewhere.
+    pub trash: PathBuf,
 }
 
 impl Paths {
@@ -30,6 +32,11 @@ impl Paths {
             config: var("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config")),
             claude: var("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude")),
             codex: var("CODEX_HOME").unwrap_or_else(|| home.join(".codex")),
+            trash: if cfg!(target_os = "macos") {
+                home.join(".Trash")
+            } else {
+                var("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local/share")).join("Trash")
+            },
             home,
         }
     }
@@ -37,7 +44,8 @@ impl Paths {
     /// Paths rooted entirely in `home`, ignoring the environment.
     #[cfg(test)]
     pub fn isolated(home: &Path) -> Paths {
-        Paths { home: home.into(), config: home.join(".config"), claude: home.join(".claude"), codex: home.join(".codex") }
+        let trash = if cfg!(target_os = "macos") { home.join(".Trash") } else { home.join(".local/share/Trash") };
+        Paths { home: home.into(), config: home.join(".config"), claude: home.join(".claude"), codex: home.join(".codex"), trash }
     }
 }
 

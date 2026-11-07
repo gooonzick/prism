@@ -6,10 +6,12 @@
 
 **One home for your agent skills, linked into every coding agent.**
 
-A native macOS app to browse the skills on your machine, install new ones from [skills.sh](https://skills.sh), and keep Claude Code, Codex, OpenCode, Cursor and the rest in sync, globally or per project.
+A native app for macOS and Linux to browse the skills on your machine, install new ones from [skills.sh](https://skills.sh), and keep Claude Code, Codex, OpenCode, Cursor and the rest in sync, globally or per project.
 
 ![Rust](https://img.shields.io/badge/Rust-1.99-orange?logo=rust)
 ![macOS](https://img.shields.io/badge/macOS-13%2B-lightgrey?logo=apple)
+![Linux](https://img.shields.io/badge/Linux-Wayland%20%7C%20X11-lightgrey?logo=linux&logoColor=white)
+[![CI](https://github.com/gooonzick/prism/actions/workflows/ci.yml/badge.svg)](https://github.com/gooonzick/prism/actions/workflows/ci.yml)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
 <picture>
@@ -41,7 +43,7 @@ Prism keeps **one real copy** of each skill in `.agents/skills`, the same place 
 - **Install from skills.sh.** Search the index, preview `SKILL.md`, list every skill in a repository and pick the ones you want. Installs and updates run through the official `skills` CLI.
 - **Updates.** Prism checks your skills against their sources in the background and updates one, several, or all of them.
 - **Projects.** Add project folders one by one, or let *Find projects* scan a folder for projects that already have skills. Skills move between scopes with *Copy to*.
-- **Safe by default.** Nothing is deleted outright: replaced folders go to the Trash. The last change (a sync, remove, cleanup or copy) can be undone with ⌘Z.
+- **Safe by default.** Nothing is deleted outright: replaced folders go to the Trash (the freedesktop trash on Linux, so your file manager can put them back). The last change (a sync, remove, cleanup or copy) can be undone with ⌘Z.
 - **Live.** Prism watches the skill folders, so changes from the terminal, an editor or git show up on their own.
 - **Fast and native.** Written in Rust on [Rune](https://github.com/anomalyco/rune), with a GPU-drawn UI in light and dark.
 
@@ -76,21 +78,51 @@ By default Prism links into the agents installed on your machine; you can change
 
 ## Install
 
-Prism builds from source. You need [Rust](https://rustup.rs) (the pinned toolchain installs itself) and, for skills.sh, Node.js with `pnpx`, `npx` or `bunx`.
+### Download
+
+Grab the latest build from [Releases](https://github.com/gooonzick/prism/releases/latest).
+
+**macOS** (Apple silicon): unzip `prism-*-macos-arm64.zip` and move `Prism.app` to Applications. The app isn't notarized, so clear the download flag once before opening it:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Prism.app
+```
+
+**Linux** (x86_64 or arm64, Wayland or X11): unpack the tarball and run its installer. It puts `prism`, a desktop entry and the icon into `~/.local`, so Prism appears in your app launcher.
+
+```bash
+tar -xzf prism-*-linux-*.tar.gz
+./prism-*/install.sh
+```
+
+For skills.sh, Prism needs Node.js with `pnpx`, `npx` or `bunx`.
+
+### Build from source
+
+You need [Rust](https://rustup.rs); the pinned toolchain installs itself.
 
 ```bash
 git clone https://github.com/gooonzick/prism.git
 cd prism
-./scripts/bundle-macos.sh --install
+./scripts/bundle-macos.sh --install    # macOS: Prism.app in ~/Applications
+./scripts/package-linux.sh --install   # Linux: prism in ~/.local
 ```
 
-This builds `Prism.app` and copies it to `~/Applications`, where Spotlight and Launchpad find it. To run it straight from the terminal, optionally opening a project:
+On Linux, install the build dependencies first. On Debian and Ubuntu:
+
+```bash
+sudo apt install pkg-config libwayland-dev libxkbcommon-dev libdbus-1-dev
+```
+
+To run it straight from the terminal, optionally opening a project:
 
 ```bash
 cargo run --release -- ~/path/to/project
 ```
 
 ## Keyboard
+
+On Linux, ⌘ is Ctrl.
 
 | Keys | Action |
 | --- | --- |

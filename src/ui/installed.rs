@@ -34,7 +34,7 @@ fn toolbar(s: &App, unsynced: usize, k: &Kit) -> Toolbar {
                     .variant(IconButtonVariant::GhostMuted)
                     .label("New skill")
                     .help("New skill")
-                    .shortcut("⌘N")
+                    .shortcut("cmd+n")
                     .on_press(|s: &mut App| s.open_new_skill())
                     .build(k)
                     .key("new-skill"),
@@ -54,7 +54,7 @@ fn toolbar(s: &App, unsynced: usize, k: &Kit) -> Toolbar {
                     .variant(IconButtonVariant::GhostMuted)
                     .label("Rescan")
                     .help("Rescan")
-                    .shortcut("⌘R")
+                    .shortcut("cmd+r")
                     .on_press(|s: &mut App| s.rescan())
                     .build(k)
                     .key("rescan"),
@@ -89,7 +89,7 @@ fn main(s: &App, visible: &[usize], targets: &[usize], k: &Kit) -> El {
         .key("filter");
     let mut list = col().key("skills").w_full().gap(2.0);
     if s.inv.skills.is_empty() {
-        list = list.child(empty("No skills here yet", "Install one from skills.sh, or make one with New skill (⌘N).", k));
+        list = list.child(empty("No skills here yet", &format!("Install one from skills.sh, or make one with New skill ({}).", crate::ui::key_label("N")), k));
     } else if visible.is_empty() {
         let hint = match s.status_filter {
             Filter::All => "Try another word.",
@@ -160,7 +160,7 @@ fn list_header(s: &App, visible: &[usize], k: &Kit) -> El {
     let middle = if n == 0 {
         let total = s.inv.skills.len();
         let root = tilde(&s.inv.scope.root(&s.paths), &s.paths);
-        let summary = format!("{total} skill{} in {root} · ⌘- or ⇧-click to pick several", if total == 1 { "" } else { "s" });
+        let summary = format!("{total} skill{} in {root} · {} to pick several", if total == 1 { "" } else { "s" }, crate::ui::pick_hint());
         let mut r = row().grow(1.0).min_w(0.0).gap(12.0).center_y().child(text(summary).font(k.ty.small).color(k.c.text_faint).grow(1.0).min_w(0.0).truncate());
         let broken = crate::sync::broken_links(&s.inv).len();
         if broken > 0 {
