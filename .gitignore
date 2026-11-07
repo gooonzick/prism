@@ -1,1 +1,5 @@
 /target
+
+# Agent skills installed locally for working on this repo; not part of Prism.
+/.agents/
+/.claude/

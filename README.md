@@ -1,91 +1,137 @@
+<div align="center">
+
+<img src="assets/icon.svg" width="128" alt="Prism icon">
+
 # Prism
 
-Нативное приложение на Rust + [Rune](https://github.com/anomalyco/rune) для работы со скиллами агентов:
+**One home for your agent skills, linked into every coding agent.**
 
-- **просмотр** всех установленных скиллов — глобально (`~`) и в любой папке проекта;
-- **skills.sh** как источник: поиск по индексу, превью `SKILL.md`, список скиллов репозитория, установка и обновление через CLI `skills`;
-- **синхронизация** между `.agents/skills` и папками агентов: `.claude`, `.codex`, `.opencode`, `.cursor`, `.gemini`, `.github` (Copilot), `.windsurf`, `.goose`, `.kiro`, `.roo`.
+A native macOS app to browse the skills on your machine, install new ones from [skills.sh](https://skills.sh), and keep Claude Code, Codex, OpenCode, Cursor and the rest in sync, globally or per project.
 
-![Global](docs/global.png)
+![Rust](https://img.shields.io/badge/Rust-1.99-orange?logo=rust)
+![macOS](https://img.shields.io/badge/macOS-13%2B-lightgrey?logo=apple)
+![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
-## Как устроена синхронизация
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/detail-dark.png">
+  <img src="docs/detail.png" alt="Prism showing global skills, their agents and a skill's details">
+</picture>
 
-`.agents/skills/<skill>` — единственная настоящая копия (так же раскладывает CLI skills.sh). В папке каждого агента лежит относительный симлинк на неё.
+</div>
 
-Кнопка **Sync** показывает план и ничего не меняет, пока его не подтвердишь:
+## Why
 
-- скилл, который есть только у одного агента, переезжает в `.agents` и линкуется обратно;
-- ссылка агента на внешнюю папку становится ссылкой `.agents/<skill>` на ту же папку;
-- одинаковая копия у агента заменяется ссылкой (копия уходит в корзину);
-- разные копии и чужие ссылки не трогаются, а показываются как пропущенные.
+Every coding agent looks for skills in its own folder: `~/.claude/skills`, `~/.codex/skills`, `~/.config/opencode/skills`, and more in every project. Install a skill for one agent and the others never see it. Copies drift apart, links break, and nothing shows you the whole picture.
 
-Агенты для синка выбираются в диалоге Sync. По умолчанию это те, чья папка конфигурации есть на машине. Выбор сохраняется в `~/Library/Application Support/dev.prism.skills/settings.json` вместе со списком проектов.
+Prism keeps **one real copy** of each skill in `.agents/skills`, the same place the [`skills` CLI](https://github.com/vercel-labs/skills) puts them, and links it into every agent you use.
 
-**Undo.** Каждая ссылка, удаление ссылки и перемещение пишутся в журнал. Последнее изменение (синк, удаление, очистка, копирование) откатывается кнопкой Undo в уведомлении или ⌘Z. Ничего не удаляется насовсем: папки уходят в корзину.
-
-![Sync](docs/sync.png)
-
-## Список
-
-- Вкладки **All / Unsynced / Broken / Updates** и поиск по имени и описанию.
-- **Clean up N broken links** убирает ссылки в никуда одним нажатием.
-- Метки показывают, где лежит скилл; **update** — на skills.sh есть новее; **also global** — проектный скилл с тем же именем, что и глобальный.
-- Выбор нескольких: чекбоксы, ⌘-клик (переключить), ⇧-клик (диапазон), ⌘A, Space, ⇧↑/⇧↓. Для выбранных: **Sync**, **Update**, **Copy to…**, **Remove…**.
-- ↑/↓ двигают выделение, инспектор показывает выбранный скилл.
-- Папки скиллов отслеживаются: изменения из терминала, CLI или редактора появляются сами.
-
-В инспекторе: **Open SKILL.md**, **Reveal**, **Copy to…** (в другой скоуп), **Remove…**, переключатель ссылки для каждого агента. У собственной копии агента — **Use link** (заменить ссылкой) и ✕ (в корзину).
-
-**New skill** (⌘N) создаёт `.agents/skills/<name>/SKILL.md` с frontmatter, линкует его и открывает в редакторе.
-
-![Детали](docs/detail.png)
-
-## Проекты
-
-**Add project…** добавляет папку, **Find projects…** ищет в выбранной папке (до 4 уровней) проекты, где уже есть скиллы, и предлагает добавить их пачкой. В сайдбаре у каждого скоупа бейдж с числом несинхронизированных скиллов.
-
-## skills.sh
-
-Поиск идёт через `https://skills.sh/api/search`. Установка вызывает
-`skills add <owner/repo> --skill <id…> --agent codex --yes [--global]` в корне выбранного скоупа: для этого CLI папка Codex и есть `.agents/skills`, поэтому скилл попадает только в каноническое хранилище. Дальше приложение само линкует его в выбранных агентов.
-
-Поле внизу принимает `owner/repo`, `owner/repo@skill`, GitHub-ссылку или ссылку на skills.sh. **Show skills** показывает скиллы репозитория (`skills add -l`) с чекбоксами, **Install all** ставит всё.
-
-Обновления: при открытии скоупа приложение в фоне вызывает `skills check`, кнопка ↑ в тулбаре проверяет заново, **Update** вызывает `skills update`.
-
-![skills.sh](docs/browse.png)
-
-## Запуск
-
-Нужен Rust 1.99.1 (закреплён в `rust-toolchain.toml`) и Node.js (pnpx, npx или bunx) для skills.sh.
-
-```bash
-./scripts/bundle-macos.sh --install   # собрать «Prism.app» и положить в ~/Applications
+```
+~/.agents/skills/find-skills            ← the skill itself
+~/.claude/skills/find-skills            → ../../.agents/skills/find-skills
+~/.config/opencode/skills/find-skills   → ../../../.agents/skills/find-skills
 ```
 
+## Features
+
+- **See everything in one place.** Every skill in `~` or in a project, which agents have it, and whether each one is a link, its own copy, or a broken link.
+- **Sync with a preview.** Prism shows the full plan before it changes anything:
+  - a skill only one agent has moves into `.agents` and is linked back;
+  - identical copies are replaced with links;
+  - folders that differ are skipped, never overwritten.
+- **Install from skills.sh.** Search the index, preview `SKILL.md`, list every skill in a repository and pick the ones you want. Installs and updates run through the official `skills` CLI.
+- **Updates.** Prism checks your skills against their sources in the background and updates one, several, or all of them.
+- **Projects.** Add project folders one by one, or let *Find projects* scan a folder for projects that already have skills. Skills move between scopes with *Copy to*.
+- **Safe by default.** Nothing is deleted outright: replaced folders go to the Trash. The last change (a sync, remove, cleanup or copy) can be undone with ⌘Z.
+- **Live.** Prism watches the skill folders, so changes from the terminal, an editor or git show up on their own.
+- **Fast and native.** Written in Rust on [Rune](https://github.com/anomalyco/rune), with a GPU-drawn UI in light and dark.
+
+<table>
+  <tr>
+    <td><img src="docs/sync.png" alt="Sync dialog with the planned changes"></td>
+    <td><img src="docs/browse.png" alt="Searching skills.sh"></td>
+  </tr>
+  <tr>
+    <td align="center">Every sync shows its plan first</td>
+    <td align="center">Search and install from skills.sh</td>
+  </tr>
+</table>
+
+## Supported agents
+
+| Agent | Global folder | Project folder |
+| --- | --- | --- |
+| Shared store | `~/.agents/skills` | `.agents/skills` |
+| Claude Code | `~/.claude/skills` | `.claude/skills` |
+| Codex | `~/.codex/skills` | `.codex/skills` |
+| OpenCode | `~/.config/opencode/skills` | `.opencode/skills` |
+| Cursor | `~/.cursor/skills` | `.cursor/skills` |
+| Gemini CLI | `~/.gemini/skills` | `.gemini/skills` |
+| GitHub Copilot | `~/.copilot/skills` | `.github/skills` |
+| Windsurf | `~/.codeium/windsurf/skills` | `.windsurf/skills` |
+| Goose | `~/.config/goose/skills` | `.goose/skills` |
+| Kiro | `~/.kiro/skills` | `.kiro/skills` |
+| Roo Code | `~/.roo/skills` | `.roo/skills` |
+
+By default Prism links into the agents installed on your machine; you can change the list in the Sync dialog. `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `XDG_CONFIG_HOME` are respected.
+
+## Install
+
+Prism builds from source. You need [Rust](https://rustup.rs) (the pinned toolchain installs itself) and, for skills.sh, Node.js with `pnpx`, `npx` or `bunx`.
+
 ```bash
-cargo run --release -- ~/path/to/project   # из терминала, сразу открыв проект
+git clone https://github.com/gooonzick/prism.git
+cd prism
+./scripts/bundle-macos.sh --install
 ```
 
-Горячие клавиши: ⌘N — новый скилл, ⌘Z — отменить, ⌘R — пересканировать, ⌘K — skills.sh, ⌘F — поиск, ⌘A — выбрать все, Esc — снять выбор, ↑/↓ — по списку, Space — отметить, ⇧⌘B — сайдбар.
-
-## Разработка
+This builds `Prism.app` and copies it to `~/Applications`, where Spotlight and Launchpad find it. To run it straight from the terminal, optionally opening a project:
 
 ```bash
-cargo test                       # ядро + UI в headless-режиме на временном $HOME
-cargo test -- --ignored          # с сетью: установка из skills.sh, список репозитория, проверка обновлений
-./target/debug/prism --snap out.png --scene sync --theme dark   # снимок без окна
+cargo run --release -- ~/path/to/project
 ```
 
-Сцены: `detail`, `sync`, `remove`, `bulk`, `bulk-remove`, `updates`, `copy`, `new-skill`, `browse`, `repo`, `notice`.
+## Keyboard
 
-| Файл | Что делает |
+| Keys | Action |
 | --- | --- |
-| `src/agents.rs` | таблица агентов и их папок (глобально и в проекте) |
-| `src/scan.rs` | что где установлено: папка, ссылка в `.agents`, чужая или битая ссылка |
-| `src/sync.rs` | план синхронизации, link / unlink / remove / copy, битые ссылки |
-| `src/fsops.rs` | журнал изменений на диске и Undo, корзина |
-| `src/remote.rs` | поиск на skills.sh, превью с GitHub, CLI `skills` (add, check, update, list) |
-| `src/app/` | состояние и действия: список, skills.sh, слежение за папками, поиск проектов |
-| `src/ui/` | экраны на rune-kit: сайдбар, список, инспектор, диалоги |
-| `scripts/bundle-macos.sh` | сборка `.app` с иконкой из `assets/icon.svg` |
+| ↑ ↓ | Move through the list |
+| ⇧↑ ⇧↓, ⇧-click | Select a range |
+| ⌘-click, Space | Select a skill |
+| ⌘A | Select all |
+| Esc | Clear the selection |
+| ⌘N | New skill |
+| ⌘Z | Undo the last change |
+| ⌘R | Rescan |
+| ⌘F | Filter |
+| ⌘K | Search skills.sh |
+| ⇧⌘B | Toggle the sidebar |
+
+## Development
+
+```bash
+cargo test                    # core and UI tests, headless, on a throwaway $HOME
+cargo test -- --ignored       # also hit skills.sh and GitHub
+./scripts/demo-home.sh        # rebuild the screenshots in docs/ from a demo home
+```
+
+Any screen renders without a window, which is handy for checking layout:
+
+```bash
+./target/debug/prism --snap out.png --scene sync --theme dark
+```
+
+Scenes: `detail`, `sync`, `remove`, `bulk`, `bulk-remove`, `updates`, `copy`, `new-skill`, `browse`, `repo`, `notice`.
+
+| Path | What it does |
+| --- | --- |
+| `src/agents.rs` | the agents and their skill folders |
+| `src/scan.rs` | what is installed where: folder, link, foreign or broken link |
+| `src/sync.rs` | sync plans, linking, removing, copying, broken links |
+| `src/fsops.rs` | the change journal behind undo, and the Trash |
+| `src/remote.rs` | skills.sh search, previews from GitHub, the `skills` CLI |
+| `src/app/` | app state and actions |
+| `src/ui/` | the screens, built with rune-kit |
+
+## License
+
+[MIT](LICENSE)

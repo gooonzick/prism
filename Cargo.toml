@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Browse, install and sync agent skills across .agents, .claude, .codex, .opencode and more"
 license = "MIT"
+repository = "https://github.com/gooonzick/prism"
 
 [dependencies]
 rune = { git = "https://github.com/anomalyco/rune", rev = "7ead7d63fcf6f9dd9669385a8b90e2ae80015d7b", features = ["native-file-dialog"] }
