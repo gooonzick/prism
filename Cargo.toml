@@ -17,6 +17,9 @@ dirs = "5"
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 # Local time for the freedesktop trash's info files.
 libc = "0.2"
+# MCP configs, edited in place so comments, key order and formatting survive.
+jsonc-parser = { version = "0.34", features = ["cst", "serde"] }
+toml_edit = "0.25"
 
 [dev-dependencies]
 tempfile = "3"
