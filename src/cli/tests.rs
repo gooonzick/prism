@@ -234,3 +234,178 @@ fn targets_set_saves_and_rejects_unknown_agent() {
     assert!(err.contains("nope") && err.contains("claude"), "{err}");
     assert_eq!(Settings::load_from(&c.paths).targets, Some(vec!["claude".to_string(), "codex".to_string()]));
 }
+
+/// A skill that exists only in Claude's folder, with Codex as the one sync target.
+fn unsynced(home: &std::path::Path) -> Ctx {
+    write_skill(&home.join(".claude/skills"), "review", "Reviews");
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    let mut c = ctx(home);
+    c.settings.targets = Some(vec!["claude".into(), "codex".into()]);
+    c
+}
+
+#[test]
+fn sync_without_apply_changes_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let mut c = unsynced(home.path());
+    let (code, out, _) = go(&["skills", "sync", "--json"], &mut c);
+    assert_eq!(code, 0);
+    let v = json(&out);
+    assert_eq!(v["applied"], false);
+    assert_eq!(v["plan_id"].as_str().unwrap().len(), 12);
+    assert!(!v["actions"].as_array().unwrap().is_empty());
+    assert!(v["conflicts"].as_array().unwrap().is_empty());
+    assert!(!home.path().join(".agents/skills/review").exists());
+    assert_eq!(store::load_last_change(&c.paths), None);
+}
+
+#[test]
+fn sync_apply_links_and_records_last_change() {
+    let home = tempfile::tempdir().unwrap();
+    let mut c = unsynced(home.path());
+    let (_, out, _) = go(&["skills", "sync", "--json"], &mut c);
+    let plan = json(&out);
+    let id = plan["plan_id"].as_str().unwrap();
+    let n = plan["actions"].as_array().unwrap().len();
+    let (code, out, _) = go(&["skills", "sync", "--apply", "--plan-id", id, "--json"], &mut c);
+    assert_eq!(code, 0, "{out}");
+    let v = json(&out);
+    assert_eq!(v["applied"], true);
+    assert_eq!(v["done"], n);
+    assert!(home.path().join(".agents/skills/review/SKILL.md").is_file());
+    assert!(std::fs::symlink_metadata(home.path().join(".codex/skills/review")).unwrap().file_type().is_symlink());
+    let last = store::load_last_change(&c.paths).expect("last change");
+    assert_eq!(last.label, format!("sync ({n} changes)"));
+    let (code, _, _) = go(&["undo"], &mut c);
+    assert_eq!(code, 0);
+    assert!(!home.path().join(".agents/skills/review").exists());
+    assert!(home.path().join(".claude/skills/review/SKILL.md").is_file());
+}
+
+#[test]
+fn apply_with_stale_plan_id_exits_4() {
+    let home = tempfile::tempdir().unwrap();
+    let mut c = unsynced(home.path());
+    let (_, out, _) = go(&["skills", "sync", "--json"], &mut c);
+    let old = json(&out)["plan_id"].as_str().unwrap().to_string();
+    std::fs::write(home.path().join(".claude/skills/review/extra.md"), "new").unwrap();
+    let (code, out, _) = go(&["skills", "sync", "--apply", "--plan-id", &old, "--json"], &mut c);
+    assert_eq!(code, 4);
+    let v = json(&out);
+    assert_eq!(v["applied"], false);
+    assert_ne!(v["plan_id"].as_str().unwrap(), old);
+    assert!(!home.path().join(".agents/skills/review").exists());
+    assert_eq!(store::load_last_change(&c.paths), None);
+    let (code, human, _) = go(&["skills", "sync", "--apply", "--plan-id", &old], &mut c);
+    assert_eq!(code, 4);
+    assert!(human.contains("changed"), "{human}");
+}
+
+#[test]
+fn plan_id_without_apply_is_usage() {
+    let home = tempfile::tempdir().unwrap();
+    let (code, _, err) = go(&["skills", "sync", "--plan-id", "abc"], &mut unsynced(home.path()));
+    assert_eq!(code, 2);
+    assert!(err.contains("--apply"), "{err}");
+}
+
+#[test]
+fn remove_needs_apply() {
+    let home = tempfile::tempdir().unwrap();
+    let mut c = unsynced(home.path());
+    let (code, out, _) = go(&["skills", "remove", "review", "--json"], &mut c);
+    assert_eq!(code, 0);
+    assert_eq!(json(&out)["applied"], false);
+    assert!(home.path().join(".claude/skills/review").exists());
+    let (code, out, _) = go(&["skills", "remove", "review", "--apply", "--json"], &mut c);
+    assert_eq!(code, 0, "{out}");
+    assert!(!home.path().join(".claude/skills/review").exists());
+    assert_eq!(store::load_last_change(&c.paths).unwrap().label, "remove review");
+    assert_eq!(go(&["undo"], &mut c).0, 0);
+    assert!(home.path().join(".claude/skills/review/SKILL.md").is_file());
+}
+
+#[test]
+fn link_and_unlink_plan_one_line_each() {
+    let home = tempfile::tempdir().unwrap();
+    let mut c = unsynced(home.path());
+    assert_eq!(go(&["skills", "sync", "--apply"], &mut c).0, 0);
+    let (code, out, _) = go(&["skills", "unlink", "review", "--agent", "codex", "--json"], &mut c);
+    assert_eq!(code, 0);
+    assert_eq!(json(&out)["actions"], serde_json::json!(["Unlink review from Codex"]));
+    let id = json(&out)["plan_id"].as_str().unwrap().to_string();
+    assert!(std::fs::symlink_metadata(home.path().join(".codex/skills/review")).is_ok());
+    assert_eq!(go(&["skills", "unlink", "review", "--agent", "codex", "--apply", "--plan-id", &id], &mut c).0, 0);
+    assert!(std::fs::symlink_metadata(home.path().join(".codex/skills/review")).is_err());
+    assert_eq!(store::load_last_change(&c.paths).unwrap().label, "unlink review from Codex");
+
+    let (_, out, _) = go(&["skills", "link", "review", "--agent", "codex", "--json"], &mut c);
+    assert_eq!(json(&out)["actions"], serde_json::json!(["Link review into Codex"]));
+    assert_eq!(go(&["skills", "link", "review", "--agent", "codex", "--apply"], &mut c).0, 0);
+    assert!(std::fs::symlink_metadata(home.path().join(".codex/skills/review")).unwrap().file_type().is_symlink());
+    let (code, _, err) = go(&["skills", "link", "review", "--agent", "nope"], &mut c);
+    assert_eq!(code, 2);
+    assert!(err.contains("nope"), "{err}");
+}
+
+#[test]
+fn a_plan_with_only_conflicts_applies_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let mut c = unsynced(home.path());
+    write_skill(&home.path().join(".agents/skills"), "review", "Canonical");
+    write_skill(&home.path().join(".codex/skills"), "review", "Different");
+    let (code, out, _) = go(&["skills", "sync", "--apply", "--json"], &mut c);
+    assert_eq!(code, 0);
+    let v = json(&out);
+    assert_eq!(v["applied"], false);
+    assert_eq!(v["conflicts"][0]["skill"], "review");
+    assert!(v["conflicts"].as_array().unwrap().iter().any(|c| c["reason"].as_str().unwrap().contains("Codex")));
+    assert_eq!(store::load_last_change(&c.paths), None);
+}
+
+#[test]
+fn copy_to_global_and_clean_broken() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let proj = h.join("app");
+    write_skill(&proj.join(".agents/skills"), "local", "d");
+    std::fs::create_dir_all(h.join(".codex")).unwrap();
+    let mut c = ctx(h);
+    c.settings.targets = Some(vec!["codex".into()]);
+    let p = proj.to_str().unwrap();
+    let (code, out, _) = go(&["skills", "copy", "local", "--to-global", "--project", p, "--json"], &mut c);
+    assert_eq!(code, 0);
+    assert_eq!(json(&out)["applied"], false);
+    assert!(!h.join(".agents/skills/local").exists());
+    assert_eq!(go(&["skills", "copy", "local", "--to-global", "--project", p, "--apply"], &mut c).0, 0);
+    assert!(h.join(".agents/skills/local/SKILL.md").is_file());
+    assert!(std::fs::symlink_metadata(h.join(".codex/skills/local")).is_ok());
+    assert_eq!(go(&["skills", "copy", "local", "--project", p], &mut c).0, 2);
+
+    std::fs::create_dir_all(h.join(".claude/skills")).unwrap();
+    std::os::unix::fs::symlink(h.join("gone"), h.join(".claude/skills/ghost")).unwrap();
+    let (_, out, _) = go(&["skills", "clean-broken", "--json"], &mut c);
+    assert_eq!(json(&out)["actions"].as_array().unwrap().len(), 1);
+    assert!(std::fs::symlink_metadata(h.join(".claude/skills/ghost")).is_ok());
+    assert_eq!(go(&["skills", "clean-broken", "--apply"], &mut c).0, 0);
+    assert!(std::fs::symlink_metadata(h.join(".claude/skills/ghost")).is_err());
+    assert_eq!(store::load_last_change(&c.paths).unwrap().label, "clean up broken links");
+}
+
+#[test]
+fn new_skill_is_immediate() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+    let mut c = ctx(home.path());
+    c.settings.targets = Some(vec!["codex".into()]);
+    let (code, _, _) = go(&["skills", "new", "pdf-tools", "--description", "Use when: PDFs"], &mut c);
+    assert_eq!(code, 0);
+    let m = crate::skill::read(&home.path().join(".agents/skills/pdf-tools")).unwrap();
+    assert_eq!(m.name.as_deref(), Some("pdf-tools"));
+    assert_eq!(m.description.as_deref(), Some("Use when: PDFs"));
+    assert!(std::fs::symlink_metadata(home.path().join(".codex/skills/pdf-tools")).unwrap().file_type().is_symlink());
+    assert_eq!(go(&["skills", "new", "pdf-tools"], &mut c).0, 1);
+    let (code, _, err) = go(&["skills", "new", "Bad Name"], &mut c);
+    assert_eq!(code, 2);
+    assert!(err.contains("lowercase"), "{err}");
+}

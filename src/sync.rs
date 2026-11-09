@@ -13,6 +13,50 @@ use crate::agents::{AGENTS, CANONICAL, Paths, Scope};
 use crate::fsops::Journal;
 use crate::scan::{Inventory, Placement, Skill};
 
+/// `1 change`, `3 changes`.
+pub fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// How the window and the CLI name a change, so Undo reads the same in both.
+pub mod label {
+    use super::{AGENTS, Scope, plural};
+    use crate::agents::{Paths, tilde};
+
+    pub fn sync(changes: usize) -> String {
+        format!("sync ({})", plural(changes, "change", "changes"))
+    }
+
+    pub fn link(skill: &str, agent: usize) -> String {
+        format!("link {skill} into {}", AGENTS[agent].name)
+    }
+
+    pub fn unlink(skill: &str, agent: usize) -> String {
+        format!("unlink {skill} from {}", AGENTS[agent].name)
+    }
+
+    pub fn remove(names: &[String]) -> String {
+        match names {
+            [one] => format!("remove {one}"),
+            _ => format!("remove {}", plural(names.len(), "skill", "skills")),
+        }
+    }
+
+    pub const BROKEN: &str = "clean up broken links";
+
+    pub fn copy(to: &str) -> String {
+        format!("copy to {to}")
+    }
+
+    /// A scope as the window titles it: `Global (~)`, or the project's path with `~`.
+    pub fn scope(scope: &Scope, paths: &Paths) -> String {
+        match scope {
+            Scope::Global => "Global (~)".into(),
+            Scope::Project(p) => tilde(p, paths),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     /// Move the folder from agent `from` into `.agents/skills` and link it back.

@@ -4,8 +4,6 @@
 //! Hashes come from `fsops::content_hash` (FNV-1a), not `DefaultHasher`, whose output is not
 //! stable across Rust releases: an id printed by one build must still match on the next.
 
-// Nothing calls this yet; the CLI's plan step does. Drop this once it does.
-#![allow(dead_code)]
 
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
@@ -47,6 +45,7 @@ pub fn plan_id(lines: &[String], state: &[(PathBuf, Option<u64>)]) -> String {
 }
 
 /// Hash of one file's bytes, or `None` if it cannot be read.
+#[allow(dead_code)] // the MCP commands hash config files
 pub fn file_hash(path: &Path) -> Option<u64> {
     fs::read(path).ok().map(|b| content_hash(&b))
 }

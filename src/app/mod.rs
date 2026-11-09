@@ -349,10 +349,7 @@ impl App {
     }
 
     pub fn scope_label(&self, scope: &Scope) -> String {
-        match scope {
-            Scope::Global => "Global (~)".into(),
-            Scope::Project(p) => agents::tilde(p, &self.paths),
-        }
+        crate::sync::label::scope(scope, &self.paths)
     }
 
     /// Every scope but the current one: where skills can be copied to.

@@ -7,11 +7,8 @@ use rune::{Mods, TextEdit};
 use super::{App, Filter, NewSkill};
 use crate::agents::{AGENTS, CANONICAL, Scope};
 use crate::scan::{Placement, Skill};
-use crate::sync;
-
-fn plural(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
-}
+use crate::skill;
+use crate::sync::{self, plural};
 
 impl App {
     // The list.
@@ -181,10 +178,10 @@ impl App {
         let mut j = self.new_journal();
         let (label, result) = match &s.placements[agent] {
             Placement::Linked | Placement::Link(_) | Placement::Broken(_) => (
-                format!("unlink {skill} from {}", AGENTS[agent].name),
+                sync::label::unlink(skill, agent),
                 sync::unlink(&self.scope, &self.paths, skill, agent, &mut j),
             ),
-            Placement::Missing => (format!("link {skill} into {}", AGENTS[agent].name), sync::link(&self.inv, &self.paths, skill, agent, &mut j)),
+            Placement::Missing => (sync::label::link(skill, agent), sync::link(&self.inv, &self.paths, skill, agent, &mut j)),
             Placement::Dir => (
                 String::new(),
                 Err(format!("{} has its own folder; use \"Use link\" or move it to the trash", AGENTS[agent].name)),
@@ -230,11 +227,7 @@ impl App {
             (false, _) => Err(format!("Removed {removed} of {}: {}", names.len(), failed.join("\n"))),
         };
         self.checked.retain(|n| !names.contains(n));
-        let label = match names {
-            [one] => format!("remove {one}"),
-            _ => format!("remove {}", plural(names.len(), "skill", "skills")),
-        };
-        self.changed(label, j, result);
+        self.changed(sync::label::remove(names), j, result);
     }
 
     pub fn remove_broken(&mut self) {
@@ -243,7 +236,7 @@ impl App {
         if self.status_filter == Filter::Broken {
             self.status_filter = Filter::All;
         }
-        self.changed("clean up broken links".into(), j, result);
+        self.changed(sync::label::BROKEN.into(), j, result);
     }
 
     // Sync.
@@ -300,7 +293,7 @@ impl App {
         if result.is_ok() && only.is_some() {
             self.checked.clear();
         }
-        self.changed(format!("sync ({})", plural(n, "change", "changes")), j, result);
+        self.changed(sync::label::sync(n), j, result);
     }
 
     // Copying to another scope.
@@ -328,7 +321,7 @@ impl App {
         } else {
             Err(format!("Copied {copied} of {} to {to}: {}", names.len(), failed.join("\n")))
         };
-        self.changed(format!("copy to {to}"), j, result);
+        self.changed(sync::label::copy(&to), j, result);
         self.refresh_stats();
     }
 
@@ -344,8 +337,8 @@ impl App {
     pub fn create_skill(&mut self) {
         let Some(form) = &mut self.new_skill else { return };
         let name = form.name.text.trim().to_string();
-        let description = form.description.text.trim().replace('\n', " ");
-        if let Err(e) = valid_name(&name) {
+        let description = form.description.text.clone();
+        if let Err(e) = skill::valid_name(&name) {
             form.error = Some(e);
             return;
         }
@@ -354,11 +347,7 @@ impl App {
             form.error = Some(format!("{name} already exists here"));
             return;
         }
-        let description = if description.is_empty() { "Use when …".to_string() } else { description };
-        let body = format!(
-            "---\nname: {name}\ndescription: {}\n---\n\n# {name}\n\nWhat to do, step by step.\n",
-            yaml_string(&description)
-        );
+        let body = skill::template(&name, &description);
         if let Err(e) = fs::create_dir_all(&dir).and_then(|_| fs::write(dir.join("SKILL.md"), body)) {
             form.error = Some(e.to_string());
             return;
@@ -405,50 +394,4 @@ pub fn reveal_path(path: &std::path::Path) {
             let _ = std::process::Command::new("xdg-open").arg(path.parent().unwrap_or(&path)).spawn();
         }
     });
-}
-
-/// Skill names as agents accept them: lowercase letters, digits and single hyphens.
-pub fn valid_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("Give it a name".into());
-    }
-    if name.len() > 64 {
-        return Err("Keep the name under 64 characters".into());
-    }
-    let ok = name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-    if !ok || name.starts_with('-') || name.ends_with('-') || name.contains("--") {
-        return Err("Use lowercase letters, digits and single hyphens, like pdf-tools".into());
-    }
-    Ok(())
-}
-
-/// `s` as a YAML scalar: plain when that is safe, double-quoted otherwise.
-fn yaml_string(s: &str) -> String {
-    let plain = !s.is_empty()
-        && !s.contains(": ")
-        && !s.contains(" #")
-        && !s.starts_with(|c: char| "-?:,[]{}#&*!|>'\"%@`".contains(c))
-        && !s.ends_with(':');
-    if plain { s.to_string() } else { format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")) }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn names_follow_the_skill_convention() {
-        assert!(valid_name("pdf-tools").is_ok());
-        assert!(valid_name("v2").is_ok());
-        for bad in ["", "PDF", "pdf tools", "-x", "x-", "a--b"] {
-            assert!(valid_name(bad).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
-    fn descriptions_are_quoted_only_when_yaml_needs_it() {
-        assert_eq!(yaml_string("Use when testing"), "Use when testing");
-        assert_eq!(yaml_string("Use when: testing"), "\"Use when: testing\"");
-        assert_eq!(crate::skill::parse(&format!("---\ndescription: {}\n---\n", yaml_string("Say \"hi\": now"))).description.as_deref(), Some("Say \"hi\": now"));
-    }
 }
