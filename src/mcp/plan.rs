@@ -12,7 +12,7 @@ use crate::agents::{Paths, Scope};
 use crate::fsops::{Journal, content_hash};
 use crate::mcp::agents::{Flavor, MCP_AGENTS, claude_json};
 use crate::mcp::formats;
-use crate::mcp::model::{EnvValue, Extras, McpCopy, Place, Server, Transport};
+use crate::mcp::model::{EnvValue, Extras, McpCopy, Place, Server, Transport, masked_args, masked_url};
 use crate::mcp::scan::{McpInventory, McpServer, Status, alike};
 use crate::planid;
 
@@ -318,11 +318,15 @@ fn extras_for(source: &McpCopy, target: usize) -> Extras {
     if MCP_AGENTS[source.agent].flavor == MCP_AGENTS[target].flavor { source.extras.clone() } else { Extras::new() }
 }
 
-/// A value written as is, not as a reference: possibly a token.
+/// A value written as is, not as a reference: possibly a token. Args, the command, the folder
+/// and the URL count when masking would hide part of them (`--api-key=…`, a token in the path).
 fn has_literal(server: &Server) -> bool {
+    let hides = |text: &str| masked_url(text) != text;
     match &server.transport {
-        Transport::Stdio { env, .. } => env.values().any(EnvValue::is_literal),
-        Transport::Http { headers, .. } => headers.values().any(EnvValue::is_literal),
+        Transport::Stdio { command, args, env, cwd } => {
+            env.values().any(EnvValue::is_literal) || masked_args(args) != *args || hides(command) || cwd.as_deref().is_some_and(hides)
+        }
+        Transport::Http { url, headers, .. } => headers.values().any(EnvValue::is_literal) || hides(url),
     }
 }
 
@@ -975,6 +979,34 @@ mod tests {
         git(&paths, &root, &["add", "-f", ".cursor/mcp.json"]);
         let tracked = plan(&inv, &add(stdio("plata", &[("PLATA_TOKEN", EnvValue::literal("fake-token"))]), &["cursor"]), &paths).unwrap();
         assert!(in_git(&tracked), "a tracked file warns even when ignored: {:?}", tracked.warnings);
+    }
+
+    #[test]
+    fn secrets_in_args_and_urls_into_a_tracked_file_warn() {
+        if !git_available() {
+            eprintln!("git isn't installed; skipping");
+            return;
+        }
+        let (_dir, paths) = home();
+        let root = project(&paths);
+        git(&paths, &root, &["init", "-q"]);
+        write(&root.join(".cursor/mcp.json"), "{}");
+        git(&paths, &root, &["add", ".cursor/mcp.json"]);
+        let inv = scan(&Scope::Project(root.clone()), &paths);
+        let in_git = |plan: &McpPlan| plan.warnings.iter().any(|w| w.ends_with("is in git; the token would be committed"));
+
+        let mut arg = stdio("figma", &[]);
+        let Transport::Stdio { args, .. } = &mut arg.transport else { unreachable!() };
+        args.push("--api-key=fake-arg-secret".into());
+        let plan_arg = plan(&inv, &add(arg, &["cursor"]), &paths).unwrap();
+        assert!(in_git(&plan_arg), "an --api-key arg: {:?}", plan_arg.warnings);
+
+        let zapier = Server { name: "zapier".into(), transport: Transport::Http { url: "https://actions.zapier.com/mcp/sk-ak-AbC123xyz456DEF789ghi/sse".into(), headers: BTreeMap::new(), sse: true } };
+        let plan_url = plan(&inv, &add(zapier, &["cursor"]), &paths).unwrap();
+        assert!(in_git(&plan_url), "a token in the URL: {:?}", plan_url.warnings);
+
+        let plain = plan(&inv, &add(stdio("plata", &[]), &["cursor"]), &paths).unwrap();
+        assert!(!in_git(&plain), "nothing secret: {:?}", plain.warnings);
     }
 
     #[test]

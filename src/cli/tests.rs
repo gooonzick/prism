@@ -662,6 +662,21 @@ fn mcp_show_masks_headers_and_url() {
 }
 
 #[test]
+fn tokens_in_url_paths_are_masked_in_show_and_in_merge_hints() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+    let url = "https://actions.zapier.com/mcp/sk-ak-FIXTURE123PATH456SECRET/sse";
+    std::fs::write(home.path().join(".cursor/mcp.json"), format!(r#"{{"mcpServers":{{"zapier":{{"url":"{url}"}},"zap":{{"url":"{url}"}}}}}}"#)).unwrap();
+    let mut c = ctx(home.path());
+    for args in [&["mcp", "list"][..], &["mcp", "list", "--json"], &["mcp", "show", "zapier"], &["mcp", "show", "zapier", "--json"]] {
+        let (code, out, _) = go(args, &mut c);
+        assert_eq!(code, 0, "{args:?}");
+        assert!(!out.contains("FIXTURE123PATH456SECRET"), "{args:?}: {out}");
+        assert!(out.contains("https://actions.zapier.com/mcp/***/sse"), "{args:?}: {out}");
+    }
+}
+
+#[test]
 fn mcp_show_secrets_reveals_values() {
     let home = mcp_home();
     let (code, out, _) = go(&["mcp", "show", "gl", "web", "--show-secrets", "--json"], &mut ctx(home.path()));

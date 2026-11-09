@@ -194,18 +194,21 @@ pub fn masked_args(args: &[String]) -> Vec<String> {
     out
 }
 
-/// A URL (or any text) for printing: userinfo (`https://***@host`) and the values of
-/// secret-named query keys (`?api_key=***`) masked, the rest as written.
+/// A URL (or any text) for printing: userinfo (`https://***@host`), opaque tokens in the path
+/// (`/mcp/***/sse`, as Zapier and Composio put them) and query values that are secret-named or
+/// opaque tokens (`?api_key=***`, `?customerId=***`) masked, the rest as written.
 pub fn masked_url(text: &str) -> String {
     let (head, fragment) = text.split_once('#').map_or((text, None), |(h, f)| (h, Some(f)));
     let (base, query) = head.split_once('?').map_or((head, None), |(b, q)| (b, Some(q)));
     let mut out = match base.split_once("://") {
         Some((scheme, rest)) => {
             let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
-            match authority.rfind('@') {
-                Some(at) => format!("{scheme}://***{}{path}", &authority[at..]),
-                None => base.to_string(),
-            }
+            let authority = match authority.rfind('@') {
+                Some(at) => format!("***{}", &authority[at..]),
+                None => authority.to_string(),
+            };
+            let path: Vec<&str> = path.split('/').map(|segment| if opaque_token(segment) { "***" } else { segment }).collect();
+            format!("{scheme}://{authority}{}", path.join("/"))
         }
         None => base.to_string(),
     };
@@ -213,7 +216,7 @@ pub fn masked_url(text: &str) -> String {
         let pairs: Vec<String> = query
             .split('&')
             .map(|pair| match pair.split_once('=') {
-                Some((key, _)) if secret_name(key) => format!("{key}=***"),
+                Some((key, value)) if secret_name(key) || opaque_token(value) => format!("{key}=***"),
                 _ => pair.to_string(),
             })
             .collect();
@@ -293,6 +296,18 @@ mod tests {
         assert_eq!(masked_url("https://h.example.com/x?api_key=fake&page=2&Auth=fake#frag"), "https://h.example.com/x?api_key=***&page=2&Auth=***#frag");
         assert_eq!(masked_url("https://h.example.com/a@b?q=1"), "https://h.example.com/a@b?q=1", "an @ in the path is no userinfo");
         for plain in ["https://mcp.context7.com/mcp", "npx", "/work/app", "http://127.0.0.1:3845/sse"] {
+            assert_eq!(masked_url(plain), plain);
+        }
+    }
+
+    #[test]
+    fn masked_url_hides_tokens_in_the_path_and_in_any_query_value() {
+        assert_eq!(masked_url("https://actions.zapier.com/mcp/sk-ak-AbC123xyz456DEF789ghi/sse"), "https://actions.zapier.com/mcp/***/sse");
+        assert_eq!(
+            masked_url("https://mcp.composio.dev/composio/server/3f2a9c1e-4b7d-4e8a-9c2f-1a2b3c4d5e6f/mcp?customerId=a1b2c3d4-e5f6-7890-abcd-ef1234567890&agent=cursor"),
+            "https://mcp.composio.dev/composio/server/***/mcp?customerId=***&agent=cursor"
+        );
+        for plain in ["https://mcp.example.com/mcp-server-sequential-thinking/sse", "https://h.example.com/x?page=2&mode=read-only"] {
             assert_eq!(masked_url(plain), plain);
         }
     }

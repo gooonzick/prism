@@ -641,6 +641,17 @@ mod tests {
     }
 
     #[test]
+    fn merge_reasons_mask_tokens_in_url_paths() {
+        let (_dir, paths) = home();
+        let url = "https://actions.zapier.com/mcp/sk-ak-AbC123xyz456DEF789ghi/sse";
+        claude_json(&paths, json!({ "mcpServers": { "zapier": { "type": "sse", "url": url } } }));
+        cursor_json(&paths, json!({ "mcpServers": { "zap": { "url": url } } }));
+        let inv = scan(&Scope::Global, &paths);
+        let reasons: Vec<_> = inv.merges.iter().map(|h| h.reason.as_str()).collect();
+        assert_eq!(reasons, ["same URL https://actions.zapier.com/mcp/***/sse"]);
+    }
+
+    #[test]
     fn grouping_uses_raw_values_not_masked_ones() {
         let (_dir, paths) = home();
         claude_json(&paths, json!({ "mcpServers": { "a": { "type": "http", "url": "https://x.example/mcp?api_key=one" } } }));
