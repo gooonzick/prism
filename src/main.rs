@@ -8,6 +8,7 @@ mod agents;
 mod app;
 mod cli;
 mod fsops;
+mod planid;
 mod remote;
 mod scan;
 mod skill;
