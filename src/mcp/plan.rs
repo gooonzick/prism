@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::agents::{Paths, Scope};
 use crate::fsops::{Journal, content_hash};
-use crate::mcp::agents::{Flavor, MCP_AGENTS};
+use crate::mcp::agents::{Flavor, MCP_AGENTS, claude_json};
 use crate::mcp::formats;
 use crate::mcp::model::{EnvValue, Extras, McpCopy, Place, Server, Transport};
 use crate::mcp::scan::{McpInventory, McpServer, Status, alike};
@@ -58,8 +58,9 @@ pub enum Request {
 #[derive(Clone, Debug, PartialEq)]
 pub enum McpAction {
     /// `replaces`: the agent has this server there already. `from`: the agent whose copy this
-    /// is (a copy or an overwrite); `None` for an add or an edit.
-    Write { agent: usize, file: PathBuf, place: Place, server: Server, extras: Extras, replaces: bool, from: Option<usize> },
+    /// is (a copy or an overwrite); `None` for an add or an edit. `fields`: for an edit, the
+    /// keys it changes (`env.TOKEN`, `args`), named on the plan's line; empty otherwise.
+    Write { agent: usize, file: PathBuf, place: Place, server: Server, extras: Extras, replaces: bool, from: Option<usize>, fields: Vec<String> },
     Delete { agent: usize, file: PathBuf, place: Place, name: String },
     Rename { agent: usize, file: PathBuf, place: Place, from: String, to: String },
     /// `project` is where the switch applies, `place` where the copy lives. `here`: `project`
@@ -80,22 +81,23 @@ impl McpAction {
         }
     }
 
-    /// One line for the plan, naming servers and agents only: never a value.
+    /// One line for the plan, naming servers, agents and field keys only: never a value.
     pub fn describe(&self) -> String {
-        let (head, agent) = self.wording();
-        format!("{head}{}", agent.unwrap_or_default())
+        let w = self.wording();
+        format!("{}{}{}", w.head, w.agent.unwrap_or_default(), w.tail)
     }
 
-    /// The line split before the agent's name when it ends with it, so lines that differ only
-    /// in the agent can share one line (`Edit plata in Claude Code, Codex`).
-    fn wording(&self) -> (String, Option<&'static str>) {
+    fn wording(&self) -> Wording {
         let name_of = |a: usize| MCP_AGENTS[a].name;
-        let at_end = |head: String| (head, Some(name_of(self.agent())));
+        let at_end = |head: String| Wording { head, agent: Some(name_of(self.agent())), tail: String::new() };
         match self {
             McpAction::Write { server, replaces: true, from: Some(src), agent, .. } => {
-                (format!("Overwrite {}'s {} with {}'s", name_of(*agent), server.name, name_of(*src)), None)
+                Wording { head: format!("Overwrite {}'s {} with {}'s", name_of(*agent), server.name, name_of(*src)), agent: None, tail: String::new() }
             }
-            McpAction::Write { server, replaces: true, from: None, .. } => at_end(format!("Edit {} in ", server.name)),
+            McpAction::Write { server, replaces: true, from: None, fields, .. } => {
+                let tail = if fields.is_empty() { String::new() } else { format!(" ({})", fields.join(", ")) };
+                Wording { tail, ..at_end(format!("Edit {} in ", server.name)) }
+            }
             McpAction::Write { server, replaces: false, .. } => at_end(format!("Add {} to ", server.name)),
             McpAction::Delete { name, .. } => at_end(format!("Remove {name} from ")),
             McpAction::Rename { from, to, .. } => at_end(format!("Rename {from} to {to} in ")),
@@ -104,6 +106,21 @@ impl McpAction {
                 let place = if *here { "this project".to_string() } else { project.display().to_string() };
                 at_end(format!("{verb} {name} for {place} in "))
             }
+        }
+    }
+
+    /// The file, as short as tells it apart: relative to the project for a project file.
+    fn file_label(&self, paths: &Paths) -> String {
+        let file = self.file();
+        match self.place() {
+            Place::Project(root) if file.starts_with(root) => file.strip_prefix(root).unwrap_or(file).display().to_string(),
+            _ => crate::agents::tilde(file, paths),
+        }
+    }
+
+    fn place(&self) -> &Place {
+        match self {
+            McpAction::Write { place, .. } | McpAction::Delete { place, .. } | McpAction::Rename { place, .. } | McpAction::SetDisabled { place, .. } => place,
         }
     }
 
@@ -128,6 +145,14 @@ impl McpAction {
     }
 }
 
+/// A plan line in parts: `head` + agent + `tail`. Lines that differ only in the agent can share
+/// one line (`Edit plata in Claude Code, Codex (args)`); `agent` is `None` where it can't.
+struct Wording {
+    head: String,
+    agent: Option<&'static str>,
+    tail: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct McpPlan {
     pub actions: Vec<McpAction>,
@@ -143,19 +168,36 @@ impl McpPlan {
         self.actions.is_empty()
     }
 
-    /// The plan as shown: lines that differ only in the agent share one line
-    /// (`Edit plata in Claude Code, Codex`), in the order they first come up.
-    pub fn lines(&self) -> Vec<String> {
-        let mut out: Vec<(String, Vec<&str>)> = Vec::new();
-        for action in &self.actions {
-            let (head, agent) = action.wording();
-            let agents: Vec<&str> = agent.into_iter().collect();
-            match out.iter_mut().find(|(h, a)| *h == head && a.is_empty() == agents.is_empty()) {
-                Some((_, known)) => known.extend(agents.into_iter().filter(|a| !known.contains(a)).collect::<Vec<_>>()),
-                None => out.push((head, agents)),
+    /// The plan as shown, in the order lines first come up. Lines that differ only in the agent
+    /// share one line (`Edit plata in Claude Code, Codex`). Where one agent gets the same line
+    /// for two files (Claude Code's local scope and `.mcp.json`), each names its file and stands
+    /// alone: `Remove plata from Claude Code (.mcp.json)`.
+    pub fn lines(&self, paths: &Paths) -> Vec<String> {
+        let words: Vec<Wording> = self.actions.iter().map(McpAction::wording).collect();
+        let same_line = |i: usize, k: usize| words[i].head == words[k].head && words[i].tail == words[k].tail;
+        // (head, agents, tail, open to more agents)
+        let mut out: Vec<(String, Vec<String>, String, bool)> = Vec::new();
+        for (i, (action, w)) in self.actions.iter().zip(&words).enumerate() {
+            let twice = (0..self.actions.len()).any(|k| same_line(i, k) && self.actions[k].agent() == action.agent() && self.actions[k].file() != action.file());
+            let label = if twice { format!(" ({})", action.file_label(paths)) } else { String::new() };
+            let line = match (w.agent, label.is_empty()) {
+                (Some(agent), true) => {
+                    if let Some((_, agents, _, _)) = out.iter_mut().find(|(h, _, t, open)| *open && *h == w.head && *t == w.tail) {
+                        if !agents.iter().any(|a| a == agent) {
+                            agents.push(agent.into());
+                        }
+                        continue;
+                    }
+                    (w.head.clone(), vec![agent.to_string()], w.tail.clone(), true)
+                }
+                (Some(agent), false) => (w.head.clone(), vec![format!("{agent}{label}")], w.tail.clone(), false),
+                (None, _) => (format!("{}{label}", w.head), vec![], w.tail.clone(), false),
+            };
+            if !out.iter().any(|(h, a, t, _)| (h, a, t) == (&line.0, &line.1, &line.2)) {
+                out.push(line);
             }
         }
-        out.into_iter().map(|(head, agents)| format!("{head}{}", agents.join(", "))).collect()
+        out.into_iter().map(|(head, agents, tail, _)| format!("{head}{}{tail}", agents.join(", "))).collect()
     }
 
     /// Changes when what the plan does or the files it was made from change, so
@@ -192,6 +234,14 @@ pub fn apply(plan: &McpPlan, paths: &Paths, j: &mut Journal) -> Result<usize, (u
             files.push(action.file());
         }
     }
+    // Nothing is written while any file differs from the plan; each is checked again right
+    // before its write, in case it changes meanwhile.
+    for &file in &files {
+        let planned = plan.files.iter().find(|(p, _)| p == file).map(|(_, h)| *h);
+        if planned != Some(planid::file_hash(file)) {
+            return Err((0, format!("{} changed since the plan", file.display())));
+        }
+    }
     let mut written = 0;
     for file in files {
         // The bytes checked are the bytes edited, so nothing slips in between.
@@ -224,12 +274,6 @@ fn cant_read(file: &Path, why: &str) -> String {
 
 fn agent_name(agent: usize) -> &'static str {
     MCP_AGENTS[agent].name
-}
-
-/// Claude Code's `~/.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json`).
-fn claude_json(paths: &Paths) -> PathBuf {
-    let claude = MCP_AGENTS.iter().find(|a| a.flavor == Flavor::ClaudeCode).expect("Claude Code is an MCP agent");
-    claude.files(&Scope::Global, paths).remove(0).0
 }
 
 /// A copy the scope owns: everything in the global scope, the project's own copies in a project.
@@ -271,11 +315,16 @@ fn has_literal(server: &Server) -> bool {
 
 /// Whether git would pick `file` up: tracked, or inside a work tree and not ignored. Paths go
 /// to git relative to `root`, since temp and symlinked folders confuse its absolute-path checks.
-/// Without git there's nothing to warn about.
-fn in_git(root: &Path, file: &Path) -> bool {
+/// Without git there's nothing to warn about. Git reads the user's config from `paths`, as the
+/// agents would see it (tests get none at all).
+fn in_git(root: &Path, file: &Path, paths: &Paths) -> bool {
     let rel = file.strip_prefix(root).unwrap_or(file);
     let git = |args: &[&str], with_file: bool| {
         let mut cmd = Command::new("git");
+        // Git's answer for this folder, not for a repository named by the environment.
+        cmd.env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").env("HOME", &paths.home).env("XDG_CONFIG_HOME", &paths.config);
+        #[cfg(test)]
+        cmd.env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1");
         cmd.arg("-C").arg(root).args(args);
         if with_file {
             cmd.arg("--").arg(rel);
@@ -301,6 +350,24 @@ fn projects_disabling(text: &str, name: &str, into: &str) -> Vec<PathBuf> {
 fn same_dir(a: &Path, b: &Path) -> bool {
     let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     a == b || real(a) == real(b)
+}
+
+/// The keys `changes` touch, in order, once each: the plan names them, never the values.
+fn field_keys(changes: &[EditChange]) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    for change in changes {
+        let key = match change {
+            EditChange::Command(_) => "command".to_string(),
+            EditChange::Args(_) => "args".into(),
+            EditChange::SetEnv(k, _) | EditChange::UnsetEnv(k) => format!("env.{k}"),
+            EditChange::Url(_) => "url".into(),
+            EditChange::SetHeader(k, _) | EditChange::UnsetHeader(k) => format!("headers.{k}"),
+        };
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    keys
 }
 
 /// The changes `changes` make to `t`. A change for the other kind of server is an error.
@@ -334,7 +401,9 @@ fn edited(t: &Transport, changes: &[EditChange], name: &str) -> Result<Transport
 struct Planner<'a> {
     inv: &'a McpInventory,
     paths: &'a Paths,
-    texts: HashMap<PathBuf, String>,
+    /// Each file read: its text as the plan so far leaves it, and the hash of the bytes first
+    /// read (`None`: missing), which is the hash the plan records.
+    texts: HashMap<PathBuf, (String, Option<u64>)>,
     plan: McpPlan,
 }
 
@@ -345,16 +414,24 @@ impl<'a> Planner<'a> {
         if let Some((_, why)) = self.inv.errors.iter().find(|(p, _)| p == file) {
             return Err(cant_read(file, why));
         }
-        if let Some(text) = self.texts.get(file) {
+        if let Some((text, _)) = self.texts.get(file) {
             return Ok(text.clone());
         }
-        let text = match std::fs::read_to_string(file) {
-            Ok(text) => text,
-            Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
+        // One read gives both the text planned on and the hash recorded for it.
+        let bytes = match std::fs::read(file) {
+            Ok(bytes) => Some(bytes),
+            Err(e) if e.kind() == ErrorKind::NotFound => None,
             Err(e) => return Err(cant_read(file, &e.to_string())),
         };
-        self.texts.insert(file.into(), text.clone());
+        let hash = bytes.as_deref().map(content_hash);
+        let text = String::from_utf8(bytes.unwrap_or_default()).map_err(|_| cant_read(file, "not UTF-8 text"))?;
+        self.texts.insert(file.into(), (text.clone(), hash));
         Ok(text)
+    }
+
+    /// The hash of the file as the plan first read it.
+    fn planned_hash(&self, file: &Path) -> Option<u64> {
+        self.texts.get(file).and_then(|(_, hash)| *hash)
     }
 
     fn skip(&mut self, agent: usize, reason: String) {
@@ -375,6 +452,11 @@ impl<'a> Planner<'a> {
     fn push(&mut self, action: McpAction) -> Result<bool, String> {
         let file = action.file().to_path_buf();
         let text = self.text(&file)?;
+        // A switch goes into an existing config only, never a new file.
+        if matches!(action, McpAction::SetDisabled { .. }) && self.planned_hash(&file).is_none() && !self.plan.files.iter().any(|(p, _)| *p == file) {
+            self.skip(action.agent(), format!("{} has no config to switch", agent_name(action.agent())));
+            return Ok(false);
+        }
         formats::read(MCP_AGENTS[action.agent()].flavor, &text, &action.read_place()).map_err(|e| cant_read(&file, &e))?;
         let out = match action.run(&text) {
             Ok(out) => out,
@@ -383,16 +465,17 @@ impl<'a> Planner<'a> {
                 return Ok(false);
             }
         };
-        self.texts.insert(file.clone(), out);
+        let hash = self.planned_hash(&file);
+        self.texts.insert(file.clone(), (out, hash));
         if !self.plan.files.iter().any(|(p, _)| *p == file) {
-            self.plan.files.push((file.clone(), planid::file_hash(&file)));
+            self.plan.files.push((file.clone(), hash));
         }
         if file == claude_json(self.paths) {
             self.warn(CLAUDE_RUNNING);
         }
         if let McpAction::Write { place: Place::Project(root), server, .. } = &action
             && has_literal(server)
-            && in_git(root, &file)
+            && in_git(root, &file, self.paths)
         {
             self.warn(format!("{} is in git; the token would be committed", file.display()));
         }
@@ -445,7 +528,7 @@ impl<'a> Planner<'a> {
             }
             let Some((file, place)) = self.target(agent, claude_scope) else { continue };
             let shared = MCP_AGENTS[agent].flavor == Flavor::ClaudeCode && matches!(place, Place::Project(_));
-            let write = McpAction::Write { agent, file, place, server: server.clone(), extras: Extras::new(), replaces: false, from: None };
+            let write = McpAction::Write { agent, file, place, server: server.clone(), extras: Extras::new(), replaces: false, from: None, fields: vec![] };
             if self.push(write)? && shared {
                 self.warn(CLAUDE_APPROVAL);
             }
@@ -468,7 +551,7 @@ impl<'a> Planner<'a> {
             for c in s.copies.iter().filter(|c| in_scope(scope, &c.place) && !alike(&c.server.transport, &source.server.transport)) {
                 let extras = extras_for(source, c.agent);
                 let server = Server { name: name.into(), transport: source.server.transport.clone() };
-                self.push(McpAction::Write { agent: c.agent, file: c.file.clone(), place: c.place.clone(), server, extras, replaces: true, from: Some(source.agent) })?;
+                self.push(McpAction::Write { agent: c.agent, file: c.file.clone(), place: c.place.clone(), server, extras, replaces: true, from: Some(source.agent), fields: vec![] })?;
             }
         }
         for agent in unique(to) {
@@ -477,7 +560,7 @@ impl<'a> Planner<'a> {
             }
             let Some((file, place)) = self.target(agent, ClaudeScope::Local) else { continue };
             let extras = extras_for(source, agent);
-            self.push(McpAction::Write { agent, file, place, server: source.server.clone(), extras, replaces: false, from: Some(source.agent) })?;
+            self.push(McpAction::Write { agent, file, place, server: source.server.clone(), extras, replaces: false, from: Some(source.agent), fields: vec![] })?;
         }
         Ok(())
     }
@@ -490,13 +573,14 @@ impl<'a> Planner<'a> {
         if changes.is_empty() {
             return Err("nothing to change".into());
         }
+        let fields = field_keys(changes);
         for c in &s.copies {
             let transport = edited(&c.server.transport, changes, name)?;
             if transport == c.server.transport {
                 continue;
             }
             let server = Server { name: name.into(), transport };
-            let write = McpAction::Write { agent: c.agent, file: c.file.clone(), place: c.place.clone(), server, extras: Extras::new(), replaces: true, from: None };
+            let write = McpAction::Write { agent: c.agent, file: c.file.clone(), place: c.place.clone(), server, extras: Extras::new(), replaces: true, from: None, fields: fields.clone() };
             if self.push(write)? && !self.inv.scope.is_global() && c.place == Place::Global {
                 self.warn(GLOBAL_EDIT);
             }
@@ -581,6 +665,9 @@ impl<'a> Planner<'a> {
                 }
                 let rename = McpAction::Rename { agent: c.agent, file: c.file.clone(), place: c.place.clone(), from: s.name.clone(), to: into.into() };
                 if self.push(rename)? && MCP_AGENTS[c.agent].flavor == Flavor::ClaudeCode {
+                    if matches!(c.place, Place::Project(_)) {
+                        self.warn(CLAUDE_APPROVAL);
+                    }
                     self.carry_disabled(c, &s.name, into)?;
                 }
             }
@@ -776,7 +863,7 @@ mod tests {
         assert!(inv.get("plata").unwrap().inherited);
         let req = Request::Edit { name: "plata".into(), changes: vec![EditChange::SetEnv("MODE".into(), EnvValue::literal("prod"))] };
         let plan = plan(&inv, &req, &paths).unwrap();
-        assert_eq!(lines(&plan), ["Edit plata in Claude Code"]);
+        assert_eq!(lines(&plan), ["Edit plata in Claude Code (env.MODE)"]);
         let McpAction::Write { file, place, extras, .. } = &plan.actions[0] else { panic!("a write") };
         assert_eq!((file, place), (&claude_json(&paths), &Place::Global));
         assert!(extras.is_empty());
@@ -829,6 +916,22 @@ mod tests {
         Command::new("git").arg("--version").output().is_ok_and(|o| o.status.success())
     }
 
+    /// Git in `root` that reads no config but the temp home's (none): never the real `~/.gitconfig`.
+    fn git(paths: &Paths, root: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("HOME", &paths.home)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
     #[test]
     fn secret_into_tracked_file_warns() {
         if !git_available() {
@@ -837,7 +940,7 @@ mod tests {
         }
         let (_dir, paths) = home();
         let root = project(&paths);
-        assert!(Command::new("git").arg("-C").arg(&root).args(["init", "-q"]).status().unwrap().success());
+        git(&paths, &root, &["init", "-q"]);
         let inv = scan(&Scope::Project(root.clone()), &paths);
         let in_git = |plan: &McpPlan| plan.warnings.iter().any(|w| w.ends_with("is in git; the token would be committed"));
 
@@ -856,7 +959,7 @@ mod tests {
         assert!(!in_git(&ignored), "{:?}", ignored.warnings);
 
         write(&root.join(".cursor/mcp.json"), "{}");
-        assert!(Command::new("git").arg("-C").arg(&root).args(["add", "-f", ".cursor/mcp.json"]).status().unwrap().success());
+        git(&paths, &root, &["add", "-f", ".cursor/mcp.json"]);
         let tracked = plan(&inv, &add(stdio("plata", &[("PLATA_TOKEN", EnvValue::literal("fake-token"))]), &["cursor"]), &paths).unwrap();
         assert!(in_git(&tracked), "a tracked file warns even when ignored: {:?}", tracked.warnings);
     }
@@ -869,8 +972,8 @@ mod tests {
         let inv = scan(&Scope::Global, &paths);
         let req = Request::Edit { name: "plata".into(), changes: vec![EditChange::Args(vec!["plata-mcp@2".into()])] };
         let plan = plan(&inv, &req, &paths).unwrap();
-        assert_eq!(lines(&plan), ["Edit plata in Claude Code", "Edit plata in Cursor"]);
-        assert_eq!(plan.lines(), ["Edit plata in Claude Code, Cursor"]);
+        assert_eq!(lines(&plan), ["Edit plata in Claude Code (args)", "Edit plata in Cursor (args)"]);
+        assert_eq!(plan.lines(&paths), ["Edit plata in Claude Code, Cursor (args)"]);
 
         let wrong = Request::Edit { name: "plata".into(), changes: vec![EditChange::Url("https://x.example.com".into())] };
         assert!(super::plan(&inv, &wrong, &paths).unwrap_err().contains("no URL"));
@@ -983,5 +1086,93 @@ mod tests {
         assert_eq!(first.id(), plan(&scan(&Scope::Global, &paths), &req, &paths).unwrap().id());
         write(&cursor_json(&paths), r#"{"mcpServers": {"plata": {"command": "npx"}, "x": {"command": "x"}}}"#);
         assert_ne!(first.id(), plan(&scan(&Scope::Global, &paths), &req, &paths).unwrap().id());
+    }
+
+    #[test]
+    fn planned_hash_is_of_the_text_planned_on() {
+        let (_dir, paths) = home();
+        let first = r#"{"mcpServers": {"plata": {"command": "npx"}}}"#;
+        write(&cursor_json(&paths), first);
+        let inv = scan(&Scope::Global, &paths);
+        let mut p = Planner { inv: &inv, paths: &paths, texts: HashMap::new(), plan: McpPlan::default() };
+        p.text(&cursor_json(&paths)).unwrap();
+        write(&cursor_json(&paths), r#"{"mcpServers": {"plata": {"command": "npx"}, "other": {"command": "x"}}}"#);
+        let delete = McpAction::Delete { agent: agent("cursor"), file: cursor_json(&paths), place: Place::Global, name: "plata".into() };
+        assert!(p.push(delete).unwrap());
+        assert_eq!(p.plan.files, [(cursor_json(&paths), Some(content_hash(first.as_bytes())))]);
+        let (written, err) = apply(&p.plan, &paths, &mut Journal::default()).unwrap_err();
+        assert_eq!(written, 0);
+        assert!(err.ends_with("changed since the plan"), "{err}");
+    }
+
+    /// Claude Code with a local copy and a `.mcp.json` copy of one server, plus Cursor's own.
+    fn two_claude_copies(paths: &Paths) -> PathBuf {
+        let root = project(paths);
+        let doc = json!({ "projects": { root.to_string_lossy(): { "mcpServers": { "plata": { "command": "npx", "args": ["plata-mcp"] } } } } });
+        write(&claude_json(paths), &doc.to_string());
+        write(&root.join(".mcp.json"), r#"{"mcpServers": {"plata": {"command": "npx", "args": ["plata-mcp"]}}}"#);
+        write(&root.join(".cursor/mcp.json"), r#"{"mcpServers": {"plata": {"command": "npx", "args": ["plata-mcp"]}}}"#);
+        root
+    }
+
+    #[test]
+    fn lines_name_the_file_when_an_agent_has_two_copies() {
+        let (_dir, paths) = home();
+        let root = two_claude_copies(&paths);
+        let inv = scan(&Scope::Project(root), &paths);
+        let plan = plan(&inv, &Request::Remove { name: "plata".into(), from: vec![] }, &paths).unwrap();
+        assert_eq!(plan.lines(&paths), ["Remove plata from Claude Code (~/.claude.json)", "Remove plata from Claude Code (.mcp.json)", "Remove plata from Cursor"]);
+    }
+
+    #[test]
+    fn edit_lines_and_ids_name_the_changed_keys() {
+        let (_dir, paths) = home();
+        write(&claude_json(&paths), r#"{"mcpServers": {"plata": {"command": "npx", "args": ["plata-mcp"]}}}"#);
+        write(&cursor_json(&paths), r#"{"mcpServers": {"plata": {"command": "npx", "args": ["plata-mcp"]}}}"#);
+        let inv = scan(&Scope::Global, &paths);
+        let edit = |changes: Vec<EditChange>| plan(&inv, &Request::Edit { name: "plata".into(), changes }, &paths).unwrap();
+        let token = edit(vec![EditChange::SetEnv("GITLAB_TOKEN".into(), EnvValue::literal("fake-a")), EditChange::Args(vec!["x".into()])]);
+        assert_eq!(token.lines(&paths), ["Edit plata in Claude Code, Cursor (env.GITLAB_TOKEN, args)"]);
+        let other = edit(vec![EditChange::SetEnv("OTHER".into(), EnvValue::literal("fake-a")), EditChange::Args(vec!["x".into()])]);
+        assert_ne!(token.id(), other.id(), "different keys, different plans");
+        let same_keys = edit(vec![EditChange::SetEnv("GITLAB_TOKEN".into(), EnvValue::literal("fake-b")), EditChange::Args(vec!["x".into()])]);
+        assert!(same_keys.lines(&paths).iter().chain(&token.lines(&paths)).all(|l| !l.contains("fake")), "values never appear");
+    }
+
+    #[test]
+    fn apply_checks_every_file_before_the_first_write() {
+        let (_dir, paths) = home();
+        let claude = r#"{"mcpServers": {"plata": {"command": "npx"}}}"#;
+        write(&claude_json(&paths), claude);
+        write(&cursor_json(&paths), r#"{"mcpServers": {"plata": {"command": "npx"}}}"#);
+        let plan = plan(&scan(&Scope::Global, &paths), &Request::Remove { name: "plata".into(), from: vec![] }, &paths).unwrap();
+        write(&cursor_json(&paths), r#"{"mcpServers": {}}"#);
+        let mut j = Journal::default();
+        assert_eq!(apply(&plan, &paths, &mut j).unwrap_err().0, 0);
+        assert!(j.is_empty());
+        assert_eq!(read(&claude_json(&paths)), claude, "the unchanged first file isn't written either");
+    }
+
+    #[test]
+    fn renaming_a_mcp_json_copy_warns_about_approval() {
+        let (_dir, paths) = home();
+        let root = project(&paths);
+        write(&root.join(".mcp.json"), r#"{"mcpServers": {"framelink-mcp": {"command": "npx", "args": ["-y", "figma-developer-mcp"]}}}"#);
+        let inv = scan(&Scope::Project(root), &paths);
+        let plan = plan(&inv, &Request::Merge { names: vec!["framelink-mcp".into()], into: "figma".into() }, &paths).unwrap();
+        assert_eq!(lines(&plan), ["Rename framelink-mcp to figma in Claude Code"]);
+        assert!(plan.warnings.iter().any(|w| w == "Claude Code will ask to approve it on its next start"), "{:?}", plan.warnings);
+    }
+
+    #[test]
+    fn switch_never_creates_a_missing_config() {
+        let (_dir, paths) = home();
+        let root = project(&paths);
+        write(&root.join(".mcp.json"), r#"{"mcpServers": {"shared": {"command": "uvx"}}}"#);
+        let inv = scan(&Scope::Project(root), &paths);
+        let plan = plan(&inv, &Request::SetDisabled { name: "shared".into(), disabled: true }, &paths).unwrap();
+        assert!(plan.actions.is_empty() && plan.files.is_empty());
+        assert_eq!(plan.skipped, [(agent("claude"), "Claude Code has no config to switch".to_string())]);
+        assert!(!claude_json(&paths).exists());
     }
 }

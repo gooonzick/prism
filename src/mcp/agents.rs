@@ -48,7 +48,7 @@ pub fn index_of(id: &str) -> Option<usize> {
 /// Claude Code's own state file: `~/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json` when that
 /// is set. `Paths` only keeps the resolved folder, so a `CLAUDE_CONFIG_DIR` pointing at `~/.claude`
 /// itself reads as unset.
-fn claude_json(paths: &Paths) -> PathBuf {
+pub(crate) fn claude_json(paths: &Paths) -> PathBuf {
     if paths.claude == paths.home.join(".claude") { paths.home.join(".claude.json") } else { paths.claude.join(".claude.json") }
 }
 
