@@ -510,6 +510,21 @@ fn mcp_tab_lists_servers_with_agents() {
 }
 
 #[test]
+fn the_merge_hint_reads_as_one_sentence() {
+    let mut h = Harness::project();
+    fs::create_dir_all(h.root.join(".cursor")).unwrap();
+    let servers = serde_json::json!({ "mcpServers": {
+        "figma": { "command": "npx", "args": ["-y", "figma-developer-mcp", "--stdio"] },
+        "figma-dev": { "command": "npx", "args": ["figma-developer-mcp"] },
+    } });
+    fs::write(h.root.join(".cursor/mcp.json"), servers.to_string()).unwrap();
+    h.click("scope-global");
+    h.click("tab-mcp");
+    let shown = h.texts();
+    assert!(shown.contains("Maybe one server: figma, figma-dev (same package figma-developer-mcp, args differ)"), "{shown}");
+}
+
+#[test]
 fn inspector_masks_until_reveal() {
     let mut h = mcp_home();
     h.click("scope-global");

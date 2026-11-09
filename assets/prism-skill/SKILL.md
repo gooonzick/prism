@@ -20,8 +20,8 @@ Use `prism` instead of editing `~/.claude.json`, `~/.cursor/mcp.json`, `~/.codex
 ## Rules
 
 1. Add `--json` to every command and read stdout.
-2. Commands that change or remove something print a plan and change nothing. Read the plan, tell the user what it does, then run the same command with `--apply --plan-id <plan_id>`. Exit 4 means the files changed since the plan: read the new plan and confirm again.
-3. `mcp add`, `skills install` and `skills new` act at once, without a plan. Confirm with the user first.
+2. `projects add`, `projects remove`, `targets set`, `skills new`, `skills install`, `skills update` and `mcp add` act at once, without a plan. Confirm with the user first.
+3. Every other command that changes or removes something prints a plan and changes nothing. Read the plan, tell the user what it does, then run the same command with `--apply --plan-id <plan_id>`. Exit 4 means the files changed since the plan: read the new plan and confirm again.
 4. Pass secrets with `KEY=@file` (read from a file) or `KEY=-` (read from stdin), never inline. `'KEY=${VAR}'` writes a reference the agent expands. Never print or echo secret values.
 5. Env and header values print as `***`. Run `prism mcp show NAME --show-secrets` only when the user asks to see them.
 6. `prism undo` reverts the last change, made from the command line or the Prism window.
@@ -31,8 +31,8 @@ Use `prism` instead of editing `~/.claude.json`, `~/.cursor/mcp.json`, `~/.codex
 
 | Code | Meaning |
 | --- | --- |
-| 0 | Done, or nothing to do |
-| 1 | Failed. JSON has `done` and `error`; `prism undo` reverts what was done |
+| 0 | Done, or nothing to do (`mcp add` when every agent has the server already) |
+| 1 | Failed or refused. JSON has `error`; after a partial apply also `done`, and `prism undo` reverts what was done |
 | 2 | Bad usage: a flag is missing or wrong |
 | 3 | `doctor` found problems |
 | 4 | The plan changed since `--plan-id`; nothing was done |
@@ -134,4 +134,4 @@ A stdio transport is `{ "type": "stdio", "command": "npx", "args": [], "env": {}
 
 Kinds: `broken_link`, `invalid_skill`, `mcp_differs`, `mcp_unreadable`, `missing_project`.
 
-Other results: `skills new` `{ "created", "path", "linked" }`, `skills install` `{ "installed", "linked", "log" }`, `skills updates` `{ "updates" }`, `skills update` `{ "updated", "log" }`, `undo` `{ "undone" }` (the change's name, or `null`), `setup` `{ "cli", "skill" }`, each with `status` and `message`. A skills.sh failure is `{ "error" }`.
+Other results: `skills new` `{ "created", "path", "linked" }`, `skills install` `{ "installed", "linked", "log" }`, `skills updates` `{ "updates" }`, `skills update` `{ "updated", "log" }`, `undo` `{ "undone" }` (the change's name, or `null`), `setup` `{ "cli", "skill" }`, each with `status` and `message`. A refused plan (no such skill or server, a read-only server, a config that can't be read) and a skills.sh failure are `{ "error": "..." }`, with exit 1.

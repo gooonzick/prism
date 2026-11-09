@@ -97,7 +97,6 @@ impl McpAgent {
     /// Where a new server goes in `scope`. Mostly the one file the agent reads. OpenCode reads
     /// several: the first that already has an `mcp` key, else an existing `.jsonc`, else an
     /// existing `.json`, else a new `opencode.json` in the scope's primary folder.
-    #[allow(dead_code)] // the add and copy commands use it
     pub fn new_server_file(&self, scope: &Scope, paths: &Paths) -> (PathBuf, Place) {
         let files = self.files(scope, paths);
         if self.flavor != Flavor::OpenCode {

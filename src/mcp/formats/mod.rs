@@ -48,7 +48,6 @@ pub fn disabled_in(text: &str, project: &Path) -> Disabled {
 /// modelled fields that differ; `extras` ignored), else appended with `extras` at the end of the
 /// servers object. Empty `text` makes a new file. `Err` when the agent can't express a value, and
 /// when the result wouldn't read back as `server`, so a wrong write never reaches the disk.
-#[allow(dead_code)] // the add, copy and edit commands use it
 pub fn upsert(flavor: Flavor, text: &str, place: &Place, server: &Server, extras: &Extras) -> Result<String, String> {
     let before = read(flavor, text, place)?;
     let out = match flavor {
@@ -88,7 +87,6 @@ fn same_server(flavor: Flavor, got: &Server, wanted: &Server) -> bool {
 }
 
 /// `text` without the server `name`; unchanged when it isn't there.
-#[allow(dead_code)] // the remove command uses it
 pub fn remove(flavor: Flavor, text: &str, place: &Place, name: &str) -> Result<String, String> {
     let before = read(flavor, text, place)?;
     if !before.iter().any(|(s, _, _)| s.name == name) {
@@ -109,7 +107,6 @@ pub fn remove(flavor: Flavor, text: &str, place: &Place, name: &str) -> Result<S
 }
 
 /// `text` with the server `from` renamed to `to`, in the same position. Never over another server.
-#[allow(dead_code)] // the merge command uses it
 pub fn rename(flavor: Flavor, text: &str, place: &Place, from: &str, to: &str) -> Result<String, String> {
     let before = read(flavor, text, place)?;
     let Some((old, extras, enabled)) = before.iter().find(|(s, _, _)| s.name == from) else { return Err(format!("no server {from}")) };
@@ -136,7 +133,6 @@ pub fn rename(flavor: Flavor, text: &str, place: &Place, from: &str, to: &str) -
 /// that file: `disabledMcpjsonServers` for a `.mcp.json` copy (`Place::Project`), else
 /// `disabledMcpServers`. OpenCode and Codex switch the entry itself, only in the project's own
 /// file (`text` is that file). Other agents have no per-project switch.
-#[allow(dead_code)] // the enable and disable commands use it
 pub fn set_disabled(flavor: Flavor, text: &str, project: &Path, place: &Place, name: &str, disabled: bool) -> Result<String, String> {
     let project_file = matches!(place, Place::Project(_));
     match flavor {

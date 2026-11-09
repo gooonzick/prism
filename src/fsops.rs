@@ -97,7 +97,6 @@ impl Journal {
 
     /// Replaces `path` with `contents`, atomically (a temp file next to it, then a rename). The
     /// first time this journal touches `path` its original goes to `<state>/backups/`.
-    #[allow(dead_code)] // the MCP commands write configs through it
     pub fn write_file(&mut self, path: &Path, contents: &[u8], paths: &Paths) -> io::Result<()> {
         let earlier = self.steps.iter().position(|s| matches!(s, Step::Rewrote { path: p, .. } if p == path));
         let original = match fs::read(path) {

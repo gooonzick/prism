@@ -97,7 +97,7 @@ fn main(s: &App, k: &Kit) -> El {
     if !s.mcp.merges.is_empty() {
         let mut hints = col().key("mcp-merges").w_full().pt(10.0).px(12.0).gap(6.0);
         for (i, m) in s.mcp.merges.iter().enumerate() {
-            let mut line = notice_line(k.c.info.icon, format!("Maybe one server: {} — {}", m.names.join(", "), m.reason), k);
+            let mut line = notice_line(k.c.info.icon, format!("Maybe one server: {} ({})", m.names.join(", "), m.reason), k);
             // The core merges only servers this scope owns and Prism may change.
             let mergeable = m.names.iter().all(|n| s.mcp.get(n).is_some_and(|x| !x.inherited && x.status != Status::ReadOnly));
             if mergeable {

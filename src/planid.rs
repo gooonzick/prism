@@ -45,7 +45,6 @@ pub fn plan_id(lines: &[String], state: &[(PathBuf, Option<u64>)]) -> String {
 }
 
 /// Hash of one file's bytes, or `None` if it cannot be read.
-#[allow(dead_code)] // the MCP commands hash config files
 pub fn file_hash(path: &Path) -> Option<u64> {
     fs::read(path).ok().map(|b| content_hash(&b))
 }
