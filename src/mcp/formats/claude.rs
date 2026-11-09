@@ -4,9 +4,10 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use jsonc_parser::cst::CstObject;
 use serde_json::Value;
 
-use super::{Entry, mcp_servers, parse_json};
+use super::{Entry, json, mcp_servers, parse_json};
 use crate::mcp::agents::Flavor;
 use crate::mcp::model::Place;
 
@@ -45,6 +46,33 @@ pub(super) fn disabled_in(text: &str, project_path: &Path) -> Disabled {
         list.filter_map(|n| n.as_str().map(str::to_owned)).collect::<BTreeSet<_>>().into_iter().collect()
     };
     Disabled { servers: names("disabledMcpServers"), mcp_json: names("disabledMcpjsonServers") }
+}
+
+/// The `projects` key for `path` when writing: the one Claude Code already has (canonical form
+/// first, as when reading), else the canonical path, which is what Claude Code would write.
+fn project_key(root: &CstObject, path: &Path) -> String {
+    let canonical = std::fs::canonicalize(path).ok();
+    let projects = root.get("projects").and_then(|p| p.object_value());
+    let forms: Vec<String> = canonical.as_deref().into_iter().chain([path]).map(|p| p.to_string_lossy().into_owned()).collect();
+    let known = forms.iter().find(|k| projects.as_ref().is_some_and(|p| p.get(k).is_some()));
+    known.unwrap_or(&forms[0]).clone()
+}
+
+/// Where `place`'s servers sit: `projects[<path>].mcpServers` for the local scope, else the
+/// top-level `mcpServers` (of `~/.claude.json` or `.mcp.json`).
+pub(super) fn servers_path(root: &CstObject, place: &Place) -> Vec<String> {
+    match place {
+        Place::ClaudeLocal(path) => vec!["projects".into(), project_key(root, path), "mcpServers".into()],
+        Place::Global | Place::Project(_) => mcp_servers::path(),
+    }
+}
+
+/// Lists `name` in (or takes it out of) the project's disabled list in `~/.claude.json`:
+/// `disabledMcpjsonServers` for `.mcp.json` copies, `disabledMcpServers` for user and local ones.
+/// Approval lists (`enabledMcpjsonServers`) are never touched.
+pub(super) fn set_disabled(root: &CstObject, project: &Path, mcp_json: bool, name: &str, disabled: bool) -> Result<(), String> {
+    let key = if mcp_json { "disabledMcpjsonServers" } else { "disabledMcpServers" };
+    json::set_in_list(root, &["projects".into(), project_key(root, project)], key, name, disabled)
 }
 
 #[cfg(test)]

@@ -1,11 +1,13 @@
 //! OpenCode: servers under `mcp`, `{type: local, command: [..], environment}` or
 //! `{type: remote, url, headers}`, references as `{env:VAR}`.
 
+use jsonc_parser::cst::CstObject;
 use serde_json::Value;
 
 use super::refs::Syntax;
-use super::{Entry, Obj, objects, string, strings, values};
-use crate::mcp::model::{Server, Transport};
+use super::{Entry, Obj, Want, Wants, encoded, json, objects, string, strings, values};
+use crate::mcp::agents::Flavor;
+use crate::mcp::model::{Extras, Server, Transport};
 
 /// Servers sit right under `mcp` (the shape configs have today) or under `mcp.servers`, the newer
 /// layout where `mcp` also holds settings such as `timeout` and entries switch off with `disabled`.
@@ -49,6 +51,63 @@ fn entry(name: &str, obj: &Obj) -> Result<Entry, String> {
         Transport::Http { url, headers, sse: false }
     };
     Ok((Server { name: name.into(), transport }, rest, enabled))
+}
+
+/// Where the servers sit, as the reader finds them: `mcp.servers` when the file uses that layout,
+/// else right under `mcp` (also for a file with no servers yet).
+pub(super) fn servers_path(root: &CstObject) -> Vec<String> {
+    let mcp = root.get("mcp").and_then(|m| m.object_value());
+    let servers = mcp.and_then(|m| m.get("servers")).and_then(|s| s.object_value());
+    if servers.is_some_and(|s| s.get("type").is_none()) { vec!["mcp".into(), "servers".into()] } else { vec!["mcp".into()] }
+}
+
+pub(super) fn upsert(root: &CstObject, server: &Server, extras: &Extras) -> Result<(), String> {
+    json::upsert_at(root, &servers_path(root), &server.name, |now| wants(server, now), extras)
+}
+
+/// `enabled` (or `disabled`, in the `mcp.servers` layout) on the entry. Leaves no key behind for
+/// a server that is on and never had one.
+pub(super) fn set_enabled(root: &CstObject, name: &str, on: bool) -> Result<(), String> {
+    let path = servers_path(root);
+    let entry = json::object_at(root, &path)?.and_then(|s| s.get(name)).and_then(|p| p.object_value()).ok_or_else(|| format!("no server {name}"))?;
+    let mut found = false;
+    for (key, value) in [("enabled", on), ("disabled", !on)] {
+        if let Some(prop) = entry.get(key) {
+            found = true;
+            json::set_bool(&prop, value);
+        }
+    }
+    if !found && !on {
+        let (key, value) = if path.len() == 2 { ("disabled", true) } else { ("enabled", false) };
+        entry.append(key, value.into());
+    }
+    Ok(())
+}
+
+/// OpenCode has one remote type for SSE and streamable HTTP, so `sse` isn't written.
+fn wants(server: &Server, now: Option<&Obj>) -> Result<Wants, String> {
+    let was_stdio = now.and_then(|obj| entry(&server.name, obj).ok()).map(|(s, _, _)| matches!(s.transport, Transport::Stdio { .. }));
+    let stdio = matches!(server.transport, Transport::Stdio { .. });
+    let other = || if was_stdio.is_some_and(|w| w != stdio) { Want::Absent } else { Want::Keep };
+    let kind = |k: &str| if was_stdio == Some(stdio) { Want::Keep } else { Want::Str(k.into()) };
+    Ok(match &server.transport {
+        Transport::Stdio { command, args, env, cwd } => vec![
+            ("type", kind("local")),
+            ("command", Want::List([command.clone()].into_iter().chain(args.iter().cloned()).collect())),
+            ("environment", Want::Map(encoded(Flavor::OpenCode, "env", env, Syntax::Brace)?, Syntax::Brace)),
+            ("cwd", cwd.clone().map_or(Want::Absent, Want::Str)),
+            ("url", other()),
+            ("headers", other()),
+        ],
+        Transport::Http { url, headers, .. } => vec![
+            ("type", kind("remote")),
+            ("url", Want::Str(url.clone())),
+            ("headers", Want::Map(encoded(Flavor::OpenCode, "header", headers, Syntax::Brace)?, Syntax::Brace)),
+            ("command", other()),
+            ("environment", other()),
+            ("cwd", other()),
+        ],
+    })
 }
 
 #[cfg(test)]

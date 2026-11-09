@@ -4,7 +4,7 @@
 use serde_json::Value;
 
 use super::refs::Syntax;
-use super::{Entry, Obj, objects, string, strings, values};
+use super::{Entry, Obj, Want, Wants, encoded, objects, string, strings, values};
 use crate::mcp::agents::Flavor;
 use crate::mcp::model::{Server, Transport};
 
@@ -68,6 +68,87 @@ fn entry(flavor: Flavor, name: &str, obj: &Obj) -> Result<Entry, String> {
         Transport::Http { url, headers, sse: *sse || kind.as_deref() == Some("sse") }
     };
     Ok((Server { name: name.into(), transport }, rest, enabled))
+}
+
+pub(super) fn path() -> Vec<String> {
+    vec!["mcpServers".into()]
+}
+
+/// The keys an entry of `server` holds in `flavor`, given the entry as it is `now` (if any).
+/// Keys of the other transport go only when the transport changes; until then they're extras.
+pub(super) fn wants(flavor: Flavor, server: &Server, now: Option<&Obj>) -> Result<Wants, String> {
+    let agent = super::agent(flavor);
+    let syntax = syntax(flavor);
+    let was = now.and_then(|obj| entry(flavor, &server.name, obj).ok()).map(|(s, _, _)| s.transport);
+    let stdio = matches!(server.transport, Transport::Stdio { .. });
+    let switched = was.as_ref().is_some_and(|t| matches!(t, Transport::Stdio { .. }) != stdio);
+    let other = || if switched { Want::Absent } else { Want::Keep };
+    let now_type = now.and_then(|obj| obj.get("type")).and_then(Value::as_str);
+    let mut wants: Wants = Vec::new();
+    match &server.transport {
+        Transport::Stdio { command, args, env, cwd } => {
+            if flavor == Flavor::ClaudeDesktop && env.values().any(|v| !v.is_literal()) {
+                return Err("Claude Desktop can't use environment references".into());
+            }
+            let kind = match (flavor, &was) {
+                (Flavor::ClaudeCode, Some(Transport::Stdio { .. })) => Want::Keep,
+                (Flavor::ClaudeCode, _) => Want::Str("stdio".into()),
+                _ => other(),
+            };
+            wants.push(("type", kind));
+            wants.push(("command", Want::Str(command.clone())));
+            wants.push(("args", Want::List(args.clone())));
+            wants.push(("env", Want::Map(encoded(flavor, "env", env, syntax)?, syntax)));
+            match (flavor, cwd) {
+                (Flavor::Gemini, cwd) => wants.push(("cwd", cwd.clone().map_or(Want::Absent, Want::Str))),
+                (_, Some(_)) => return Err(format!("{agent} can't express cwd")),
+                (_, None) => {}
+            }
+            for &(key, _) in url_keys(flavor) {
+                wants.push((key, other()));
+            }
+            wants.push(("headers", other()));
+        }
+        Transport::Http { url, headers, sse } => {
+            if flavor == Flavor::ClaudeDesktop {
+                return Err(format!("{agent} can't express url"));
+            }
+            // Claude Code models `type`; Gemini tells SSE by the URL key; the rest by `type: sse`.
+            let kind = match flavor {
+                Flavor::ClaudeCode if matches!(&was, Some(Transport::Http { sse: s, .. }) if s == sse) => Want::Keep,
+                Flavor::ClaudeCode => Want::Str(if *sse { "sse" } else { "http" }.into()),
+                Flavor::Gemini if switched || (now_type == Some("sse") && !sse) => Want::Absent,
+                Flavor::Gemini => Want::Keep,
+                _ if *sse && now_type == Some("sse") => Want::Keep,
+                _ if *sse => Want::Str("sse".into()),
+                _ if switched || now_type == Some("sse") => Want::Absent,
+                _ => Want::Keep,
+            };
+            wants.push(("type", kind));
+            match flavor {
+                Flavor::Gemini => {
+                    let (key, gone) = if *sse { ("url", "httpUrl") } else { ("httpUrl", "url") };
+                    wants.push((key, Want::Str(url.clone())));
+                    wants.push((gone, Want::Absent));
+                }
+                Flavor::Windsurf => {
+                    let has = |k: &str| now.is_some_and(|obj| obj.contains_key(k));
+                    let (key, spare) = if has("url") && !has("serverUrl") { ("url", "serverUrl") } else { ("serverUrl", "url") };
+                    wants.push((key, Want::Str(url.clone())));
+                    wants.push((spare, other()));
+                }
+                _ => wants.push(("url", Want::Str(url.clone()))),
+            }
+            wants.push(("headers", Want::Map(encoded(flavor, "header", headers, syntax)?, syntax)));
+            for key in ["command", "args", "env"] {
+                wants.push((key, other()));
+            }
+            if flavor == Flavor::Gemini {
+                wants.push(("cwd", other()));
+            }
+        }
+    }
+    Ok(wants)
 }
 
 #[cfg(test)]
