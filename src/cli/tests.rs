@@ -420,10 +420,16 @@ fn a_partial_apply_saves_what_was_done_and_undo_restores_it() {
     let mut c = ctx(h);
     c.settings.targets = Some(vec!["claude".into(), "codex".into()]);
     // b cannot leave its folder, so removing it fails after a is gone.
-    let locked = h.join(".codex/skills");
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    struct Unlock(std::path::PathBuf);
+    impl Drop for Unlock {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    let _unlock = Unlock(h.join(".codex/skills"));
+    std::fs::set_permissions(&_unlock.0, std::fs::Permissions::from_mode(0o555)).unwrap();
     let (code, out, _) = go(&["skills", "remove", "a", "b", "--apply", "--json"], &mut c);
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&_unlock.0, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(code, 1, "{out}");
     let v = json(&out);
     assert_eq!(v["applied"], false);
@@ -436,24 +442,37 @@ fn a_partial_apply_saves_what_was_done_and_undo_restores_it() {
     assert!(h.join(".claude/skills/a/SKILL.md").is_file());
 }
 
-#[test]
-fn applying_a_plan_with_actions_and_conflicts_does_both() {
-    let home = tempfile::tempdir().unwrap();
-    let h = home.path();
+/// `fine` only in Claude's folder (two actions: adopt, link into Codex), `clash` in conflict.
+fn mixed(h: &std::path::Path) -> Ctx {
     write_skill(&h.join(".claude/skills"), "fine", "d");
     write_skill(&h.join(".agents/skills"), "clash", "Canonical");
     write_skill(&h.join(".codex/skills"), "clash", "Different");
     let mut c = ctx(h);
     c.settings.targets = Some(vec!["codex".into()]);
+    c
+}
+
+#[test]
+fn applying_a_plan_with_actions_and_conflicts_does_both() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let mut c = mixed(h);
+    assert!(std::fs::symlink_metadata(h.join(".codex/skills/fine")).is_err());
     let (code, out, _) = go(&["skills", "sync", "--apply", "--json"], &mut c);
     assert_eq!(code, 0, "{out}");
     let v = json(&out);
     assert_eq!(v["applied"], true);
-    assert!(v["done"].as_u64().unwrap() >= 1);
-    assert!(h.join(".agents/skills/fine/SKILL.md").is_file());
+    assert_eq!(v["done"], 2);
+    assert_eq!(v["actions"].as_array().unwrap().len(), 2);
+    assert!(std::fs::symlink_metadata(h.join(".codex/skills/fine")).unwrap().file_type().is_symlink());
     assert_eq!(v["conflicts"][0]["skill"], "clash");
-    let (_, human, _) = go(&["skills", "sync", "--apply"], &mut c);
-    assert!(human.contains("clash"), "{human}");
+    assert!(h.join(".codex/skills/clash").is_dir());
+
+    let home = tempfile::tempdir().unwrap();
+    let mut c = mixed(home.path());
+    let (code, human, _) = go(&["skills", "sync", "--apply"], &mut c);
+    assert_eq!(code, 0);
+    assert!(human.contains("Done: 2 changes") && human.contains("clash"), "{human}");
 }
 
 #[test]
