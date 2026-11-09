@@ -409,3 +409,67 @@ fn new_skill_is_immediate() {
     assert_eq!(code, 2);
     assert!(err.contains("lowercase"), "{err}");
 }
+
+#[test]
+fn a_partial_apply_saves_what_was_done_and_undo_restores_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    write_skill(&h.join(".claude/skills"), "a", "d");
+    write_skill(&h.join(".codex/skills"), "b", "d");
+    let mut c = ctx(h);
+    c.settings.targets = Some(vec!["claude".into(), "codex".into()]);
+    // b cannot leave its folder, so removing it fails after a is gone.
+    let locked = h.join(".codex/skills");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let (code, out, _) = go(&["skills", "remove", "a", "b", "--apply", "--json"], &mut c);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(code, 1, "{out}");
+    let v = json(&out);
+    assert_eq!(v["applied"], false);
+    assert_eq!(v["done"], 1);
+    assert!(v["error"].as_str().is_some());
+    assert!(!h.join(".claude/skills/a").exists());
+    assert!(h.join(".codex/skills/b").exists());
+    assert_eq!(store::load_last_change(&c.paths).unwrap().label, "remove 2 skills");
+    assert_eq!(go(&["undo"], &mut c).0, 0);
+    assert!(h.join(".claude/skills/a/SKILL.md").is_file());
+}
+
+#[test]
+fn applying_a_plan_with_actions_and_conflicts_does_both() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    write_skill(&h.join(".claude/skills"), "fine", "d");
+    write_skill(&h.join(".agents/skills"), "clash", "Canonical");
+    write_skill(&h.join(".codex/skills"), "clash", "Different");
+    let mut c = ctx(h);
+    c.settings.targets = Some(vec!["codex".into()]);
+    let (code, out, _) = go(&["skills", "sync", "--apply", "--json"], &mut c);
+    assert_eq!(code, 0, "{out}");
+    let v = json(&out);
+    assert_eq!(v["applied"], true);
+    assert!(v["done"].as_u64().unwrap() >= 1);
+    assert!(h.join(".agents/skills/fine/SKILL.md").is_file());
+    assert_eq!(v["conflicts"][0]["skill"], "clash");
+    let (_, human, _) = go(&["skills", "sync", "--apply"], &mut c);
+    assert!(human.contains("clash"), "{human}");
+}
+
+#[test]
+fn changing_targets_changes_the_copy_plan_id() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let proj = h.join("app");
+    write_skill(&proj.join(".agents/skills"), "local", "d");
+    std::fs::create_dir_all(h.join(".codex")).unwrap();
+    let mut c = ctx(h);
+    c.settings.targets = Some(vec!["codex".into()]);
+    let args = ["skills", "copy", "local", "--to-global", "--project", proj.to_str().unwrap(), "--json"];
+    let before = json(&go(&args, &mut c).1)["plan_id"].as_str().unwrap().to_string();
+    c.settings.targets = Some(vec!["codex".into(), "claude".into()]);
+    let after = json(&go(&args, &mut c).1)["plan_id"].as_str().unwrap().to_string();
+    assert_ne!(before, after);
+    let (code, _, _) = go(&["skills", "copy", "local", "--to-global", "--project", proj.to_str().unwrap(), "--apply", "--plan-id", &before], &mut c);
+    assert_eq!(code, 4);
+}

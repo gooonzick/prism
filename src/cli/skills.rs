@@ -367,8 +367,11 @@ fn copy(ctx: &Ctx, scope: &Scope, inv: &Inventory, names: Vec<String>, dest: Sco
     let targets = ctx.targets();
     let mut involved: Vec<(Scope, String)> = copying.iter().map(|n| (scope.clone(), n.clone())).collect();
     involved.extend(copying.iter().chain(conflicts.iter().map(|c| &c.skill)).map(|n| (dest.clone(), n.clone())));
+    // The links apply makes depend on the targets, so they are part of what the id covers.
+    let linking: Vec<&str> = targets.iter().map(|&t| AGENTS[t].name).collect();
+    let linking = if linking.is_empty() { "no links".to_string() } else { format!("link into {}", linking.join(", ")) };
     let plan = Planned {
-        actions: copying.iter().map(|n| format!("Copy {n} to {to}")).collect(),
+        actions: copying.iter().map(|n| format!("Copy {n} to {to} ({linking})")).collect(),
         conflicts,
         involved,
         label: label::copy(&to),
