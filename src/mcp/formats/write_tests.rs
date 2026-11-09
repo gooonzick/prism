@@ -453,7 +453,72 @@ fn remove_last_server_leaves_empty_object() {
     assert_eq!(remove(Flavor::Cursor, &out, &Place::Global, "figma").unwrap(), out, "removing what isn't there changes nothing");
 
     let out = remove(Flavor::Codex, CODEX, &Place::Global, "gitlab").unwrap();
-    assert!(!out.contains("gitlab") && out.contains("# Context7 over HTTP\n[mcp_servers.context7]"), "{out}");
+    let expected = r#"# Codex config — hand-tuned
+model = "gpt-5-codex"
+approval_policy = "on-request"
+
+# Context7 over HTTP
+[mcp_servers.context7]
+url = "https://mcp.context7.com/mcp"
+bearer_token_env_var = "CTX7_TOKEN"
+
+[mcp_servers.figma]
+command = "npx"
+args = ["-y", "figma-developer-mcp", "--stdio"]
+env = { FIGMA_API_KEY = "fake-figma-key", LOG = "warn" }
+
+[profiles.fast]
+model = "gpt-5-mini"   # cheaper
+"#;
+    assert_eq!(out, expected);
+}
+
+/// A file style by name, and how to give a text that style.
+type Style = (&'static str, fn(&str) -> String);
+
+/// toml_edit prints LF, always ends with a newline and drops a BOM; the file's own style comes back.
+#[test]
+fn codex_keeps_line_endings_bom_and_final_newline() {
+    let edited = CODEX.replace(r#"FIGMA_API_KEY = "fake-figma-key","#, r#"FIGMA_API_KEY = "fake-figma-key-2","#);
+    assert_ne!(edited, CODEX);
+    let styles: [Style; 3] = [
+        ("crlf", |t| t.replace('\n', "\r\n")),
+        ("no final newline", |t| t.trim_end_matches('\n').to_string()),
+        ("bom", |t| format!("\u{feff}{t}")),
+    ];
+    for (style, styled) in styles {
+        let text = styled(CODEX);
+        let same = upsert(Flavor::Codex, &text, &Place::Global, &codex_figma("fake-figma-key"), &no_extras()).unwrap();
+        assert_eq!(same, text, "{style}: identical upsert");
+        assert_eq!(remove(Flavor::Codex, &text, &Place::Global, "nothing").unwrap(), text, "{style}: remove of nothing");
+        let on = set_disabled(Flavor::Codex, &text, Path::new("/w"), &Place::Project("/w".into()), "figma", false).unwrap();
+        assert_eq!(on, text, "{style}: enabling a server that is on");
+        let out = upsert(Flavor::Codex, &text, &Place::Global, &codex_figma("fake-figma-key-2"), &no_extras()).unwrap();
+        assert_eq!(out, styled(&edited), "{style}: a real edit");
+    }
+
+    let crlf = CODEX.replace('\n', "\r\n");
+    let brave = stdio("brave", "npx", &["-y", "@brave/brave-search-mcp-server"], &[("BRAVE_API_KEY", var("BRAVE_API_KEY"))]);
+    let out = upsert(Flavor::Codex, &crlf, &Place::Global, &brave, &no_extras()).unwrap();
+    assert!(out.starts_with(crlf.split("[profiles.fast]").next().unwrap()), "{out:?}");
+    assert!(!out.replace("\r\n", "").contains('\n'), "a new table takes the file's CRLF too: {out:?}");
+}
+
+/// A parse error says where, never what the line holds: it may be a token.
+#[test]
+fn parse_errors_never_quote_the_file() {
+    let codex = "[mcp_servers.x]\ncommand = \"sk-FAKE-SECRET-123\nargs = []\n";
+    let err = read(Flavor::Codex, codex, &Place::Global).unwrap_err();
+    assert!(err.starts_with("line 2, column ") && !err.contains("FAKE"), "{err}");
+    let err = upsert(Flavor::Codex, codex, &Place::Global, &stdio("y", "y", &[], &[]), &no_extras()).unwrap_err();
+    assert!(!err.contains("FAKE"), "{err}");
+
+    for json in [r#"{ "mcpServers": { "x": { "command": "x", "env": { "T": "sk-FAKE-SECRET-123 } } } }"#, r#"{ "mcpServers": { "x": { "env": { "T": "sk-FAKE-\uD800\u0041" } } } }"#] {
+        let err = read(Flavor::Cursor, json, &Place::Global).unwrap_err();
+        assert!(err.starts_with("line 1, column ") && !err.contains("FAKE") && !err.contains("D800"), "{err}");
+        let err = upsert(Flavor::Cursor, json, &Place::Global, &stdio("y", "y", &[], &[]), &no_extras()).unwrap_err();
+        assert!(!err.contains("FAKE") && !err.contains("D800"), "{err}");
+    }
 }
 
 #[test]

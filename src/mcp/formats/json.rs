@@ -1,8 +1,9 @@
 //! Edits to JSON and JSONC through `jsonc-parser`'s CST, which holds every comment, space and comma
 //! of the file: only the nodes an edit touches change, and the rest prints back as it was.
 
-use jsonc_parser::ParseOptions;
 use jsonc_parser::cst::{CstArray, CstInputValue, CstNode, CstObject, CstObjectProp, CstRootNode, ObjectPropName};
+use jsonc_parser::errors::{ParseError, ParseErrorKind};
+use jsonc_parser::{ParseOptions, ParseStringErrorKind};
 use serde_json::Value;
 
 use super::refs::Syntax;
@@ -12,7 +13,7 @@ use super::{Extras, Obj, Want, Wants, same_text, string};
 /// new document, which ends with a newline.
 pub(super) fn edit(text: &str, edit: impl FnOnce(&CstObject) -> Result<(), String>) -> Result<String, String> {
     let blank = text.trim().is_empty();
-    let root = CstRootNode::parse(if blank { "" } else { text }, &ParseOptions::default()).map_err(|e| e.to_string())?;
+    let root = CstRootNode::parse(if blank { "" } else { text }, &ParseOptions::default()).map_err(|e| error(&e))?;
     let obj = match root.value() {
         None => root.object_value_or_set(),
         Some(value) => value.as_object().ok_or("the top level is not an object")?,
@@ -20,6 +21,16 @@ pub(super) fn edit(text: &str, edit: impl FnOnce(&CstObject) -> Result<(), Strin
     edit(&obj)?;
     let out = root.to_string();
     Ok(if blank && !out.ends_with('\n') { out + "\n" } else { out })
+}
+
+/// Where and what went wrong, never the file's text: the one message that quotes it (a bad
+/// `\u` escape) is cut short, since the text around it may be a token.
+pub(super) fn error(e: &ParseError) -> String {
+    let what = match e.kind() {
+        ParseErrorKind::String(ParseStringErrorKind::InvalidUnicodeEscapeSequence(_)) => "Invalid unicode escape sequence".into(),
+        kind => kind.to_string(),
+    };
+    format!("line {}, column {}: {what}", e.line_display(), e.column_display())
 }
 
 /// The object at `path` under `obj`, if there is one.

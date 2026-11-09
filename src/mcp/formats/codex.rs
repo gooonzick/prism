@@ -12,7 +12,42 @@ use super::{Entry, Obj, Want, Wants, string, strings, values};
 use crate::mcp::model::{EnvValue, Extras, Part, Server, Transport};
 
 fn parse(text: &str) -> Result<DocumentMut, String> {
-    text.parse().map_err(|e: toml_edit::TomlError| e.to_string())
+    text.parse().map_err(|e: toml_edit::TomlError| error(text, &e))
+}
+
+/// Where and what went wrong. toml_edit's own message quotes the offending line, which may hold
+/// a token, so only its position and the short message are kept.
+fn error(text: &str, e: &toml_edit::TomlError) -> String {
+    let what = e.message().trim().replace('\n', "; ");
+    let Some(span) = e.span() else { return what };
+    let before = &text[..span.start.min(text.len())];
+    let line = before.matches('\n').count() + 1;
+    let column = before.rsplit('\n').next().unwrap_or("").chars().count() + 1;
+    format!("line {line}, column {column}: {what}")
+}
+
+/// `doc` printed in `text`'s own style. toml_edit writes LF, always ends with a newline and drops
+/// a BOM; an edit that changed nothing gives `text` back as it was, and a real one gets the
+/// file's line endings, BOM and final-newline state back.
+fn finish(text: &str, doc: &DocumentMut) -> Result<String, String> {
+    let mut out = doc.to_string();
+    if out == parse(text)?.to_string() {
+        return Ok(text.into());
+    }
+    let body = text.strip_prefix('\u{feff}').unwrap_or(text);
+    if body.contains("\r\n") {
+        out = out.replace("\r\n", "\n").replace('\n', "\r\n");
+    }
+    if !body.is_empty() && !body.ends_with('\n') {
+        let end = out.strip_suffix("\r\n").or_else(|| out.strip_suffix('\n')).map(str::len);
+        if let Some(end) = end {
+            out.truncate(end);
+        }
+    }
+    if text.starts_with('\u{feff}') && !out.starts_with('\u{feff}') {
+        out.insert(0, '\u{feff}');
+    }
+    Ok(out)
 }
 
 pub(super) fn read(text: &str) -> Result<Vec<Entry>, String> {
@@ -85,7 +120,7 @@ pub(super) fn upsert(text: &str, server: &Server, extras: &Extras) -> Result<Str
             servers.insert(&server.name, Item::Table(table));
         }
     }
-    Ok(doc.to_string())
+    finish(text, &doc)
 }
 
 /// Removes the server's table with its sub-tables and the comment written above it.
@@ -94,7 +129,7 @@ pub(super) fn remove(text: &str, name: &str) -> Result<String, String> {
     if let Some(servers) = doc.get_mut("mcp_servers").and_then(Item::as_table_like_mut) {
         servers.remove(name);
     }
-    Ok(doc.to_string())
+    finish(text, &doc)
 }
 
 /// Renames by taking the entries from `from` on out and putting them back in order, the renamed
@@ -121,7 +156,7 @@ pub(super) fn rename(text: &str, from: &str, to: &str) -> Result<String, String>
     } else {
         return Err("mcp_servers: expected a table".into());
     }
-    Ok(doc.to_string())
+    finish(text, &doc)
 }
 
 /// `enabled` on the server's table. A server that is on and never had the key gets none.
@@ -133,7 +168,7 @@ pub(super) fn set_enabled(text: &str, name: &str, on: bool) -> Result<String, St
     if now.is_some_and(|b| b != on) || (now.is_none() && !on) {
         set(entry, "enabled", on.into());
     }
-    Ok(doc.to_string())
+    finish(text, &doc)
 }
 
 /// Codex has no references inside values. An env reference is `env_vars` (only under its own

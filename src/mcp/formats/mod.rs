@@ -141,17 +141,32 @@ pub fn set_disabled(flavor: Flavor, text: &str, project: &Path, place: &Place, n
     let project_file = matches!(place, Place::Project(_));
     match flavor {
         Flavor::ClaudeCode => {
-            read(flavor, text, &Place::Global)?;
-            json::edit(text, |root| claude::set_disabled(root, project, project_file, name, disabled))
+            let before = read(flavor, text, &Place::Global)?;
+            let out = json::edit(text, |root| claude::set_disabled(root, project, project_file, name, disabled))?;
+            let after = read(flavor, &out, &Place::Global)?;
+            let lists = disabled_in(&out, project);
+            let list = if project_file { lists.mcp_json } else { lists.servers };
+            if list.iter().any(|n| n == name) != disabled || before != after {
+                return Err(format!("{}: the switch for {name} would read back differently", agent(flavor)));
+            }
+            Ok(out)
         }
         Flavor::OpenCode | Flavor::Codex if !project_file => Err(format!("{} can only switch off a server in the project's own config", agent(flavor))),
-        Flavor::OpenCode => {
-            read(flavor, text, place)?;
-            json::edit(text, |root| opencode::set_enabled(root, name, !disabled))
-        }
-        Flavor::Codex => {
-            read(flavor, text, place)?;
-            codex::set_enabled(text, name, !disabled)
+        Flavor::OpenCode | Flavor::Codex => {
+            let before = read(flavor, text, place)?;
+            let out = match flavor {
+                Flavor::Codex => codex::set_enabled(text, name, !disabled)?,
+                _ => json::edit(text, |root| opencode::set_enabled(root, name, !disabled))?,
+            };
+            let after = read(flavor, &out, place)?;
+            let was = before.iter().find(|(s, _, _)| s.name == name);
+            let now = after.iter().find(|(s, _, _)| s.name == name);
+            let switched = matches!((was, now), (Some(w), Some(n)) if w.0 == n.0 && w.1 == n.1 && n.2 == !disabled);
+            if !switched {
+                return Err(format!("{}: the switch for {name} would read back differently", agent(flavor)));
+            }
+            untouched(flavor, &before, &after, name, name)?;
+            Ok(out)
         }
         _ => Err(format!("{} can't switch a server off for one project", agent(flavor))),
     }
@@ -212,7 +227,7 @@ fn parse_json(text: &str) -> Result<Value, String> {
     if text.trim().is_empty() {
         return Ok(Value::Object(Map::new()));
     }
-    let value: Value = jsonc_parser::parse_to_serde_value(text, &Default::default()).map_err(|e| e.to_string())?;
+    let value: Value = jsonc_parser::parse_to_serde_value(text, &Default::default()).map_err(|e| json::error(&e))?;
     if value.is_object() { Ok(value) } else { Err("the top level is not an object".into()) }
 }
 
