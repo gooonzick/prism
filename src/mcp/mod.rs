@@ -4,3 +4,4 @@
 pub mod agents;
 pub mod formats;
 pub mod model;
+pub mod scan;

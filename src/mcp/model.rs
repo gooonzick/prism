@@ -29,16 +29,19 @@ impl EnvValue {
         self.0.iter().all(|p| matches!(p, Part::Text(_)))
     }
 
-    /// For printing: a literal shows as `***`; references stay readable (`${GITLAB_TOKEN}`), and
-    /// so does text around them (`Bearer ${TOKEN}`). Defaults may be secrets, so they are masked.
+    /// For printing: references stay readable (`${GITLAB_TOKEN}`, `Bearer ${TOKEN}`); any other
+    /// text shows as `***`, since a secret can sit around a reference too (`https://u:pw@${HOST}`).
+    /// Defaults may be secrets, so they are masked.
     pub fn masked(&self) -> String {
         if self.is_literal() {
             return "***".into();
         }
         self.0
             .iter()
-            .map(|p| match p {
-                Part::Text(t) => t.clone(),
+            .enumerate()
+            .map(|(i, p)| match p {
+                Part::Text(t) if i == 0 && t.starts_with("Bearer ") => if t.len() == "Bearer ".len() { t.clone() } else { "Bearer ***".into() },
+                Part::Text(_) => "***".into(),
                 Part::Var { name, default: None } => format!("${{{name}}}"),
                 Part::Var { name, default: Some(_) } => format!("${{{name}:-***}}"),
             })
@@ -117,10 +120,16 @@ mod tests {
 
     #[test]
     fn masked_hides_literals_and_keeps_references() {
+        let text = |t: &str| Part::Text(t.into());
+        let var = |n: &str| Part::Var { name: n.into(), default: None };
         assert_eq!(EnvValue::literal("glpat-fake").masked(), "***");
+        assert_eq!(EnvValue::literal("Bearer fake").masked(), "***");
         assert_eq!(EnvValue::var("GITLAB_TOKEN").masked(), "${GITLAB_TOKEN}");
-        let bearer = EnvValue(vec![Part::Text("Bearer ".into()), Part::Var { name: "T".into(), default: Some("fake".into()) }]);
+        let bearer = EnvValue(vec![text("Bearer "), Part::Var { name: "T".into(), default: Some("fake".into()) }]);
         assert!(!bearer.is_literal());
         assert_eq!(bearer.masked(), "Bearer ${T:-***}");
+        assert_eq!(EnvValue(vec![text("Bearer "), var("T")]).masked(), "Bearer ${T}");
+        assert_eq!(EnvValue(vec![text("https://u:s3cret@"), var("HOST"), text("/x")]).masked(), "***${HOST}***");
+        assert_eq!(EnvValue(vec![text("Bearer s3cret-"), var("T")]).masked(), "Bearer ***${T}");
     }
 }

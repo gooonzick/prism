@@ -92,9 +92,11 @@ impl McpAgent {
 
     /// Installed, by the same markers as for skills; Claude Desktop by its config folder.
     pub fn detected(&self, paths: &Paths) -> bool {
-        match agents::index_of(self.id) {
-            Some(i) => agents::AGENTS[i].detected(paths),
-            None => desktop_dir(paths).is_dir(),
+        match self.flavor {
+            Flavor::ClaudeDesktop => desktop_dir(paths).is_dir(),
+            Flavor::ClaudeCode | Flavor::Codex | Flavor::Cursor | Flavor::OpenCode | Flavor::Gemini | Flavor::Windsurf | Flavor::Kiro => {
+                agents::index_of(self.id).is_some_and(|i| agents::AGENTS[i].detected(paths))
+            }
         }
     }
 }

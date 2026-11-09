@@ -10,8 +10,12 @@ use super::{Entry, mcp_servers, parse_json};
 use crate::mcp::agents::Flavor;
 use crate::mcp::model::Place;
 
+/// The `projects` entry for `path`. Claude Code keys it by the path its process saw, which is
+/// usually the resolved one, so the canonical form is tried first, then `path` as given.
 fn project<'a>(doc: &'a Value, path: &Path) -> Option<&'a Value> {
-    doc.get("projects")?.get(path.to_string_lossy().as_ref())
+    let projects = doc.get("projects")?;
+    let canonical = std::fs::canonicalize(path).ok();
+    canonical.as_deref().into_iter().chain([path]).find_map(|p| projects.get(p.to_string_lossy().as_ref()))
 }
 
 pub(super) fn read(doc: &Value, place: &Place) -> Result<Vec<Entry>, String> {
@@ -22,13 +26,25 @@ pub(super) fn read(doc: &Value, place: &Place) -> Result<Vec<Entry>, String> {
     mcp_servers::read(Flavor::ClaudeCode, servers)
 }
 
-/// Servers Claude Code skips in `project`: `disabledMcpServers` (user and local servers) and
-/// `disabledMcpjsonServers` (`.mcp.json` ones), from `~/.claude.json`. Unreadable text has none.
-pub(super) fn disabled_in(text: &str, project_path: &Path) -> Vec<String> {
-    let Ok(doc) = parse_json(text) else { return vec![] };
-    let Some(entry) = project(&doc, project_path) else { return vec![] };
-    let names = ["disabledMcpServers", "disabledMcpjsonServers"].into_iter().filter_map(|k| entry.get(k)?.as_array()).flatten();
-    names.filter_map(|n| n.as_str().map(str::to_owned)).collect::<BTreeSet<_>>().into_iter().collect()
+/// Servers Claude Code skips in a project, kept apart because each list covers different copies.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Disabled {
+    /// `disabledMcpServers`: user-scope and local-scope servers.
+    pub servers: Vec<String>,
+    /// `disabledMcpjsonServers`: `.mcp.json` servers.
+    pub mcp_json: Vec<String>,
+}
+
+/// Claude Code's disabled lists for `project_path`, from the text of `~/.claude.json`.
+/// Unreadable text has none.
+pub(super) fn disabled_in(text: &str, project_path: &Path) -> Disabled {
+    let Ok(doc) = parse_json(text) else { return Disabled::default() };
+    let Some(entry) = project(&doc, project_path) else { return Disabled::default() };
+    let names = |key: &str| -> Vec<String> {
+        let list = entry.get(key).and_then(Value::as_array).into_iter().flatten();
+        list.filter_map(|n| n.as_str().map(str::to_owned)).collect::<BTreeSet<_>>().into_iter().collect()
+    };
+    Disabled { servers: names("disabledMcpServers"), mcp_json: names("disabledMcpjsonServers") }
 }
 
 #[cfg(test)]
@@ -79,7 +95,28 @@ mod tests {
         let project = read_file(Flavor::ClaudeCode, MCP_JSON, &Place::Project("/work/app".into())).unwrap();
         assert!(matches!(&project[0].0.transport, Transport::Stdio { command, .. } if command == "uvx"));
 
-        assert_eq!(disabled_in(CLAUDE_JSON, &PathBuf::from("/work/app")), ["gitlab", "shared"]);
-        assert!(disabled_in(CLAUDE_JSON, &PathBuf::from("/work/other")).is_empty());
+        let disabled = disabled_in(CLAUDE_JSON, &PathBuf::from("/work/app"));
+        assert_eq!(disabled.servers, ["gitlab"], "disabledMcpServers: user and local servers");
+        assert_eq!(disabled.mcp_json, ["gitlab", "shared"], "disabledMcpjsonServers: .mcp.json servers");
+        assert_eq!(disabled_in(CLAUDE_JSON, &PathBuf::from("/work/other")), Disabled::default());
+    }
+
+    /// Claude Code keys `projects` by the path its process saw; a symlinked checkout still finds it.
+    #[cfg(unix)]
+    #[test]
+    fn local_scope_is_found_by_the_canonical_project_path() {
+        let home = tempfile::tempdir().unwrap();
+        let real = home.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = home.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let key = std::fs::canonicalize(&real).unwrap();
+        let doc = serde_json::json!({ "projects": { key.to_string_lossy(): {
+            "mcpServers": { "figma": { "type": "sse", "url": "http://127.0.0.1:3845/sse" } },
+            "disabledMcpServers": ["figma"]
+        } } })
+        .to_string();
+        assert_eq!(read_file(Flavor::ClaudeCode, &doc, &Place::ClaudeLocal(link.clone())).unwrap().len(), 1);
+        assert_eq!(disabled_in(&doc, &link).servers, ["figma"]);
     }
 }

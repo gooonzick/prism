@@ -34,8 +34,10 @@ pub fn read(flavor: Flavor, text: &str, place: &Place) -> Result<Vec<Entry>, Str
     }
 }
 
+pub use claude::Disabled;
+
 /// Servers Claude Code skips in `project`, read from the text of `~/.claude.json`.
-pub fn disabled_in(text: &str, project: &Path) -> Vec<String> {
+pub fn disabled_in(text: &str, project: &Path) -> Disabled {
     claude::disabled_in(text, project)
 }
 
