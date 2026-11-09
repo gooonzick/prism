@@ -124,6 +124,39 @@ fn a_stopped_undo_stays_the_last_change_until_it_can_finish() {
     assert_eq!(store::load_last_change(&c.paths), None);
 }
 
+#[test]
+fn a_full_undo_leaves_no_backups() {
+    let home = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(home.path()).unwrap();
+    let mut c = ctx(&root);
+    let f = root.join("a.json");
+    std::fs::write(&f, "token").unwrap();
+    let mut journal = crate::fsops::Journal::default();
+    journal.write_file(&f, b"1", &c.paths).unwrap();
+    let backups = c.paths.state.join("backups");
+    assert!(backups.exists());
+    store::save_last_change(&c.paths, Some(&store::LastChange { label: "Edit".into(), journal }));
+
+    assert_eq!(go(&["undo"], &mut c).0, 0);
+    assert_eq!(std::fs::read(&f).unwrap(), b"token");
+    assert!(!backups.exists(), "no copy of the original stays behind");
+}
+
+#[test]
+fn a_stopped_undo_keeps_its_backups() {
+    let home = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(home.path()).unwrap();
+    let mut c = ctx(&root);
+    let f = root.join("a.json");
+    std::fs::write(&f, "0").unwrap();
+    let mut journal = crate::fsops::Journal::default();
+    journal.write_file(&f, b"1", &c.paths).unwrap();
+    std::fs::write(&f, "hand").unwrap();
+    store::save_last_change(&c.paths, Some(&store::LastChange { label: "Edit".into(), journal }));
+    assert_eq!(go(&["undo"], &mut c).0, 1);
+    assert!(c.paths.state.join("backups").exists(), "the retry needs them");
+}
+
 fn write_skill(dir: &std::path::Path, name: &str, desc: &str) {
     std::fs::create_dir_all(dir.join(name)).unwrap();
     std::fs::write(dir.join(name).join("SKILL.md"), format!("---\nname: {name}\ndescription: {desc}\n---\nline one\nline two\n")).unwrap();
@@ -708,6 +741,28 @@ fn agents_of(out: &str, name: &str) -> Vec<String> {
     let v = json(out);
     let row = v["servers"].as_array().unwrap().iter().find(|s| s["name"] == name).unwrap().clone();
     row["agents"].as_array().unwrap().iter().map(|a| a.as_str().unwrap().to_string()).collect()
+}
+
+#[test]
+fn a_linked_cursor_config_stays_a_link_through_add_and_undo() {
+    let home = empty_mcp_home();
+    let root = std::fs::canonicalize(home.path()).unwrap();
+    let dotfiles = root.join("dotfiles/cursor-mcp.json");
+    std::fs::create_dir_all(dotfiles.parent().unwrap()).unwrap();
+    std::fs::write(&dotfiles, r#"{"mcpServers":{}}"#).unwrap();
+    let link = root.join(".cursor/mcp.json");
+    std::os::unix::fs::symlink(&dotfiles, &link).unwrap();
+    let mut c = ctx(&root);
+    let is_link = || std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink();
+
+    let (code, out, err) = go(&["mcp", "add", "plata", "--command", "npx", "--to", "cursor"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(is_link(), "the add kept the link");
+    assert!(std::fs::read_to_string(&dotfiles).unwrap().contains("plata"));
+
+    assert_eq!(go(&["undo"], &mut c).0, 0);
+    assert!(is_link(), "the undo kept the link");
+    assert_eq!(std::fs::read_to_string(&dotfiles).unwrap(), r#"{"mcpServers":{}}"#);
 }
 
 #[test]

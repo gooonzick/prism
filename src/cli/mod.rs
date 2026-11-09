@@ -198,6 +198,7 @@ fn undo_cmd(ctx: &Ctx, out: &mut Out, err: &mut dyn Write) -> Exit {
     match change.journal.undo(&ctx.paths) {
         Ok(_) => {
             store::save_last_change(&ctx.paths, None);
+            store::drop_backups(&ctx.paths);
             out.emit(format!("Undid: {}", change.label), serde_json::json!({ "undone": change.label }));
             Exit::Ok
         }

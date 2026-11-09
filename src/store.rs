@@ -65,6 +65,12 @@ pub fn load_last_change(paths: &Paths) -> Option<LastChange> {
 
 /// Starts a new change: the backups of the previous one are no longer needed.
 pub fn begin_change(paths: &Paths) {
+    drop_backups(paths);
+}
+
+/// Removes the config backups. After a change is fully undone they are only plaintext copies
+/// of tokens with nothing left to restore.
+pub fn drop_backups(paths: &Paths) {
     let dir: &Path = &paths.state.join("backups");
     let _ = std::fs::remove_dir_all(dir);
 }

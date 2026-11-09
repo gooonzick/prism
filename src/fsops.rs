@@ -159,7 +159,8 @@ impl Journal {
                 Step::Rewrote { path, backup, hash_after } => match fs::read(path) {
                     Ok(now) if content_hash(&now) == *hash_after => match backup {
                         Some(b) => fs::read(b).and_then(|bytes| write_atomic(path, &bytes)),
-                        None => fs::remove_file(path),
+                        // The file the write made; a link that led to it stays.
+                        None => fs::remove_file(through_links(path)),
                     },
                     _ => Err(io::Error::other(format!("{} changed since", path.display()))),
                 },
@@ -179,12 +180,15 @@ pub fn content_hash(bytes: &[u8]) -> u64 {
 
 /// Writes `contents` to `path` through a temp file next to it, so a reader never sees half a
 /// file. The temp file is created with the file's mode (0600 for a new one) from the start:
-/// configs hold secrets. It never outlives an error.
+/// configs hold secrets. It never outlives an error. A linked file (dotfiles) is written where
+/// the link leads, so the link stays; the temp name has the pid, so the window and the CLI
+/// writing at once don't take each other's.
 pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let path = &through_links(path);
     let mode = fs::metadata(path).map_or(0o600, |m| m.permissions().mode() & 0o7777);
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".prism-tmp");
+    tmp.push(format!(".prism-tmp-{}", std::process::id()));
     let tmp = PathBuf::from(tmp);
     let _ = fs::remove_file(&tmp); // left over from a crash
     let written = fs::OpenOptions::new()
@@ -202,6 +206,20 @@ pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(&tmp);
     }
     written
+}
+
+/// Where `path` leads after every link on it (a relative link counts from its folder), or
+/// `path` itself when it is no link. A dangling link leads to the file it would make.
+fn through_links(path: &Path) -> PathBuf {
+    let mut at = path.to_path_buf();
+    // As many hops as the kernel follows before it gives up on a loop.
+    for _ in 0..40 {
+        match fs::read_link(&at) {
+            Ok(to) => at = at.parent().map_or(to.clone(), |dir| dir.join(&to)),
+            Err(_) => break,
+        }
+    }
+    at
 }
 
 /// Copies a config's original bytes into the private backups folder. Returns the copy.
@@ -430,7 +448,7 @@ mod tests {
         let mut j = Journal::default();
         j.write_file(&a, br#"{"x":2}"#, &paths).unwrap();
         assert_eq!(fs::read(&a).unwrap(), br#"{"x":2}"#);
-        assert!(!root.join("a.json.prism-tmp").exists());
+        assert_eq!(fs::read_dir(&root).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().contains("prism-tmp")).count(), 0);
         let Step::Rewrote { backup: Some(backup), .. } = &j.steps[0] else { panic!("{:?}", j.steps) };
         assert_eq!(fs::read(backup).unwrap(), br#"{"x":1}"#);
         assert_eq!(fs::metadata(backup).unwrap().permissions().mode() & 0o777, 0o600);
@@ -493,7 +511,7 @@ mod tests {
         let a = root.join("a.json");
         fs::create_dir_all(a.join("inner")).unwrap();
         assert!(write_atomic(&a, b"1").is_err());
-        assert!(!root.join("a.json.prism-tmp").exists());
+        assert!(!root.join(format!("a.json.prism-tmp-{}", std::process::id())).exists());
     }
 
     #[test]
@@ -513,6 +531,39 @@ mod tests {
         let a = root.join("new.json");
         Journal::default().write_file(&a, b"1", &paths).unwrap();
         assert_eq!(fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn a_linked_config_stays_a_link_through_write_and_undo() {
+        let (_h, root, paths) = setup();
+        let target = root.join("dotfiles/cursor-mcp.json");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "0").unwrap();
+        let link = root.join(".cursor/mcp.json");
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("../dotfiles/cursor-mcp.json", &link).unwrap();
+
+        let mut j = Journal::default();
+        j.write_file(&link, b"1", &paths).unwrap();
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the write kept the link");
+        assert_eq!(fs::read(&target).unwrap(), b"1");
+        assert_eq!(fs::read_dir(target.parent().unwrap()).unwrap().count(), 1, "no temp file left next to the target");
+
+        j.undo(&paths).unwrap();
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the undo kept the link");
+        assert_eq!(fs::read(&target).unwrap(), b"0");
+    }
+
+    #[test]
+    fn another_process_temp_file_is_left_alone() {
+        let (_h, root, _paths) = setup();
+        let a = root.join("a.json");
+        // The window and the CLI may write the same file at once; each has its own temp file.
+        let theirs = root.join("a.json.prism-tmp");
+        fs::write(&theirs, "theirs").unwrap();
+        write_atomic(&a, b"1").unwrap();
+        assert_eq!(fs::read(&theirs).unwrap(), b"theirs");
+        assert_eq!(fs::read(&a).unwrap(), b"1");
     }
 
     #[test]

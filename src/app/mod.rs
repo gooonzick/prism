@@ -470,7 +470,10 @@ impl App {
         self.last_change = store::load_last_change(&self.paths);
         let Some(LastChange { label, journal }) = self.last_change.take() else { return };
         match journal.undo(&self.paths) {
-            Ok(_) => self.notify(format!("Undid: {label}"), String::new(), false),
+            Ok(_) => {
+                store::drop_backups(&self.paths);
+                self.notify(format!("Undid: {label}"), String::new(), false);
+            }
             Err((e, left)) => {
                 self.notify(format!("Couldn't fully undo: {label}"), e, true);
                 self.last_change = Some(LastChange { label, journal: left });

@@ -439,6 +439,23 @@ fn a_new_change_clears_the_backups_of_the_last_one() {
     assert!(backups("b.json").exists());
 }
 
+#[test]
+fn a_full_undo_in_the_window_leaves_no_backups() {
+    let mut h = Harness::project();
+    let paths = h.rt.state.paths.clone();
+    let a = paths.home.join("a.json");
+    std::fs::write(&a, "token").unwrap();
+    h.rt.update(|s, _| {
+        let mut j = s.new_journal();
+        j.write_file(&a, b"1", &s.paths).unwrap();
+        crate::store::save_last_change(&s.paths, Some(&crate::store::LastChange { label: "edit a".into(), journal: j }));
+    });
+    assert!(paths.state.join("backups").exists());
+    h.rt.update(|s, _| s.undo());
+    assert_eq!(std::fs::read(&a).unwrap(), b"token");
+    assert!(!paths.state.join("backups").exists(), "no copy of the original stays behind");
+}
+
 /// Claude Code and Cursor installed, both with the same global `plata` server, whose env holds a
 /// literal token and a reference, and which Claude Code skips in the project; the window opens on the project, as in [`Harness::project`].
 fn mcp_home() -> Harness {
