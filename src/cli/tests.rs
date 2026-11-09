@@ -99,3 +99,25 @@ fn cli_undo_fails_when_the_change_was_edited_since() {
     assert_eq!(code, 1);
     assert!(err.contains("changed since"), "{err}");
 }
+
+#[test]
+fn a_stopped_undo_stays_the_last_change_until_it_can_finish() {
+    let home = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(home.path()).unwrap();
+    let mut c = ctx(&root);
+    let f = root.join("a.json");
+    std::fs::write(&f, "0").unwrap();
+    let mut journal = crate::fsops::Journal::default();
+    journal.write_file(&f, b"1", &c.paths).unwrap();
+    std::fs::write(&f, "hand").unwrap();
+    store::save_last_change(&c.paths, Some(&store::LastChange { label: "Edit".into(), journal }));
+
+    assert_eq!(go(&["undo"], &mut c).0, 1);
+    let left = store::load_last_change(&c.paths).expect("kept");
+    assert!(matches!(left.journal.steps.as_slice(), [crate::fsops::Step::Rewrote { .. }]));
+
+    std::fs::write(&f, "1").unwrap();
+    assert_eq!(go(&["undo"], &mut c).0, 0);
+    assert_eq!(std::fs::read(&f).unwrap(), b"0");
+    assert_eq!(store::load_last_change(&c.paths), None);
+}

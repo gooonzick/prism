@@ -371,6 +371,13 @@ impl App {
         self.notice_at = None;
     }
 
+    /// A journal for a new change. The last change's config backups are not needed any more,
+    /// so they go now, before this change makes its own.
+    pub fn new_journal(&self) -> Journal {
+        store::begin_change(&self.paths);
+        Journal::default()
+    }
+
     /// Reports a change made through `j`, keeping it for Undo when it changed anything.
     fn changed(&mut self, label: String, j: Journal, result: Result<String, String>) {
         let undoable = !j.is_empty();
@@ -400,12 +407,17 @@ impl App {
     }
 
     pub fn undo(&mut self) {
+        // From disk: the CLI may have undone it, or made a newer change, since this window did.
+        self.last_change = store::load_last_change(&self.paths);
         let Some(LastChange { label, journal }) = self.last_change.take() else { return };
-        self.save_last_change();
         match journal.undo(&self.paths) {
             Ok(_) => self.notify(format!("Undid: {label}"), String::new(), false),
-            Err(e) => self.notify(format!("Couldn't fully undo: {label}"), e, true),
+            Err((e, left)) => {
+                self.notify(format!("Couldn't fully undo: {label}"), e, true);
+                self.last_change = Some(LastChange { label, journal: left });
+            }
         }
+        self.save_last_change();
         self.rescan();
         self.refresh_stats();
     }

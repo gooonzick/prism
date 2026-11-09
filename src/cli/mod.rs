@@ -124,14 +124,15 @@ fn undo_cmd(ctx: &Ctx, out: &mut Out, err: &mut dyn Write) -> Exit {
         out.emit("Nothing to undo", serde_json::json!({ "undone": null }));
         return Exit::Ok;
     };
-    // Cleared either way: after a partial undo the journal no longer matches the disk.
-    store::save_last_change(&ctx.paths, None);
     match change.journal.undo(&ctx.paths) {
         Ok(_) => {
+            store::save_last_change(&ctx.paths, None);
             out.emit(format!("Undid: {}", change.label), serde_json::json!({ "undone": change.label }));
             Exit::Ok
         }
-        Err(e) => {
+        Err((e, left)) => {
+            // What is still undone stays the last change, to try again after fixing the file.
+            store::save_last_change(&ctx.paths, Some(&store::LastChange { label: change.label, journal: left }));
             let _ = writeln!(err, "{e}");
             Exit::Failed
         }

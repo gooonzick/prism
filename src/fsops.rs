@@ -99,7 +99,6 @@ impl Journal {
     /// first time this journal touches `path` its original goes to `<state>/backups/`.
     #[allow(dead_code)] // the MCP commands write configs through it
     pub fn write_file(&mut self, path: &Path, contents: &[u8], paths: &Paths) -> io::Result<()> {
-        use std::os::unix::fs::PermissionsExt;
         let earlier = self.steps.iter().position(|s| matches!(s, Step::Rewrote { path: p, .. } if p == path));
         let original = match fs::read(path) {
             Ok(bytes) => Some(bytes),
@@ -113,20 +112,8 @@ impl Journal {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let mut tmp = path.as_os_str().to_owned();
-        tmp.push(".prism-tmp");
-        let tmp = PathBuf::from(tmp);
-        let written = fs::write(&tmp, contents)
-            .and_then(|()| match fs::metadata(path) {
-                Ok(m) => fs::set_permissions(&tmp, fs::Permissions::from_mode(m.permissions().mode() & 0o7777)),
-                Err(_) => Ok(()),
-            })
-            .and_then(|()| fs::rename(&tmp, path));
-        if let Err(e) = written {
-            let _ = fs::remove_file(&tmp);
-            return Err(e);
-        }
-        let hash_after = hash(contents);
+        write_atomic(path, contents)?;
+        let hash_after = content_hash(contents);
         match earlier {
             // A second write to the same file: undo goes back to the first original.
             Some(i) => {
@@ -140,10 +127,12 @@ impl Journal {
     }
 
     /// Reverses every step, last first. Stops at the first step that can't be reversed (the
-    /// path was changed since), leaving the rest as they are.
-    pub fn undo(self, paths: &Paths) -> Result<usize, String> {
+    /// path was changed since), leaving the rest as they are: the error carries the steps not
+    /// yet undone, as a journal, so they can be tried again.
+    pub fn undo(mut self, paths: &Paths) -> Result<usize, (String, Journal)> {
         let n = self.steps.len();
-        for (done, step) in self.steps.into_iter().rev().enumerate() {
+        for done in 0..n {
+            let step = self.steps.last().cloned().expect("a step is left");
             let result = match &step {
                 Step::Linked(at) => match fs::symlink_metadata(at) {
                     Ok(m) if m.file_type().is_symlink() => fs::remove_file(at),
@@ -168,24 +157,51 @@ impl Journal {
                 },
                 Step::Copied(at) => trash(at, paths).map(|_| ()),
                 Step::Rewrote { path, backup, hash_after } => match fs::read(path) {
-                    Ok(now) if hash(&now) == *hash_after => match backup {
-                        Some(b) => fs::read(b).and_then(|bytes| fs::write(path, bytes)),
+                    Ok(now) if content_hash(&now) == *hash_after => match backup {
+                        Some(b) => fs::read(b).and_then(|bytes| write_atomic(path, &bytes)),
                         None => fs::remove_file(path),
                     },
                     _ => Err(io::Error::other(format!("{} changed since", path.display()))),
                 },
             };
-            result.map_err(|e| format!("Undid {done} of {n} steps: {e}"))?;
+            result.map_err(|e| (format!("Undid {done} of {n} steps: {e}"), self.clone()))?;
+            self.steps.pop();
         }
         Ok(n)
     }
 }
 
-fn hash(bytes: &[u8]) -> u64 {
-    use std::hash::{DefaultHasher, Hasher};
-    let mut h = DefaultHasher::new();
-    h.write(bytes);
-    h.finish()
+/// FNV-1a, 64 bit. Fixed on purpose: hashes are saved on disk, and `DefaultHasher` may change
+/// between Rust releases.
+pub fn content_hash(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf29ce484222325, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x100000001b3))
+}
+
+/// Writes `contents` to `path` through a temp file next to it, so a reader never sees half a
+/// file. The temp file is created with the file's mode (0600 for a new one) from the start:
+/// configs hold secrets. It never outlives an error.
+fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mode = fs::metadata(path).map_or(0o600, |m| m.permissions().mode() & 0o7777);
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".prism-tmp");
+    let tmp = PathBuf::from(tmp);
+    let _ = fs::remove_file(&tmp); // left over from a crash
+    let written = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&tmp)
+        .and_then(|mut f| {
+            io::Write::write_all(&mut f, contents)?;
+            // The umask may have taken bits off; the original mode is what we want.
+            f.set_permissions(fs::Permissions::from_mode(mode))
+        })
+        .and_then(|()| fs::rename(&tmp, path));
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written
 }
 
 /// Copies a config's original bytes into the private backups folder. Returns the copy.
@@ -465,20 +481,58 @@ mod tests {
         let mut j = Journal::default();
         j.write_file(&a, "2".as_bytes(), &paths).unwrap();
         fs::write(&a, "by hand").unwrap();
-        let err = j.undo(&paths).unwrap_err();
+        let (err, _) = j.undo(&paths).unwrap_err();
         assert!(err.contains("changed since"), "{err}");
         assert_eq!(fs::read(&a).unwrap(), b"by hand");
     }
 
     #[test]
     fn a_failed_write_leaves_no_temp_file() {
+        let (_h, root, _paths) = setup();
+        // A non-empty folder where the file should go: the temp file is written, the rename fails.
+        let a = root.join("a.json");
+        fs::create_dir_all(a.join("inner")).unwrap();
+        assert!(write_atomic(&a, b"1").is_err());
+        assert!(!root.join("a.json.prism-tmp").exists());
+    }
+
+    #[test]
+    fn a_failed_journal_write_records_nothing() {
         let (_h, root, paths) = setup();
-        // A folder where the file should go: the rename fails after the temp file was written.
         let a = root.join("a.json");
         fs::create_dir_all(a.join("inner")).unwrap();
         let mut j = Journal::default();
         assert!(j.write_file(&a, b"1", &paths).is_err());
-        assert!(!root.join("a.json.prism-tmp").exists());
         assert!(j.is_empty());
+    }
+
+    #[test]
+    fn new_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_h, root, paths) = setup();
+        let a = root.join("new.json");
+        Journal::default().write_file(&a, b"1", &paths).unwrap();
+        assert_eq!(fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn content_hash_is_fnv1a() {
+        assert_eq!(content_hash(b""), 0xcbf29ce484222325);
+        assert_eq!(content_hash(b"a"), 0xaf63dc4c8601ec8c);
+    }
+
+    #[test]
+    fn a_failed_undo_returns_the_steps_left() {
+        let (_h, root, paths) = setup();
+        let (a, b) = (root.join("a.json"), root.join("b.json"));
+        fs::write(&a, "0").unwrap();
+        let mut j = Journal::default();
+        j.write_file(&a, b"1", &paths).unwrap();
+        j.write_file(&b, b"1", &paths).unwrap();
+        fs::write(&a, "hand").unwrap();
+        let (err, left) = j.undo(&paths).unwrap_err();
+        assert!(err.contains("changed since"), "{err}");
+        assert!(!b.exists(), "the later step was undone");
+        assert!(matches!(left.steps.as_slice(), [Step::Rewrote { path, .. }] if path == &a));
     }
 }

@@ -6,7 +6,6 @@ use rune::{Mods, TextEdit};
 
 use super::{App, Filter, NewSkill};
 use crate::agents::{AGENTS, CANONICAL, Scope};
-use crate::fsops::Journal;
 use crate::scan::{Placement, Skill};
 use crate::sync;
 
@@ -179,7 +178,7 @@ impl App {
     /// Links or unlinks `skill` for `agent`, from its switch.
     pub fn toggle_link(&mut self, skill: &str, agent: usize) {
         let Some(s) = self.inv.get(skill) else { return };
-        let mut j = Journal::default();
+        let mut j = self.new_journal();
         let (label, result) = match &s.placements[agent] {
             Placement::Linked | Placement::Link(_) | Placement::Broken(_) => (
                 format!("unlink {skill} from {}", AGENTS[agent].name),
@@ -199,7 +198,7 @@ impl App {
     /// Replaces `agent`'s own copy with a link to `.agents` (adopting it if `.agents` lacks it).
     pub fn replace_with_link(&mut self, skill: &str, agent: usize) {
         let plan = sync::plan_one(&self.inv, skill, &[agent], &self.paths);
-        let mut j = Journal::default();
+        let mut j = self.new_journal();
         let result = match plan.conflicts.first() {
             Some(c) => Err(c.reason.clone()),
             None => sync::apply(&self.scope, &self.paths, &plan.actions, &mut j).map(|_| format!("{skill} now lives in .agents")).map_err(|(_, e)| e),
@@ -208,7 +207,7 @@ impl App {
     }
 
     pub fn trash_copy(&mut self, skill: &str, agent: usize) {
-        let mut j = Journal::default();
+        let mut j = self.new_journal();
         let result = sync::trash_copy(&self.scope, &self.paths, skill, agent, &mut j)
             .map(|_| format!("Moved {}'s copy of {skill} to the trash", AGENTS[agent].name));
         self.changed(format!("trash {}'s copy of {skill}", AGENTS[agent].name), j, result);
@@ -217,7 +216,7 @@ impl App {
     /// Removes every skill in `names`, going on past failures.
     pub fn remove(&mut self, names: &[String]) {
         self.confirm_remove = None;
-        let mut j = Journal::default();
+        let mut j = self.new_journal();
         let mut failed = Vec::new();
         for name in names {
             if let Err(e) = sync::remove(&self.inv, &self.paths, name, &mut j) {
@@ -239,7 +238,7 @@ impl App {
     }
 
     pub fn remove_broken(&mut self) {
-        let mut j = Journal::default();
+        let mut j = self.new_journal();
         let result = sync::remove_broken(&self.inv, &self.paths, &mut j).map(|n| format!("Removed {}", plural(n, "broken link", "broken links")));
         if self.status_filter == Filter::Broken {
             self.status_filter = Filter::All;
@@ -294,7 +293,7 @@ impl App {
         let Some(plan) = self.sync_plan.take() else { return };
         let only = self.sync_only.take();
         let n = plan.actions.len();
-        let mut j = Journal::default();
+        let mut j = self.new_journal();
         let result = sync::apply(&self.scope, &self.paths, &plan.actions, &mut j)
             .map(|_| format!("Synced: {}", plural(n, "change", "changes")))
             .map_err(|(done, e)| format!("Stopped after {done} of {n}: {e}"));
@@ -315,7 +314,7 @@ impl App {
     pub fn copy_to(&mut self, dest: Scope) {
         let Some(names) = self.copy_dialog.take() else { return };
         let targets = self.targets();
-        let mut j = Journal::default();
+        let mut j = self.new_journal();
         let mut failed = Vec::new();
         for n in &names {
             if let Err(e) = sync::copy_to(&self.inv, &self.paths, n, &dest, &targets, &mut j) {
@@ -366,7 +365,7 @@ impl App {
         }
         self.new_skill = None;
         self.rescan();
-        let mut j = Journal::default();
+        let mut j = self.new_journal();
         let plan = sync::plan_one(&self.inv, &name, &self.targets(), &self.paths);
         let _ = sync::apply(&self.scope, &self.paths, &plan.actions, &mut j);
         self.notify(format!("Created {name}"), "Its SKILL.md is open in your editor".into(), false);

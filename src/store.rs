@@ -63,7 +63,6 @@ pub fn load_last_change(paths: &Paths) -> Option<LastChange> {
 }
 
 /// Starts a new change: the backups of the previous one are no longer needed.
-#[allow(dead_code)] // the config-writing commands call it
 pub fn begin_change(paths: &Paths) {
     let dir: &Path = &paths.state.join("backups");
     let _ = std::fs::remove_dir_all(dir);

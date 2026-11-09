@@ -416,3 +416,25 @@ fn installs_from_skills_sh_into_a_project_and_links_it() {
     }
     assert!(!h.root.join(".agents").exists(), "a project install stays in the project");
 }
+
+#[test]
+fn a_new_change_clears_the_backups_of_the_last_one() {
+    let mut h = Harness::project();
+    let paths = h.rt.state.paths.clone();
+    let root = paths.home.clone();
+    let (a, b) = (root.join("a.json"), root.join("b.json"));
+    std::fs::write(&a, "0").unwrap();
+    std::fs::write(&b, "0").unwrap();
+    let backups = |name: &str| paths.state.join("backups").join(format!("0-{name}"));
+    h.rt.update(|s, _| {
+        let mut j = s.new_journal();
+        j.write_file(&a, b"1", &s.paths).unwrap();
+    });
+    assert!(backups("a.json").exists());
+    h.rt.update(|s, _| {
+        let mut j = s.new_journal();
+        j.write_file(&b, b"1", &s.paths).unwrap();
+    });
+    assert!(!backups("a.json").exists());
+    assert!(backups("b.json").exists());
+}
