@@ -4,4 +4,6 @@
 pub mod agents;
 pub mod formats;
 pub mod model;
+#[allow(dead_code)] // the add, copy, edit, remove, disable and merge commands use it
+pub mod plan;
 pub mod scan;

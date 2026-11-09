@@ -180,7 +180,7 @@ fn server(name: String, mut copies: Vec<McpCopy>, project: bool) -> McpServer {
 /// Equal apart from the HTTP flavour and header-name case. Agents infer SSE differently (a
 /// Cursor `url` and a Claude `type: sse` are the same server) and HTTP header names are
 /// case-insensitive; the model keeps both as written, comparisons ignore them.
-fn alike(a: &Transport, b: &Transport) -> bool {
+pub(crate) fn alike(a: &Transport, b: &Transport) -> bool {
     match (a, b) {
         (Transport::Http { url: u1, headers: h1, .. }, Transport::Http { url: u2, headers: h2, .. }) => u1 == u2 && folded(h1) == folded(h2),
         _ => a == b,
