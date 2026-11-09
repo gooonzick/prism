@@ -6,7 +6,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use crate::agents::{Paths, Scope};
-use crate::mcp::agents::{Flavor, MCP_AGENTS};
+use crate::mcp::agents::{Flavor, MCP_AGENTS, McpAgent};
 use crate::mcp::formats::{self, Disabled};
 use crate::mcp::model::{self, EnvValue, McpCopy, Place, Transport, masked_args, masked_url};
 
@@ -32,7 +32,7 @@ pub struct McpServer {
     pub name: String,
     /// Sorted by agent, then place.
     pub copies: Vec<McpCopy>,
-    /// A global server shown in a project that doesn't define one by this name.
+    /// In a project, every copy is global: no agent defines this name in the project itself.
     pub inherited: bool,
     pub status: Status,
     pub diffs: Vec<FieldDiff>,
@@ -63,26 +63,32 @@ impl McpInventory {
     }
 }
 
-/// Every detected agent's servers in `scope`. A project also shows the global servers it
-/// doesn't define itself, as inherited. Missing config files are skipped; unreadable ones go to
-/// `errors` and add nothing.
+/// Every detected agent's servers in `scope`. In a project, an agent's global copy joins the
+/// row unless that agent has its own copy of the name in the project (as each agent resolves
+/// it); a row of global copies only is inherited. Missing config files are skipped; unreadable
+/// ones go to `errors` and add nothing.
 pub fn scan(scope: &Scope, paths: &Paths) -> McpInventory {
     let mut files = Files::default();
-    let own = by_name(copies(scope, paths, &mut files));
-    let mut servers: Vec<McpServer> = Vec::new();
-    if let Scope::Project(root) = scope {
-        let global = by_name(copies(&Scope::Global, paths, &mut files));
-        servers.extend(global.into_iter().filter(|(name, _)| !own.contains_key(name)).map(|(name, copies)| server(name, copies, true)));
-        servers.extend(own.into_iter().map(|(name, copies)| server(name, copies, false)));
+    let mut all = copies(scope, paths, &mut files, |_| true);
+    let project = match scope {
+        Scope::Project(root) => Some(root),
+        Scope::Global => None,
+    };
+    if project.is_some() {
+        let shadowed: BTreeSet<(usize, String)> = all.iter().map(|c| (c.agent, c.server.name.clone())).collect();
+        // Claude Desktop has no projects, so its servers don't apply in one.
+        let global = copies(&Scope::Global, paths, &mut files, |a| a.flavor != Flavor::ClaudeDesktop);
+        all.extend(global.into_iter().filter(|c| !shadowed.contains(&(c.agent, c.server.name.clone()))));
+    }
+    let mut servers: Vec<McpServer> = by_name(all).into_iter().map(|(name, copies)| server(name, copies, project.is_some())).collect();
+    if let Some(root) = project {
         let claude = claude_disabled(root, paths, &mut files);
         for s in &mut servers {
             s.disabled_for = disabled_for(s, &claude);
         }
-    } else {
-        servers.extend(own.into_iter().map(|(name, copies)| server(name, copies, false)));
     }
     servers.sort_by(|a, b| a.name.cmp(&b.name));
-    let merges = merges(&servers);
+    let merges = merges(&servers, project.is_some());
     McpInventory { scope: scope.clone(), servers, merges, errors: files.errors }
 }
 
@@ -118,9 +124,9 @@ impl Files {
     }
 }
 
-fn copies(scope: &Scope, paths: &Paths, files: &mut Files) -> Vec<McpCopy> {
+fn copies(scope: &Scope, paths: &Paths, files: &mut Files, wanted: impl Fn(&McpAgent) -> bool) -> Vec<McpCopy> {
     let mut out = Vec::new();
-    for (agent, a) in MCP_AGENTS.iter().enumerate().filter(|(_, a)| a.detected(paths)) {
+    for (agent, a) in MCP_AGENTS.iter().enumerate().filter(|(_, a)| wanted(a) && a.detected(paths)) {
         for (file, place) in a.files(scope, paths) {
             let Some(text) = files.text(&file) else { continue };
             match formats::read(a.flavor, text, &place) {
@@ -156,8 +162,10 @@ fn place_rank(place: &Place) -> u8 {
     }
 }
 
-fn server(name: String, mut copies: Vec<McpCopy>, inherited: bool) -> McpServer {
+/// `project`: the row is in a project scope, where all-global copies make it inherited.
+fn server(name: String, mut copies: Vec<McpCopy>, project: bool) -> McpServer {
     copies.sort_by_key(|c| (c.agent, place_rank(&c.place)));
+    let inherited = project && copies.iter().all(|c| c.place == Place::Global);
     let status = if copies.iter().any(|c| c.read_only.is_some()) {
         Status::ReadOnly
     } else if copies.windows(2).any(|w| !alike(&w[0].server.transport, &w[1].server.transport)) {
@@ -169,13 +177,18 @@ fn server(name: String, mut copies: Vec<McpCopy>, inherited: bool) -> McpServer 
     McpServer { name, copies, inherited, status, diffs, disabled_for: Vec::new() }
 }
 
-/// Equal apart from the HTTP flavour: agents infer SSE differently (a Cursor `url` and a Claude
-/// `type: sse` are the same server), so the flavour stays in the model but not in comparisons.
+/// Equal apart from the HTTP flavour and header-name case. Agents infer SSE differently (a
+/// Cursor `url` and a Claude `type: sse` are the same server) and HTTP header names are
+/// case-insensitive; the model keeps both as written, comparisons ignore them.
 fn alike(a: &Transport, b: &Transport) -> bool {
     match (a, b) {
-        (Transport::Http { url: u1, headers: h1, .. }, Transport::Http { url: u2, headers: h2, .. }) => u1 == u2 && h1 == h2,
+        (Transport::Http { url: u1, headers: h1, .. }, Transport::Http { url: u2, headers: h2, .. }) => u1 == u2 && folded(h1) == folded(h2),
         _ => a == b,
     }
+}
+
+fn folded(headers: &BTreeMap<String, EnvValue>) -> BTreeMap<String, &EnvValue> {
+    headers.iter().map(|(k, v)| (k.to_ascii_lowercase(), v)).collect()
 }
 
 /// A field's value in one copy: compared as decoded, shown masked.
@@ -199,24 +212,29 @@ impl Field<'_> {
 /// Field order in a diff; `env.*` and `headers.*` follow, by key.
 const FIELDS: [&str; 5] = ["transport kind", "command", "args", "cwd", "url"];
 
-fn fields(t: &Transport) -> BTreeMap<String, Field<'_>> {
+/// A copy's fields by comparison key, each with the name to show. Header keys are compared in
+/// lower case, since header names are case-insensitive.
+fn fields(t: &Transport) -> BTreeMap<String, (String, Field<'_>)> {
+    fn named<'a>(key: impl Into<String>, name: impl Into<String>, field: Field<'a>) -> (String, (String, Field<'a>)) {
+        (key.into(), (name.into(), field))
+    }
     let mut f = BTreeMap::new();
     match t {
         Transport::Stdio { command, args, env, cwd } => {
-            f.insert("transport kind".into(), Field::Text("stdio".into()));
-            f.insert("command".into(), Field::Text(command.clone()));
+            f.insert("transport kind".into(), ("transport kind".into(), Field::Text("stdio".into())));
+            f.insert("command".into(), ("command".into(), Field::Text(command.clone())));
             if !args.is_empty() {
-                f.insert("args".into(), Field::Args(args));
+                f.insert("args".into(), ("args".into(), Field::Args(args)));
             }
             if let Some(cwd) = cwd {
-                f.insert("cwd".into(), Field::Text(cwd.clone()));
+                f.insert("cwd".into(), ("cwd".into(), Field::Text(cwd.clone())));
             }
-            f.extend(env.iter().map(|(k, v)| (format!("env.{k}"), Field::Value(v))));
+            f.extend(env.iter().map(|(k, v)| named(format!("env.{k}"), format!("env.{k}"), Field::Value(v))));
         }
         Transport::Http { url, headers, .. } => {
-            f.insert("transport kind".into(), Field::Text("http".into()));
-            f.insert("url".into(), Field::Text(url.clone()));
-            f.extend(headers.iter().map(|(k, v)| (format!("headers.{k}"), Field::Value(v))));
+            f.insert("transport kind".into(), ("transport kind".into(), Field::Text("http".into())));
+            f.insert("url".into(), ("url".into(), Field::Text(url.clone())));
+            f.extend(headers.iter().map(|(k, v)| named(format!("headers.{}", k.to_ascii_lowercase()), format!("headers.{k}"), Field::Value(v))));
         }
     }
     f
@@ -227,13 +245,16 @@ fn diffs(copies: &[McpCopy]) -> Vec<FieldDiff> {
     let keyed: BTreeSet<&String> = per_copy.iter().flat_map(|f| f.keys()).filter(|k| !FIELDS.contains(&k.as_str())).collect();
     let order = FIELDS.iter().copied().chain(keyed.into_iter().map(String::as_str));
     let mut out = Vec::new();
-    for field in order {
-        let values: Vec<Option<&Field>> = per_copy.iter().map(|f| f.get(field)).collect();
-        if values.windows(2).all(|w| w[0] == w[1]) {
+    for key in order {
+        let values: Vec<Option<&(String, Field)>> = per_copy.iter().map(|f| f.get(key)).collect();
+        if values.windows(2).all(|w| w[0].map(|(_, f)| f) == w[1].map(|(_, f)| f)) {
             continue;
         }
-        let values = copies.iter().zip(values).map(|(c, v)| (c.agent, v.map(Field::shown))).collect();
-        out.push(FieldDiff { field: field.into(), values });
+        // Shown as the first copy that has it spells it.
+        let Some((name, _)) = values.iter().flatten().next() else { continue };
+        let field = name.clone();
+        let values = copies.iter().zip(values).map(|(c, v)| (c.agent, v.map(|(_, f)| f.shown()))).collect();
+        out.push(FieldDiff { field, values });
     }
     out
 }
@@ -268,14 +289,22 @@ fn disabled_for(server: &McpServer, claude: &Disabled) -> Vec<usize> {
     agents
 }
 
-/// What makes two differently named servers look like one, as a key and the reason to show.
-/// Runners are normalised: `npx -y X`, `npx X`, `bunx -y X`, `bunx X` and `pnpx X` all run `X`.
-fn likeness(t: &Transport) -> (String, Vec<String>) {
+/// What makes two differently named servers look like one: a key of raw values to group by,
+/// and the reason to show, masked. Runners are normalised: `npx -y X`, `npx X`, `bunx -y X`,
+/// `bunx X` and `pnpx X` all run `X`.
+fn likeness(t: &Transport) -> (Vec<String>, String) {
+    let words = |words: &[String]| masked_args(words).join(" ");
     match t {
-        Transport::Http { url, .. } => (format!("same URL {url}"), vec![]),
+        Transport::Http { url, .. } => (vec!["url".into(), url.clone()], format!("same URL {}", masked_url(url))),
         Transport::Stdio { command, args, .. } => match package(command, args) {
-            Some((package, rest)) => (format!("same package {package}"), rest.to_vec()),
-            None => (format!("same command {}", std::iter::once(command.clone()).chain(masked_args(args)).collect::<Vec<_>>().join(" ")), args.clone()),
+            Some((package, rest)) => {
+                let key = ["package", package].into_iter().map(String::from).chain(rest.iter().cloned()).collect();
+                (key, format!("same package {}", words(&[package.to_string()])))
+            }
+            None => {
+                let line: Vec<String> = std::iter::once(command).chain(args).cloned().collect();
+                (std::iter::once("command".to_string()).chain(line.iter().cloned()).collect(), format!("same command {}", words(&line)))
+            }
         },
     }
 }
@@ -292,20 +321,21 @@ fn package<'a>(command: &str, args: &'a [String]) -> Option<(&'a str, &'a [Strin
 }
 
 /// Groups of differently named servers sharing a URL or a package, each group once.
-/// Read-only servers are left out: Prism can't rename them. So are inherited ones: renaming
-/// them from a project would edit the global configs.
-fn merges(servers: &[McpServer]) -> Vec<MergeHint> {
-    let mut alike: BTreeMap<(String, Vec<String>), BTreeSet<&str>> = BTreeMap::new();
-    for s in servers.iter().filter(|s| s.status != Status::ReadOnly && !s.inherited) {
-        for c in &s.copies {
-            alike.entry(likeness(&c.server.transport)).or_default().insert(&s.name);
+/// Read-only servers are left out: Prism can't rename them. In a project only the project's own
+/// copies count: renaming a global copy from there would edit the global configs.
+fn merges(servers: &[McpServer], project: bool) -> Vec<MergeHint> {
+    let mut alike: BTreeMap<Vec<String>, (String, BTreeSet<&str>)> = BTreeMap::new();
+    for s in servers.iter().filter(|s| s.status != Status::ReadOnly) {
+        for c in s.copies.iter().filter(|c| !project || c.place != Place::Global) {
+            let (key, reason) = likeness(&c.server.transport);
+            alike.entry(key).or_insert_with(|| (reason, BTreeSet::new())).1.insert(&s.name);
         }
     }
     let mut seen = BTreeSet::new();
     let mut hints: Vec<MergeHint> = alike
-        .into_iter()
+        .into_values()
         .filter(|(_, names)| names.len() > 1 && seen.insert(names.clone()))
-        .map(|((reason, _), names)| MergeHint { names: names.into_iter().map(String::from).collect(), reason })
+        .map(|(reason, names)| MergeHint { names: names.into_iter().map(String::from).collect(), reason })
         .collect();
     hints.sort_by(|a, b| a.names.cmp(&b.names));
     hints
@@ -540,6 +570,80 @@ mod tests {
         let project = scan(&Scope::Project(root), &paths);
         assert!(project.get("ctx").unwrap().inherited);
         assert_eq!(names(project), [["c7", "context7"]], "renaming an inherited server would edit the global configs");
+    }
+
+    #[test]
+    fn merge_reasons_mask_secrets() {
+        let (_dir, paths) = home();
+        let url = "https://x.example/mcp?api_key=abc123";
+        let cmd = json!({ "command": "uvx", "args": ["x-mcp", "--token", "abc123"] });
+        claude_json(&paths, json!({ "mcpServers": { "a": { "type": "http", "url": url }, "c": cmd } }));
+        cursor_json(&paths, json!({ "mcpServers": { "b": { "url": url }, "d": cmd } }));
+
+        let inv = scan(&Scope::Global, &paths);
+        let reasons: Vec<_> = inv.merges.iter().map(|h| h.reason.as_str()).collect();
+        assert_eq!(reasons, ["same URL https://x.example/mcp?api_key=***", "same command uvx x-mcp --token ***"]);
+        assert!(reasons.iter().all(|r| !r.contains("abc123")));
+    }
+
+    #[test]
+    fn grouping_uses_raw_values_not_masked_ones() {
+        let (_dir, paths) = home();
+        claude_json(&paths, json!({ "mcpServers": { "a": { "type": "http", "url": "https://x.example/mcp?api_key=one" } } }));
+        cursor_json(&paths, json!({ "mcpServers": { "b": { "url": "https://x.example/mcp?api_key=two" } } }));
+        assert!(scan(&Scope::Global, &paths).merges.is_empty());
+    }
+
+    #[test]
+    fn project_copies_shadow_global_ones_per_agent() {
+        let (dir, paths) = home();
+        let root = dir.path().join("app");
+        let gitlab = json!({ "command": "npx", "args": ["-y", "@zereight/mcp-gitlab"] });
+        claude_json(&paths, json!({ "mcpServers": { "gitlab": gitlab }, "projects": { root.to_string_lossy(): { "disabledMcpServers": ["gitlab"] } } }));
+        cursor_json(&paths, json!({ "mcpServers": { "gitlab": { "command": "npx", "args": ["-y", "@zereight/mcp-gitlab", "--old"] } } }));
+        write(&root.join(".cursor/mcp.json"), &json!({ "mcpServers": { "gitlab": gitlab } }).to_string());
+
+        let inv = scan(&Scope::Project(root.clone()), &paths);
+        assert_eq!(names(&inv), ["gitlab"]);
+        let row = inv.get("gitlab").unwrap();
+        let places: Vec<_> = row.copies.iter().map(|c| (c.agent, c.place.clone())).collect();
+        assert_eq!(places, [(agent("claude"), Place::Global), (agent("cursor"), Place::Project(root))], "Cursor's project copy hides its global one");
+        assert!(!row.inherited);
+        assert_eq!((row.status, row.disabled_for.clone()), (Status::InSync, vec![agent("claude")]));
+    }
+
+    #[test]
+    fn desktop_servers_stay_out_of_projects() {
+        let (dir, paths) = home();
+        let desktop = &MCP_AGENTS[agent("claude-desktop")];
+        let file = desktop.files(&Scope::Global, &paths).remove(0).0;
+        write(&file, &json!({ "mcpServers": { "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem"] } } }).to_string());
+        assert_eq!(names(&scan(&Scope::Global, &paths)), ["fs"]);
+        let root = dir.path().join("app");
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(scan(&Scope::Project(root), &paths).servers.is_empty());
+    }
+
+    #[test]
+    fn header_names_compare_case_insensitively() {
+        let (_dir, paths) = home();
+        let url = "https://mcp.example.com/mcp";
+        claude_json(&paths, json!({ "mcpServers": {
+            "same": { "type": "http", "url": url, "headers": { "Authorization": "Bearer ${T}" } },
+            "other": { "type": "http", "url": "https://other.example.com/mcp", "headers": { "X-Key": "${A}" } }
+        } }));
+        cursor_json(&paths, json!({ "mcpServers": {
+            "same": { "url": url, "headers": { "authorization": "Bearer ${env:T}" } },
+            "other": { "url": "https://other.example.com/mcp", "headers": { "x-key": "${env:B}" } }
+        } }));
+
+        let inv = scan(&Scope::Global, &paths);
+        let same = inv.get("same").unwrap();
+        assert_eq!((same.status, same.diffs.len()), (Status::InSync, 0));
+        let Transport::Http { headers, .. } = &same.copies[1].server.transport else { panic!("same is http") };
+        assert!(headers.contains_key("authorization"), "the model keeps the case as written");
+        let values = vec![(agent("claude"), Some("${A}".to_string())), (agent("cursor"), Some("${B}".to_string()))];
+        assert_eq!(inv.get("other").unwrap().diffs, [FieldDiff { field: "headers.X-Key".into(), values }]);
     }
 
     #[test]

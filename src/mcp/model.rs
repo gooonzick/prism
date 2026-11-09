@@ -115,8 +115,37 @@ fn opaque_token(arg: &str) -> bool {
         && arg.bytes().any(|b| b.is_ascii_digit() || b.is_ascii_uppercase())
 }
 
+/// `KEY=VALUE` with a secret-named, variable-like key (`GITHUB_TOKEN=…`, as docker `-e` takes it).
+fn secret_assignment(word: &str) -> Option<&str> {
+    let (key, _) = word.split_once('=')?;
+    let variable = !key.is_empty() && key.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'));
+    (variable && secret_name(key)).then_some(key)
+}
+
+/// Free text for printing: whatever follows `Bearer ` or `Basic ` is a credential; each word
+/// that is an opaque token or a secret assignment is masked, and URLs lose their credentials.
+fn masked_text(text: &str) -> String {
+    let scheme = ["Bearer ", "Basic "].iter().filter_map(|s| text.find(s).map(|at| (at, s.len()))).min();
+    if let Some((at, len)) = scheme {
+        return format!("{}{}***", masked_text(&text[..at]), &text[at..at + len]);
+    }
+    text.split_inclusive(char::is_whitespace)
+        .map(|piece| {
+            let word = piece.trim_end();
+            let gap = &piece[word.len()..];
+            let shown = match secret_assignment(word) {
+                Some(key) => format!("{key}=***"),
+                None if opaque_token(word) => "***".into(),
+                None => masked_url(word),
+            };
+            shown + gap
+        })
+        .collect()
+}
+
 /// Args for printing, with likely secrets as `***`: the value of a secret-named flag
-/// (`--api-key=***`, or the arg after `--token`), opaque tokens, and credentials in URLs.
+/// (`--api-key=***`, or the arg after `--token`), secret assignments (`GITHUB_TOKEN=***`),
+/// `Bearer`/`Basic` credentials, opaque tokens, and credentials in URLs.
 /// Package names, paths and plain URLs stay readable.
 pub fn masked_args(args: &[String]) -> Vec<String> {
     let mut out = Vec::with_capacity(args.len());
@@ -128,13 +157,12 @@ pub fn masked_args(args: &[String]) -> Vec<String> {
         }
         let shown = match arg.starts_with('-').then(|| arg.split_once('=')) {
             Some(Some((flag, value))) if secret_name(flag) || opaque_token(value) => format!("{flag}=***"),
-            Some(Some((flag, value))) => format!("{flag}={}", masked_url(value)),
+            Some(Some((flag, value))) => format!("{flag}={}", masked_text(value)),
             Some(None) => {
                 hide_next = secret_name(arg);
                 arg.clone()
             }
-            None if opaque_token(arg) => "***".into(),
-            None => masked_url(arg),
+            None => masked_text(arg),
         };
         out.push(shown);
     }
@@ -214,6 +242,24 @@ mod tests {
         assert_eq!(masked_args(&strings(&keep)), keep);
         assert_eq!(masked_args(&strings(&["ghp_fake0123456789abcdefABCDEF", "0123456789abcdef0123456789"])), ["***", "***"]);
         assert_eq!(masked_args(&strings(&["--url=https://u:fake@h.example.com/x", "https://h.example.com/?token=fake"])), ["--url=https://***@h.example.com/x", "https://h.example.com/?token=***"]);
+    }
+
+    #[test]
+    fn masked_args_hide_secret_env_assignments() {
+        let masked = masked_args(&strings(&["run", "-e", "GITHUB_TOKEN=fake", "PORT=3000", "--env=API_KEY=fake", "ghcr.io/github/github-mcp-server"]));
+        assert_eq!(masked, ["run", "-e", "GITHUB_TOKEN=***", "PORT=3000", "--env=API_KEY=***", "ghcr.io/github/github-mcp-server"]);
+    }
+
+    #[test]
+    fn masked_args_hide_bearer_and_basic_credentials() {
+        let masked = masked_args(&strings(&["--header", "Authorization: Bearer fake", "--header=Authorization: Basic ZmFrZQ==", "X-Mode: basic"]));
+        assert_eq!(masked, ["--header", "Authorization: Bearer ***", "--header=Authorization: Basic ***", "X-Mode: basic"]);
+    }
+
+    #[test]
+    fn masked_args_check_each_word_for_opaque_tokens() {
+        let masked = masked_args(&strings(&["X-Api: ghp_fake0123456789abcdefABCDEF", "--header=X-Api: ghp_fake0123456789abcdefABCDEF", "run mcp-server-sequential-thinking now"]));
+        assert_eq!(masked, ["X-Api: ***", "--header=X-Api: ***", "run mcp-server-sequential-thinking now"]);
     }
 
     #[test]
