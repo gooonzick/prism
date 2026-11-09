@@ -11,6 +11,7 @@ use clap::{Args, Parser, Subcommand};
 use crate::agents::{self, Paths, Scope};
 use crate::store::{self, Settings};
 
+mod doctor;
 mod mcp;
 mod projects;
 mod skills;
@@ -19,7 +20,6 @@ mod tests;
 
 /// Process exit codes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // later commands use the rest
 pub enum Exit {
     Ok = 0,
     Failed = 1,
@@ -123,6 +123,12 @@ enum Command {
     },
     /// Take back the last change, from the window or the command line.
     Undo,
+    /// Check a scope for broken links, invalid skills and drifting MCP servers.
+    Doctor {
+        /// Check the global setup and every project Prism lists.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 /// `None` when `args[0]` isn't a subcommand, so the caller opens the window.
@@ -154,6 +160,10 @@ pub fn run_with(args: &[&str], ctx: &mut Ctx, out: &mut dyn Write, err: &mut dyn
             Exit::Ok
         }
         Command::Undo => undo_cmd(ctx, &mut out, err),
+        Command::Doctor { all } => match ctx.scope(cli.global.project.as_deref()) {
+            Ok(scope) => doctor::run(all, &scope, ctx, &mut out),
+            Err(e) => usage(err, &e),
+        },
         Command::Skills { command } => match ctx.scope(cli.global.project.as_deref()) {
             Ok(scope) => skills::run(command, ctx, &scope, &mut out, err),
             Err(e) => usage(err, &e),

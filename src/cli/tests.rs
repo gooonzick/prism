@@ -867,6 +867,115 @@ fn errors_never_echo_values() {
     assert!(!out.contains("FIXTURE_SECRET_V") && !err.contains("FIXTURE_SECRET_V"), "{code} {out}{err}");
 }
 
+// prism doctor
+
+fn skill_dir(root: &std::path::Path, name: &str, manifest: &str) {
+    let d = root.join(".agents/skills").join(name);
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("SKILL.md"), manifest).unwrap();
+}
+
+#[test]
+fn clean_home_exits_0() {
+    let home = tempfile::tempdir().unwrap();
+    skill_dir(home.path(), "good", "---\nname: good\ndescription: fine\n---\nbody\n");
+    let (code, out, _) = go(&["doctor"], &mut ctx(home.path()));
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(out.trim(), "No problems found.");
+    let (code, out, _) = go(&["doctor", "--json"], &mut ctx(home.path()));
+    assert_eq!(code, 0);
+    assert_eq!(json(&out), serde_json::json!({ "problems": [] }));
+}
+
+#[test]
+fn broken_link_and_drift_exit_3() {
+    let home = mcp_home();
+    let h = home.path();
+    skill_dir(h, "nameless", "---\ndescription: x\n---\n");
+    skill_dir(h, "mute", "---\nname: mute\n---\n");
+    std::fs::create_dir_all(h.join(".claude/skills")).unwrap();
+    std::os::unix::fs::symlink(h.join(".agents/skills/ghost"), h.join(".claude/skills/ghost")).unwrap();
+    std::fs::write(h.join(".codex/bad.toml"), "").unwrap();
+
+    let (code, out, _) = go(&["doctor", "--json"], &mut ctx(h));
+    assert_eq!(code, 3, "{out}");
+    for secret in FIXTURES {
+        assert!(!out.contains(secret), "{secret} leaked: {out}");
+    }
+    let v = json(&out);
+    let ps = v["problems"].as_array().unwrap();
+    let find = |kind: &str, subject: &str| ps.iter().find(|p| p["kind"] == kind && p["subject"] == subject).unwrap_or_else(|| panic!("{kind} {subject}: {out}")).clone();
+    assert!(ps.iter().all(|p| p["scope"] == "global"));
+    let link = find("broken_link", "ghost");
+    let detail = link["detail"].as_str().unwrap();
+    assert!(detail.contains("Claude Code") && detail.contains("~/.agents/skills/ghost"), "{detail}");
+    assert!(find("invalid_skill", "nameless")["detail"].as_str().unwrap().contains("name"));
+    assert!(find("invalid_skill", "mute")["detail"].as_str().unwrap().contains("description"));
+    let drift = find("mcp_differs", "gl");
+    assert!(drift["detail"].as_str().unwrap().contains("args"), "{drift}");
+
+    let (code, out, _) = go(&["doctor"], &mut ctx(h));
+    assert_eq!(code, 3);
+    assert!(out.contains("global") && out.contains("ghost") && out.contains("gl"), "{out}");
+}
+
+#[test]
+fn unreadable_mcp_file_is_a_problem_with_a_tilde_subject() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+    std::fs::write(home.path().join(".cursor/mcp.json"), "{ FIXTURE_FILE_TEXT").unwrap();
+    let (code, out, _) = go(&["doctor", "--json"], &mut ctx(home.path()));
+    assert_eq!(code, 3, "{out}");
+    let p = &json(&out)["problems"][0];
+    assert_eq!(p["kind"], "mcp_unreadable");
+    assert_eq!(p["subject"], "~/.cursor/mcp.json");
+    assert!(!out.contains("FIXTURE_FILE_TEXT"));
+}
+
+#[test]
+fn doctor_all_checks_projects_and_flags_missing_ones() {
+    let home = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(home.path()).unwrap();
+    let proj = root.join("app");
+    std::fs::create_dir_all(proj.join(".agents/skills/odd")).unwrap();
+    std::fs::write(proj.join(".agents/skills/odd/SKILL.md"), "---\nname: odd\n---\n").unwrap();
+    let mut c = ctx(&root);
+    c.settings.projects = vec![proj.clone(), root.join("gone")];
+
+    let (code, out, _) = go(&["doctor", "--json"], &mut c);
+    assert_eq!(code, 0, "global alone is clean: {out}");
+    let (code, out, _) = go(&["doctor", "--all", "--json"], &mut c);
+    assert_eq!(code, 3, "{out}");
+    let v = json(&out);
+    let ps = v["problems"].as_array().unwrap();
+    assert!(ps.iter().any(|p| p["kind"] == "invalid_skill" && p["subject"] == "odd" && p["scope"] == "~/app"), "{out}");
+    assert!(ps.iter().any(|p| p["kind"] == "missing_project" && p["scope"] == "~/gone"), "{out}");
+
+    let (code, out, _) = go(&["doctor", "--project", proj.to_str().unwrap(), "--json"], &mut c);
+    assert_eq!(code, 3);
+    assert_eq!(json(&out)["problems"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn doctor_writes_nothing() {
+    let home = mcp_home();
+    let snap = |p: &std::path::Path| -> Vec<(String, Vec<u8>)> {
+        let mut v = Vec::new();
+        let mut stack = vec![p.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(d).unwrap().flatten() {
+                let (path, t) = (e.path(), e.file_type().unwrap());
+                if t.is_dir() { stack.push(path) } else { v.push((path.display().to_string(), std::fs::read(&path).unwrap_or_default())) }
+            }
+        }
+        v.sort();
+        v
+    };
+    let before = snap(home.path());
+    go(&["doctor", "--all"], &mut ctx(home.path()));
+    assert_eq!(snap(home.path()), before);
+}
+
 // Task 12 follow-ups
 
 #[test]
