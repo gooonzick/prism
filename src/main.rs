@@ -112,6 +112,31 @@ static SCENES: &[Scene] = &[
             s.select_mcp(&name);
         }
     }),
+    ("mcp-add", |s| {
+        s.open_mcp();
+        s.open_mcp_add();
+        s.add_mcp_pair(false);
+        if let Some(f) = &mut s.mcp_form {
+            f.name = rune::TextEdit::new("github");
+            f.command = rune::TextEdit::new("npx -y @modelcontextprotocol/server-github");
+            f.env[0].key = rune::TextEdit::new("GITHUB_TOKEN");
+            f.env[0].value = rune::TextEdit::new("${GITHUB_TOKEN}").secure();
+        }
+    }),
+    ("mcp-copy", |s| {
+        s.open_mcp();
+        // Copies that differ show the most: the source picker, then the overwrites it plans.
+        let editable = |x: &&mcp::scan::McpServer| x.status != mcp::scan::Status::ReadOnly;
+        let differs = s.mcp.servers.iter().filter(editable).find(|x| x.status == mcp::scan::Status::Differs).map(|x| (x.name.clone(), x.copies[0].agent));
+        let pick = differs.clone().map(|(n, _)| n).or_else(|| s.mcp.servers.iter().find(editable).map(|x| x.name.clone()));
+        if let Some(name) = pick {
+            s.select_mcp(&name);
+            s.open_mcp_copy(&name);
+        }
+        if let Some((_, from)) = differs {
+            s.set_mcp_copy_from(from);
+        }
+    }),
     ("copy", |s| {
         let names: Vec<String> = s.inv.skills.iter().take(2).map(|x| x.name.clone()).collect();
         s.open_copy(names);

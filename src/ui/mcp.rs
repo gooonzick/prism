@@ -6,7 +6,7 @@ use rune_kit::shell::Toolbar;
 use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, SegmentedControl, glyphs};
 
 use super::installed::tag;
-use super::{REFRESH, dot, empty, field, heading, inspector_body, mono, page_tabs, scope_title, scroll_pane};
+use super::{PLUS, REFRESH, dot, empty, field, heading, inspector_body, mono, page_tabs, scope_title, scroll_pane};
 use crate::agents::{self, Scope, tilde};
 use crate::app::{App, McpFilter};
 use crate::mcp::agents::MCP_AGENTS;
@@ -19,14 +19,30 @@ pub fn page(s: &App, k: &Kit, _layer: &mut Vec<El>) -> (El, Toolbar, El) {
 
 fn toolbar(s: &App, k: &Kit) -> Toolbar {
     Toolbar::new().leading(page_tabs(s, k)).title(scope_title(&s.scope, "MCP servers")).trailing(
-        IconButton::new(&REFRESH)
-            .variant(IconButtonVariant::GhostMuted)
-            .label("Rescan")
-            .help("Rescan")
-            .shortcut("cmd+r")
-            .on_press(|s: &mut App| s.rescan())
-            .build(k)
-            .key("rescan"),
+        row()
+            .gap(6.0)
+            .center_y()
+            .child(
+                IconButton::new(&REFRESH)
+                    .variant(IconButtonVariant::GhostMuted)
+                    .label("Rescan")
+                    .help("Rescan")
+                    .shortcut("cmd+r")
+                    .on_press(|s: &mut App| s.rescan())
+                    .build(k)
+                    .key("rescan"),
+            )
+            .child(
+                Button::new("Add server")
+                    .icon(&PLUS)
+                    .variant(ButtonVariant::Ghost)
+                    .control_size(ControlSize::Regular)
+                    .help("Add an MCP server to your agents")
+                    .shortcut("cmd+n")
+                    .on_press(|s: &mut App| s.open_mcp_add())
+                    .build(k)
+                    .key("mcp-add"),
+            ),
     )
 }
 
@@ -80,8 +96,23 @@ fn main(s: &App, k: &Kit) -> El {
     }
     if !s.mcp.merges.is_empty() {
         let mut hints = col().key("mcp-merges").w_full().pt(10.0).px(12.0).gap(6.0);
-        for m in &s.mcp.merges {
-            hints = hints.child(notice_line(k.c.info.icon, format!("Maybe one server: {} — {}", m.names.join(", "), m.reason), k));
+        for (i, m) in s.mcp.merges.iter().enumerate() {
+            let mut line = notice_line(k.c.info.icon, format!("Maybe one server: {} — {}", m.names.join(", "), m.reason), k);
+            // The core merges only servers this scope owns and Prism may change.
+            let mergeable = m.names.iter().all(|n| s.mcp.get(n).is_some_and(|x| !x.inherited && x.status != Status::ReadOnly));
+            if mergeable {
+                let names = m.names.clone();
+                line = line.child(
+                    Button::new("Merge…")
+                        .variant(ButtonVariant::Outline)
+                        .control_size(ControlSize::Small)
+                        .help("Rename the copies to one name")
+                        .on_press(move |s: &mut App| s.open_mcp_merge(names.clone()))
+                        .build(k)
+                        .key(format!("mcp-merge-{i}")),
+                );
+            }
+            hints = hints.child(line);
         }
         list = list.child(hints);
     }
@@ -233,6 +264,9 @@ fn inspector(s: &App, k: &Kit) -> El {
         .child(text(server.name.clone()).font(k.ty.body_medium).color(k.c.text_base).grow(1.0).min_w(0.0).wrap())
         .child(row().gap(6.0).center_y().child(dot(color)).child(text(word).font(k.ty.small).color(k.c.text_muted)));
     let mut body = inspector_body(k).child(title).child(text(about.join(". ")).font(k.ty.small).color(k.c.text_muted).wrap());
+    if let Some(actions) = actions(s, server, k) {
+        body = body.child(actions);
+    }
 
     let first = &server.copies[0];
     let t = &first.server.transport;
@@ -286,6 +320,47 @@ fn inspector(s: &App, k: &Kit) -> El {
         body = body.child(diffs(server, k));
     }
     body
+}
+
+/// Copy, edit and the project switch on the left; Remove apart on the right. An app's server
+/// has none; a global server seen from a project can't be removed there.
+fn actions(s: &App, server: &McpServer, k: &Kit) -> Option<El> {
+    if server.status == Status::ReadOnly {
+        return None;
+    }
+    let small = |label: &str| Button::new(label).variant(ButtonVariant::Outline).control_size(ControlSize::Small);
+    let (copy, edit, switch, remove) = (server.name.clone(), server.name.clone(), server.name.clone(), server.name.clone());
+    let mut left = row()
+        .gap(6.0)
+        .center_y()
+        .child(small("Copy to…").help("Write it to more agents").on_press(move |s: &mut App| s.open_mcp_copy(&copy)).build(k).key("mcp-copy"))
+        .child(
+            small("Edit…")
+                .help(if server.inherited { "Edits the global server" } else { "Change its command, URL or values in every copy" })
+                .on_press(move |s: &mut App| s.open_mcp_edit(&edit))
+                .build(k)
+                .key("mcp-edit"),
+        );
+    if !s.scope.is_global() {
+        let (label, key, help) = if server.disabled_for.is_empty() {
+            ("Disable here", "mcp-disable", "Switch it off for this project only")
+        } else {
+            ("Enable here", "mcp-enable", "Switch it back on for this project")
+        };
+        left = left.child(small(label).help(help).on_press(move |s: &mut App| s.toggle_mcp_disabled(&switch)).build(k).key(key));
+    }
+    let mut actions = row().key("mcp-actions").w_full().gap(8.0).center_y().child(left).child(row().grow(1.0));
+    if !server.inherited {
+        actions = actions.child(
+            Button::new("Remove…")
+                .variant(ButtonVariant::Danger)
+                .control_size(ControlSize::Small)
+                .on_press(move |s: &mut App| s.confirm_mcp_remove(&remove))
+                .build(k)
+                .key("mcp-remove"),
+        );
+    }
+    Some(actions)
 }
 
 /// Env or header keys with their values: masked, or as written once revealed.

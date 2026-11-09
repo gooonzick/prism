@@ -73,7 +73,6 @@ impl App {
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use std::fs;

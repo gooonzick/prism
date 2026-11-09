@@ -4,6 +4,7 @@
 mod discover;
 mod installed;
 mod mcp;
+mod mcp_edit;
 mod remote;
 mod watch;
 
@@ -26,6 +27,7 @@ use crate::sync::Plan;
 
 pub use installed::{open_path, reveal_path};
 pub use mcp::McpFilter;
+pub use mcp_edit::{McpChange, McpDialog, McpForm};
 pub use remote::{RepoListing, UpdateJob};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -134,6 +136,10 @@ pub struct App {
     pub mcp_filter: McpFilter,
     /// Servers whose values the inspector shows unmasked.
     pub mcp_revealed: HashSet<String>,
+    /// The open Add or Edit dialog.
+    pub mcp_form: Option<McpForm>,
+    /// The open plan dialog.
+    pub mcp_dialog: Option<McpDialog>,
 
     // Watching the scope's folders.
     waker: Option<Waker>,
@@ -205,6 +211,8 @@ impl App {
             mcp_selected: None,
             mcp_filter: McpFilter::All,
             mcp_revealed: HashSet::new(),
+            mcp_form: None,
+            mcp_dialog: None,
             waker: None,
             watcher: None,
             dirty: Arc::new(AtomicBool::new(false)),

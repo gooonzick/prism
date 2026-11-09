@@ -6,6 +6,7 @@ mod dialogs;
 mod inspector;
 mod installed;
 mod mcp;
+mod mcp_dialogs;
 
 use rune::{Chrome, Color, Cx, El, Icon, KeyEvent, ScrollSpec, Spring, Tx, col, el, row, text};
 use rune_kit::shell::{self, PaneMotion, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView};
@@ -63,6 +64,8 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     dialogs::copy(s, &k, &mut layer);
     dialogs::new_skill(s, &k, &mut layer);
     dialogs::found(s, &k, &mut layer);
+    mcp_dialogs::form(s, &k, &mut layer);
+    mcp_dialogs::plan(s, &k, &mut layer);
     if let Some(n) = &s.notice {
         let mut toast = Toast::new("notice", n.title.clone()).closable().on_close(|s: &mut App| s.notice = None);
         if !n.detail.is_empty() {
@@ -260,6 +263,10 @@ pub fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
     }
     if ev.is_command('n') && s.page == Page::Installed {
         s.open_new_skill();
+        return true;
+    }
+    if ev.is_command('n') && s.page == Page::Mcp {
+        s.open_mcp_add();
         return true;
     }
     let in_list = s.page == Page::Installed && !s.filter.focused && s.sync_plan.is_none() && s.confirm_remove.is_none();

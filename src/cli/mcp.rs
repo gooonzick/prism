@@ -12,7 +12,7 @@ use super::{Ctx, Exit, Out, usage};
 use crate::agents::{Paths, Scope, tilde};
 use crate::fsops::Journal;
 use crate::mcp::agents::{MCP_AGENTS, index_of};
-use crate::mcp::model::{EnvValue, McpCopy, Part, Place, Server, Transport, masked_args, masked_url};
+use crate::mcp::model::{EnvValue, McpCopy, Place, Server, Transport, masked_args, masked_url};
 use crate::mcp::plan::{self, ClaudeScope, EditChange, McpPlan, Request};
 use crate::mcp::scan::{self, FieldDiff, McpServer, Status, safe_error};
 use crate::store::{self, LastChange};
@@ -235,7 +235,7 @@ impl<'a> Values<'a> {
             let text = std::fs::read(path).ok().and_then(|b| String::from_utf8(b).ok());
             return text.map(|t| EnvValue::literal(trim_newline(&t))).ok_or_else(|| format!("{flag} {key}: cannot read {}", Path::new(path).display()));
         }
-        Ok(parse_value(v))
+        Ok(EnvValue::parse(v))
     }
 }
 
@@ -249,18 +249,6 @@ fn read_text(r: &mut dyn Read) -> std::io::Result<String> {
 fn trim_newline(t: &str) -> &str {
     let t = t.strip_suffix('\n').unwrap_or(t);
     t.strip_suffix('\r').unwrap_or(t)
-}
-
-/// `${VAR}` and `${VAR:-default}` are references; anything else is literal text.
-fn parse_value(v: &str) -> EnvValue {
-    let reference = v.strip_prefix("${").and_then(|r| r.strip_suffix('}')).filter(|r| !r.contains(['$', '{', '}']));
-    let Some(inner) = reference else { return EnvValue::literal(v) };
-    let (name, default) = match inner.split_once(":-") {
-        Some((n, d)) => (n, Some(d.to_string())),
-        None => (inner, None),
-    };
-    let valid = !name.is_empty() && !name.starts_with(|c: char| c.is_ascii_digit()) && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-    if valid { EnvValue(vec![Part::Var { name: name.into(), default }]) } else { EnvValue::literal(v) }
 }
 
 fn plan_json(plan: &McpPlan, lines: &[String], id: &str, applied: bool) -> Value {

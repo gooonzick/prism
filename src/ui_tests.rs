@@ -562,3 +562,290 @@ fn window_picks_up_a_cli_change() {
     assert!(h.rt.find("mcp-row-fresh").is_some());
     assert!(h.rt.state.last_change.as_ref().is_some_and(|c| c.label.contains("fresh")), "the CLI's change is the one to undo");
 }
+
+// MCP dialogs.
+
+impl Harness {
+    /// Clicks the button whose accessible name is `label` (the toast's actions carry no key).
+    fn click_button(&mut self, label: &str) {
+        let e = self.rt.elements().into_iter().find(|e| e.role == "button" && e.label.as_deref() == Some(label) && !e.exiting);
+        let r = e.unwrap_or_else(|| panic!("no button {label}")).rect;
+        let (x, y) = (r[0] + r[2] * 0.5, r[1] + r[3] * 0.5);
+        self.rt.pointer_down(x, y);
+        self.rt.pointer_up(x, y);
+        self.settle();
+    }
+
+    /// Fills the open Add/Edit dialog's fields through the app, as typing would.
+    fn fill_form(&mut self, f: impl FnOnce(&mut crate::app::McpForm) + 'static) {
+        self.rt.update(move |s, _| f(s.mcp_form.as_mut().expect("the MCP form is open")));
+        self.settle();
+    }
+
+    fn mcp_global(&mut self) {
+        self.click("scope-global");
+        self.click("tab-mcp");
+    }
+}
+
+fn read(p: &Path) -> String {
+    fs::read_to_string(p).unwrap()
+}
+
+fn json(p: &Path) -> serde_json::Value {
+    serde_json::from_str(&read(p)).unwrap()
+}
+
+#[test]
+fn add_dialog_writes_server_to_ticked_agents() {
+    let mut h = mcp_home();
+    h.mcp_global();
+    h.click("mcp-add");
+    let form = h.rt.state.mcp_form.as_ref().expect("the Add dialog is open");
+    assert_eq!(form.agents, [crate::mcp::agents::index_of("claude").unwrap()], "the sync targets that hold MCP servers");
+    h.fill_form(|f| {
+        f.name = rune::TextEdit::new("fresh");
+        f.command = rune::TextEdit::new(r#"npx -y fresh-mcp --root "/a b""#);
+    });
+    h.click("mcp-add-env-add");
+    h.fill_form(|f| {
+        f.env[0].key = rune::TextEdit::new("FRESH_TOKEN");
+        f.env[0].value = rune::TextEdit::new("${FRESH_TOKEN}").secure();
+    });
+    h.click("mcp-add-agent-cursor");
+    h.click("mcp-add-save");
+
+    assert!(h.rt.state.mcp_form.is_none(), "{:?}", h.rt.state.mcp_form.as_ref().and_then(|f| f.error.clone()));
+    let claude = json(&h.root.join(".claude.json"));
+    let fresh = &claude["mcpServers"]["fresh"];
+    assert_eq!(fresh["command"], "npx");
+    assert_eq!(fresh["args"], serde_json::json!(["-y", "fresh-mcp", "--root", "/a b"]));
+    assert_eq!(fresh["env"]["FRESH_TOKEN"], "${FRESH_TOKEN}", "a typed ${{VAR}} is a reference");
+    assert_eq!(claude["mcpServers"]["plata"]["env"]["PLATA_TOKEN"], "fake-env-secret", "the rest stays");
+    let cursor = json(&h.root.join(".cursor/mcp.json"));
+    assert_eq!(cursor["mcpServers"]["fresh"]["env"]["FRESH_TOKEN"], "${env:FRESH_TOKEN}", "in Cursor's syntax");
+    assert!(h.rt.state.mcp.get("fresh").is_some());
+    let n = h.rt.state.notice.as_ref().unwrap();
+    assert!(!n.error && n.undo, "{}", n.title);
+}
+
+#[test]
+fn copy_dialog_requires_source_when_copies_differ() {
+    let mut h = mcp_home();
+    fs::create_dir_all(h.root.join(".gemini")).unwrap();
+    let cursor = h.root.join(".cursor/mcp.json");
+    fs::write(&cursor, r#"{"mcpServers":{"plata":{"command":"npx","args":["-y","plata-mcp@2"]}}}"#).unwrap();
+    h.mcp_global();
+    h.click("mcp-row-plata");
+    h.click("mcp-copy");
+    let d = h.rt.state.mcp_dialog.as_ref().expect("the copy dialog is open");
+    assert!(d.plan.is_none(), "no plan until a source is picked");
+    assert!(h.texts().contains("Pick the copy to copy from"), "{}", h.texts());
+    h.click("mcp-apply");
+    assert!(h.rt.state.mcp_dialog.is_some(), "Apply does nothing without a source");
+    assert_eq!(json(&cursor)["mcpServers"]["plata"]["args"], serde_json::json!(["-y", "plata-mcp@2"]));
+
+    h.click("mcp-copy-from-claude");
+    h.click("mcp-copy-to-gemini");
+    let lines = h.rt.state.mcp_dialog.as_ref().and_then(|d| d.plan.clone()).unwrap().unwrap().lines(&h.rt.state.paths);
+    assert_eq!(lines, ["Overwrite Cursor's plata with Claude Code's", "Add plata to Gemini CLI"]);
+    assert!(h.texts().contains("Add plata to Gemini CLI"), "the plan is drawn");
+    h.click("mcp-apply");
+    assert!(h.rt.state.mcp_dialog.is_none());
+    assert_eq!(json(&cursor)["mcpServers"]["plata"]["args"], serde_json::json!(["-y", "plata-mcp", "--api-key=fake-arg-secret"]));
+    assert!(json(&h.root.join(".gemini/settings.json"))["mcpServers"]["plata"].is_object());
+    assert_eq!(h.rt.state.last_change.as_ref().unwrap().label, "copy plata");
+}
+
+#[test]
+fn remove_then_undo_from_toast() {
+    let mut h = mcp_home();
+    let (claude, cursor) = (h.root.join(".claude.json"), h.root.join(".cursor/mcp.json"));
+    let before = (read(&claude), read(&cursor));
+    h.mcp_global();
+    h.click("mcp-row-plata");
+    h.click("mcp-remove");
+    assert!(h.rt.find("mcp-remove-from-claude").is_some() && h.rt.find("mcp-remove-from-cursor").is_some());
+    h.click("mcp-apply");
+    assert!(h.rt.state.mcp.get("plata").is_none());
+    assert!(json(&claude)["mcpServers"].get("plata").is_none());
+    assert_eq!(h.rt.state.last_change.as_ref().unwrap().label, "remove plata");
+
+    h.click_button("Undo");
+    assert_eq!((read(&claude), read(&cursor)), before, "undo puts both files back byte for byte");
+    assert!(h.rt.state.mcp.get("plata").is_some());
+}
+
+#[test]
+fn read_only_server_has_no_actions() {
+    let mut h = mcp_home();
+    let claude = h.root.join(".claude.json");
+    let mut doc = json(&claude);
+    doc["mcpServers"]["pencil"] = serde_json::json!({ "command": "/Applications/Pencil.app/Contents/Resources/mcp" });
+    fs::write(&claude, doc.to_string()).unwrap();
+    h.mcp_global();
+    h.click("mcp-row-plata");
+    for key in ["mcp-copy", "mcp-edit", "mcp-remove"] {
+        assert!(h.rt.find(key).is_some(), "plata offers {key}");
+    }
+    h.click("mcp-row-pencil");
+    for key in ["mcp-copy", "mcp-edit", "mcp-remove", "mcp-disable", "mcp-enable"] {
+        assert!(h.rt.find(key).is_none(), "pencil offers no {key}");
+    }
+}
+
+#[test]
+fn inherited_server_offers_switch_but_not_remove() {
+    let mut h = mcp_home();
+    h.click("tab-mcp");
+    h.click("mcp-row-plata");
+    assert!(h.rt.find("mcp-enable").is_some(), "Claude Code skips plata here");
+    assert!(h.rt.find("mcp-remove").is_none(), "a global server isn't removed from a project");
+    h.click("mcp-enable");
+    h.click("mcp-apply");
+    let claude = json(&h.root.join(".claude.json"));
+    let project = h.project_dir().display().to_string();
+    assert_eq!(claude["projects"][&project]["disabledMcpServers"], serde_json::json!([]));
+    assert_eq!(h.rt.state.last_change.as_ref().unwrap().label, "enable plata");
+}
+
+#[test]
+fn apply_refused_when_files_changed_replans() {
+    let mut h = mcp_home();
+    let cursor = h.root.join(".cursor/mcp.json");
+    h.mcp_global();
+    h.click("mcp-row-plata");
+    h.click("mcp-remove");
+    let first = h.rt.state.mcp_dialog.as_ref().and_then(|d| d.plan.clone()).unwrap().unwrap().id();
+    // Someone else writes Cursor's config while the dialog is open.
+    let mut doc = json(&cursor);
+    doc["mcpServers"]["other"] = serde_json::json!({ "command": "other-mcp" });
+    fs::write(&cursor, doc.to_string()).unwrap();
+    h.click("mcp-apply");
+
+    let d = h.rt.state.mcp_dialog.as_ref().expect("the dialog stays open");
+    assert_eq!(d.notice.as_deref(), Some("The files changed; here is the new plan"));
+    assert_ne!(d.plan.clone().unwrap().unwrap().id(), first);
+    assert!(h.texts().contains("The files changed; here is the new plan"));
+    assert!(json(&cursor)["mcpServers"]["plata"].is_object(), "nothing was written");
+    assert!(h.rt.state.last_change.is_none());
+
+    h.click("mcp-apply");
+    assert!(h.rt.state.mcp_dialog.is_none());
+    let after = json(&cursor);
+    assert!(after["mcpServers"].get("plata").is_none() && after["mcpServers"]["other"].is_object());
+}
+
+#[test]
+fn add_validation_messages() {
+    let mut h = mcp_home();
+    let claude = h.root.join(".claude.json");
+    let before = read(&claude);
+    h.mcp_global();
+    h.click("mcp-add");
+    let error = |h: &Harness| h.rt.state.mcp_form.as_ref().and_then(|f| f.error.clone()).unwrap_or_default();
+
+    h.click("mcp-add-save");
+    assert_eq!(error(&h), "Name the server");
+    h.fill_form(|f| f.name = rune::TextEdit::new("plata"));
+    h.click("mcp-add-save");
+    assert_eq!(error(&h), "plata is already here; use Copy to add it to more agents");
+    h.fill_form(|f| f.name = rune::TextEdit::new("fresh"));
+    h.click("mcp-add-save");
+    assert_eq!(error(&h), "Give the command to run");
+    assert!(h.texts().contains("Give the command to run"), "the message is drawn");
+    h.click("mcp-add-kind-http");
+    h.click("mcp-add-save");
+    assert_eq!(error(&h), "Give the server's URL");
+    h.fill_form(|f| f.url = rune::TextEdit::new("https://fresh.example.com/mcp"));
+    h.click("mcp-add-agent-claude");
+    h.click("mcp-add-save");
+    assert_eq!(error(&h), "Pick at least one agent");
+    assert_eq!(read(&claude), before, "nothing was written");
+}
+
+#[test]
+fn cmd_n_opens_add_on_mcp_page() {
+    let mut h = mcp_home();
+    let cmd = rune::Mods { cmd: true, ..rune::Mods::default() };
+    key(&mut h, rune::Key::Command('n'), cmd);
+    assert!(h.rt.state.new_skill.is_some() && h.rt.state.mcp_form.is_none(), "on the skills page it is New skill");
+    h.click("new-cancel");
+    h.click("tab-mcp");
+    key(&mut h, rune::Key::Command('n'), cmd);
+    assert!(h.rt.state.mcp_form.is_some() && h.rt.state.new_skill.is_none());
+    assert!(h.rt.find("mcp-add-name").is_some());
+}
+
+#[test]
+fn undo_after_add_restores_config_bytes() {
+    let mut h = mcp_home();
+    let claude = h.root.join(".claude.json");
+    let before = read(&claude);
+    h.mcp_global();
+    h.click("mcp-add");
+    h.fill_form(|f| {
+        f.name = rune::TextEdit::new("fresh");
+        f.command = rune::TextEdit::new("fresh-mcp");
+    });
+    h.click("mcp-add-save");
+    assert_ne!(read(&claude), before);
+    assert_eq!(h.rt.state.last_change.as_ref().unwrap().label, "add fresh");
+    key(&mut h, rune::Key::Command('z'), rune::Mods { cmd: true, ..rune::Mods::default() });
+    assert_eq!(read(&claude), before);
+    assert!(h.rt.state.mcp.get("fresh").is_none());
+}
+
+#[test]
+fn edit_masks_prefilled_values_and_plans_changed_fields_only() {
+    let mut h = mcp_home();
+    h.mcp_global();
+    h.click("mcp-row-plata");
+    h.click("mcp-edit");
+    let shown = h.texts();
+    assert!(!shown.contains("fake-env-secret") && !shown.contains("fake-arg-secret"), "{shown}");
+    let i = h.rt.state.mcp_form.as_ref().unwrap().env.iter().position(|p| p.key.text == "PLATA_TOKEN").unwrap();
+    h.click(&format!("mcp-add-env-{i}-show"));
+    assert!(h.rt.state.mcp_form.as_ref().unwrap().env[i].shown);
+    h.fill_form(move |f| f.env[i].value = rune::TextEdit::new("new-secret").secure());
+    h.click("mcp-add-save");
+
+    assert!(h.rt.state.mcp_form.is_none());
+    let lines = h.rt.state.mcp_dialog.as_ref().and_then(|d| d.plan.clone()).unwrap().unwrap().lines(&h.rt.state.paths);
+    assert_eq!(lines, ["Edit plata in Claude Code, Cursor (env.PLATA_TOKEN)"]);
+    h.click("mcp-apply");
+    let cursor = json(&h.root.join(".cursor/mcp.json"));
+    assert_eq!(cursor["mcpServers"]["plata"]["env"]["PLATA_TOKEN"], "new-secret");
+    assert_eq!(cursor["mcpServers"]["plata"]["env"]["PLATA_HOST"], "${env:PLATA_HOST}", "the reference stays a reference");
+    assert_eq!(h.rt.state.last_change.as_ref().unwrap().label, "edit plata");
+}
+
+#[test]
+fn merge_from_a_hint_renames_the_odd_copy() {
+    let mut h = mcp_home();
+    let cursor = h.root.join(".cursor/mcp.json");
+    fs::write(&cursor, r#"{"mcpServers":{"plata-two":{"command":"npx","args":["-y","plata-mcp","--api-key=fake-arg-secret"],"env":{"PLATA_TOKEN":"fake-env-secret","PLATA_HOST":"${env:PLATA_HOST}"}}}}"#).unwrap();
+    h.mcp_global();
+    assert!(!h.rt.state.mcp.merges.is_empty(), "plata and plata-two look like one server");
+    h.click("mcp-merge-0");
+    let d = h.rt.state.mcp_dialog.as_ref().expect("the merge dialog is open");
+    assert!(d.plan.is_some());
+    h.click("mcp-apply");
+    assert!(json(&cursor)["mcpServers"]["plata"].is_object());
+    assert_eq!(h.rt.state.last_change.as_ref().unwrap().label, "merge into plata");
+}
+
+#[test]
+fn return_in_the_name_field_adds_the_server() {
+    let mut h = mcp_home();
+    h.mcp_global();
+    h.click("mcp-add");
+    h.fill_form(|f| f.command = rune::TextEdit::new("fresh-mcp"));
+    h.click("mcp-add-name");
+    h.rt.paste("fresh");
+    h.settle();
+    assert_eq!(h.rt.state.mcp_form.as_ref().unwrap().name.text, "fresh");
+    key(&mut h, rune::Key::Enter, rune::Mods::default());
+    assert!(h.rt.state.mcp_form.is_none());
+    assert!(h.rt.state.mcp.get("fresh").is_some());
+}

@@ -24,6 +24,19 @@ impl EnvValue {
         EnvValue(vec![Part::Var { name: name.into(), default: None }])
     }
 
+    /// A value as typed: exactly `${VAR}` or `${VAR:-default}` is a reference; anything else is
+    /// literal text.
+    pub fn parse(v: &str) -> EnvValue {
+        let reference = v.strip_prefix("${").and_then(|r| r.strip_suffix('}')).filter(|r| !r.contains(['$', '{', '}']));
+        let Some(inner) = reference else { return EnvValue::literal(v) };
+        let (name, default) = match inner.split_once(":-") {
+            Some((n, d)) => (n, Some(d.to_string())),
+            None => (inner, None),
+        };
+        let valid = !name.is_empty() && !name.starts_with(|c: char| c.is_ascii_digit()) && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if valid { EnvValue(vec![Part::Var { name: name.into(), default }]) } else { EnvValue::literal(v) }
+    }
+
     /// No variable references: the value itself is in the file, so it may be a secret.
     pub fn is_literal(&self) -> bool {
         self.0.iter().all(|p| matches!(p, Part::Text(_)))
