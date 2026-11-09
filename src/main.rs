@@ -6,6 +6,7 @@
 
 mod agents;
 mod app;
+mod cli;
 mod fsops;
 mod remote;
 mod scan;
@@ -118,6 +119,9 @@ static SCENES: &[Scene] = &[
 ];
 
 fn main() {
+    if let Some(code) = cli::run(std::env::args_os().skip(1).collect()) {
+        std::process::exit(code);
+    }
     rune::prewarm_gpu();
     let spec = AppSpec {
         setup: Some(setup),
