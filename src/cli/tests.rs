@@ -866,3 +866,44 @@ fn errors_never_echo_values() {
     let (code, out, err) = go(&["mcp", "add", "gl", "--command", "npx", "--env", "T=FIXTURE_SECRET_V", "--to", "cursor", "--json"], &mut ctx(home.path()));
     assert!(!out.contains("FIXTURE_SECRET_V") && !err.contains("FIXTURE_SECRET_V"), "{code} {out}{err}");
 }
+
+// Task 12 follow-ups
+
+#[test]
+fn merge_through_clap_labels_and_undoes_byte_for_byte() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+    std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+    let cursor = home.path().join(".cursor/mcp.json");
+    let codex = home.path().join(".codex/config.toml");
+    std::fs::write(&cursor, r#"{"mcpServers":{"a":{"url":"https://m.example.com/mcp"}}}"#).unwrap();
+    std::fs::write(&codex, "[mcp_servers.b]\nurl = \"https://m.example.com/mcp\"\n").unwrap();
+    let (cb, xb) = (std::fs::read(&cursor).unwrap(), std::fs::read(&codex).unwrap());
+    let mut c = ctx(home.path());
+    let (code, out, err) = go(&["mcp", "merge", "a", "b", "--into", "c", "--apply"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_ne!(std::fs::read(&cursor).unwrap(), cb);
+    assert!(std::fs::read_to_string(&cursor).unwrap().contains("\"c\""));
+    assert!(std::fs::read_to_string(&codex).unwrap().contains("mcp_servers.c"));
+    assert_eq!(store::load_last_change(&c.paths).unwrap().label, "merge into c");
+    let (code, undo, _) = go(&["undo"], &mut c);
+    assert_eq!(code, 0);
+    assert!(undo.contains("merge into c"), "{undo}");
+    assert_eq!((std::fs::read(&cursor).unwrap(), std::fs::read(&codex).unwrap()), (cb, xb));
+}
+
+#[test]
+fn disable_in_a_project_applies_and_labels() {
+    let home = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(home.path()).unwrap();
+    let proj = root.join("app");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::create_dir_all(root.join(".claude")).unwrap();
+    std::fs::write(root.join(".claude.json"), r#"{"mcpServers":{"gl":{"command":"npx","args":["gl-mcp"]}}}"#).unwrap();
+    let mut c = ctx(&root);
+    let (code, out, err) = go(&["mcp", "disable", "gl", "--project", proj.to_str().unwrap(), "--apply"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(root.join(".claude.json")).unwrap()).unwrap();
+    assert!(doc["projects"][proj.to_str().unwrap()]["disabledMcpServers"].as_array().unwrap().iter().any(|n| n == "gl"), "{doc}");
+    assert_eq!(store::load_last_change(&c.paths).unwrap().label, "disable gl");
+}
