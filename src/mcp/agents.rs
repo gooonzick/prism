@@ -57,10 +57,14 @@ fn desktop_dir(paths: &Paths) -> PathBuf {
     if cfg!(target_os = "macos") { paths.home.join("Library/Application Support/Claude") } else { paths.config.join("Claude") }
 }
 
-/// `name.jsonc` when it exists, else `name.json`: OpenCode reads either.
-fn json_or_jsonc(dir: PathBuf, name: &str) -> PathBuf {
-    let jsonc = dir.join(format!("{name}.jsonc"));
-    if jsonc.is_file() { jsonc } else { dir.join(format!("{name}.json")) }
+/// OpenCode reads every config file it finds and merges them: `opencode.json` and `opencode.jsonc`
+/// in each of its folders. Project folders are the project root and `.opencode/`.
+fn opencode_candidates(scope: &Scope, paths: &Paths) -> Vec<PathBuf> {
+    let dirs = match scope {
+        Scope::Global => vec![paths.config.join("opencode")],
+        Scope::Project(root) => vec![root.clone(), root.join(".opencode")],
+    };
+    dirs.into_iter().flat_map(|d| [d.join("opencode.json"), d.join("opencode.jsonc")]).collect()
 }
 
 impl McpAgent {
@@ -73,7 +77,7 @@ impl McpAgent {
                 Flavor::ClaudeDesktop => global(desktop_dir(paths).join("claude_desktop_config.json")),
                 Flavor::Codex => global(paths.codex.join("config.toml")),
                 Flavor::Cursor => global(paths.home.join(".cursor/mcp.json")),
-                Flavor::OpenCode => global(json_or_jsonc(paths.config.join("opencode"), "opencode")),
+                Flavor::OpenCode => opencode_candidates(scope, paths).into_iter().filter(|p| p.is_file()).map(|p| (p, Place::Global)).collect(),
                 Flavor::Gemini => global(paths.home.join(".gemini/settings.json")),
                 Flavor::Windsurf => global(paths.home.join(".codeium/windsurf/mcp_config.json")),
                 Flavor::Kiro => global(paths.home.join(".kiro/settings/mcp.json")),
@@ -86,9 +90,31 @@ impl McpAgent {
             // Codex reads it only in projects the user trusted.
             Flavor::Codex => project(".codex/config.toml"),
             Flavor::Cursor => project(".cursor/mcp.json"),
-            Flavor::OpenCode => vec![(json_or_jsonc(root.clone(), "opencode"), Place::Project(root.clone()))],
+            Flavor::OpenCode => opencode_candidates(scope, paths).into_iter().filter(|p| p.is_file()).map(|p| (p, Place::Project(root.clone()))).collect(),
             Flavor::Gemini => project(".gemini/settings.json"),
             Flavor::Kiro => project(".kiro/settings/mcp.json"),
+        }
+    }
+
+    /// Where a new server goes in `scope`. Mostly the one file the agent reads. OpenCode reads
+    /// several: the first that already has an `mcp` key, else an existing `.jsonc`, else an
+    /// existing `.json`, else a new `opencode.json` in the scope's primary folder.
+    #[allow(dead_code)] // the add and copy commands use it
+    pub fn new_server_file(&self, scope: &Scope, paths: &Paths) -> (PathBuf, Place) {
+        let files = self.files(scope, paths);
+        if self.flavor != Flavor::OpenCode {
+            return files.into_iter().next().unwrap_or_else(|| (paths.home.clone(), Place::Global));
+        }
+        let has_mcp = |p: &PathBuf| {
+            std::fs::read_to_string(p).ok().and_then(|t| jsonc_parser::parse_to_serde_value(&t, &Default::default()).ok()).is_some_and(|v: serde_json::Value| v.get("mcp").is_some())
+        };
+        let ext = |e: &str| files.iter().find(|(p, _)| p.extension().is_some_and(|x| x == e));
+        if let Some(found) = files.iter().find(|(p, _)| has_mcp(p)).or_else(|| ext("jsonc")).or_else(|| ext("json")) {
+            return found.clone();
+        }
+        match scope {
+            Scope::Global => (paths.config.join("opencode/opencode.json"), Place::Global),
+            Scope::Project(root) => (root.join("opencode.json"), Place::Project(root.clone())),
         }
     }
 
@@ -129,7 +155,8 @@ mod tests {
         let one = |id| files(id, &Scope::Global, &p).remove(0);
         assert_eq!(one("claude"), (PathBuf::from("/h/.claude.json"), Place::Global));
         assert_eq!(one("codex").0, PathBuf::from("/h/.codex/config.toml"));
-        assert_eq!(one("opencode").0, PathBuf::from("/h/.config/opencode/opencode.json"));
+        let opencode = &MCP_AGENTS[index_of("opencode").unwrap()];
+        assert_eq!(opencode.new_server_file(&Scope::Global, &p).0, PathBuf::from("/h/.config/opencode/opencode.json"));
         assert_eq!(one("windsurf").0, PathBuf::from("/h/.codeium/windsurf/mcp_config.json"));
         assert_eq!(one("kiro").0, PathBuf::from("/h/.kiro/settings/mcp.json"));
         let mut moved = p.clone();
@@ -151,14 +178,27 @@ mod tests {
     }
 
     #[test]
-    fn opencode_prefers_jsonc_when_it_exists() {
+    fn opencode_reads_every_existing_file() {
         let home = tempfile::tempdir().unwrap();
         let p = Paths::isolated(home.path());
         let dir = p.config.join("opencode");
         std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(files("opencode", &Scope::Global, &p)[0].0, dir.join("opencode.json"));
+        let new_file = |scope: &Scope| MCP_AGENTS[index_of("opencode").unwrap()].new_server_file(scope, &p).0;
+        assert!(files("opencode", &Scope::Global, &p).is_empty());
+        assert_eq!(new_file(&Scope::Global), dir.join("opencode.json"));
+        std::fs::write(dir.join("opencode.json"), "{}").unwrap();
         std::fs::write(dir.join("opencode.jsonc"), "{}").unwrap();
-        assert_eq!(files("opencode", &Scope::Global, &p)[0].0, dir.join("opencode.jsonc"));
+        let read: Vec<_> = files("opencode", &Scope::Global, &p).into_iter().map(|f| f.0).collect();
+        assert_eq!(read, [dir.join("opencode.json"), dir.join("opencode.jsonc")]);
+        assert_eq!(new_file(&Scope::Global), dir.join("opencode.jsonc"), "an existing .jsonc comes first");
+        std::fs::write(dir.join("opencode.json"), r#"{"mcp":{}}"#).unwrap();
+        assert_eq!(new_file(&Scope::Global), dir.join("opencode.json"), "a file with an mcp key wins");
+        let root = home.path().join("app");
+        std::fs::create_dir_all(root.join(".opencode")).unwrap();
+        std::fs::write(root.join(".opencode/opencode.json"), "{}").unwrap();
+        std::fs::write(root.join("opencode.jsonc"), "{}").unwrap();
+        let project: Vec<_> = files("opencode", &Scope::Project(root.clone()), &p).into_iter().map(|f| f.0).collect();
+        assert_eq!(project, [root.join("opencode.jsonc"), root.join(".opencode/opencode.json")]);
     }
 
     #[test]

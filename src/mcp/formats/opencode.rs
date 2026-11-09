@@ -34,7 +34,7 @@ fn entry(name: &str, obj: &Obj) -> Result<Entry, String> {
     let local = match kind.as_deref() {
         Some("local") => true,
         Some("remote") => false,
-        Some(other) => return Err(format!("{name}: unknown type {other}")),
+        Some(_) => return Err(format!("{name}: unknown type")),
         None => rest.contains_key("command"),
     };
     let transport = if local {

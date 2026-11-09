@@ -67,8 +67,14 @@ fn safe_error(message: &str) -> &str {
 fn list(ctx: &Ctx, scope: &Scope, out: &mut Out) -> Exit {
     let inv = scan::scan(scope, &ctx.paths);
     let mut human = Vec::new();
+    // One agent can hold a name in two places (user and local scope); the row names it once.
+    let agents_of = |s: &McpServer| {
+        let mut agents: Vec<usize> = s.copies.iter().map(|c| c.agent).collect();
+        agents.dedup();
+        agent_ids(agents)
+    };
     for s in &inv.servers {
-        let mut line = format!("{:<24} {:<28} {}", s.name, agent_ids(s.copies.iter().map(|c| c.agent)).join(","), status_word(s.status));
+        let mut line = format!("{:<24} {:<28} {}", s.name, agents_of(s).join(","), status_word(s.status));
         if s.inherited {
             line.push_str(" (global)");
         }
@@ -90,13 +96,11 @@ fn list(ctx: &Ctx, scope: &Scope, out: &mut Out) -> Exit {
         .servers
         .iter()
         .map(|s| {
-            let mut agents: Vec<usize> = s.copies.iter().map(|c| c.agent).collect();
-            agents.dedup();
             json!({
                 "name": s.name,
                 "inherited": s.inherited,
                 "status": status_key(s.status),
-                "agents": agent_ids(agents),
+                "agents": agents_of(s),
                 "disabled_for": agent_ids(s.disabled_for.iter().copied()),
                 "transport": kind(&s.copies[0].server.transport),
             })

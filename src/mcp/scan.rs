@@ -290,20 +290,20 @@ fn disabled_for(server: &McpServer, claude: &Disabled) -> Vec<usize> {
 }
 
 /// What makes two differently named servers look like one: a key of raw values to group by,
+/// the rest of the command line (copies of one package with other args still group, but say so),
 /// and the reason to show, masked. Runners are normalised: `npx -y X`, `npx X`, `bunx -y X`,
 /// `bunx X` and `pnpx X` all run `X`.
-fn likeness(t: &Transport) -> (Vec<String>, String) {
+fn likeness(t: &Transport) -> (Vec<String>, Vec<String>, String) {
     let words = |words: &[String]| masked_args(words).join(" ");
     match t {
-        Transport::Http { url, .. } => (vec!["url".into(), url.clone()], format!("same URL {}", masked_url(url))),
+        Transport::Http { url, .. } => (vec!["url".into(), url.clone()], vec![], format!("same URL {}", masked_url(url))),
         Transport::Stdio { command, args, .. } => match package(command, args) {
             Some((package, rest)) => {
-                let key = ["package", package].into_iter().map(String::from).chain(rest.iter().cloned()).collect();
-                (key, format!("same package {}", words(&[package.to_string()])))
+                (vec!["package".into(), package.into()], rest.to_vec(), format!("same package {}", words(&[package.to_string()])))
             }
             None => {
                 let line: Vec<String> = std::iter::once(command).chain(args).cloned().collect();
-                (std::iter::once("command".to_string()).chain(line.iter().cloned()).collect(), format!("same command {}", words(&line)))
+                (std::iter::once("command".to_string()).chain(line.iter().cloned()).collect(), vec![], format!("same command {}", words(&line)))
             }
         },
     }
@@ -324,18 +324,24 @@ fn package<'a>(command: &str, args: &'a [String]) -> Option<(&'a str, &'a [Strin
 /// Read-only servers are left out: Prism can't rename them. In a project only the project's own
 /// copies count: renaming a global copy from there would edit the global configs.
 fn merges(servers: &[McpServer], project: bool) -> Vec<MergeHint> {
-    let mut alike: BTreeMap<Vec<String>, (String, BTreeSet<&str>)> = BTreeMap::new();
+    type Group<'a> = (String, BTreeSet<&'a str>, BTreeSet<Vec<String>>);
+    let mut alike: BTreeMap<Vec<String>, Group> = BTreeMap::new();
     for s in servers.iter().filter(|s| s.status != Status::ReadOnly) {
         for c in s.copies.iter().filter(|c| !project || c.place != Place::Global) {
-            let (key, reason) = likeness(&c.server.transport);
-            alike.entry(key).or_insert_with(|| (reason, BTreeSet::new())).1.insert(&s.name);
+            let (key, rest, reason) = likeness(&c.server.transport);
+            let group = alike.entry(key).or_insert_with(|| (reason, BTreeSet::new(), BTreeSet::new()));
+            group.1.insert(&s.name);
+            group.2.insert(rest);
         }
     }
     let mut seen = BTreeSet::new();
     let mut hints: Vec<MergeHint> = alike
         .into_values()
-        .filter(|(_, names)| names.len() > 1 && seen.insert(names.clone()))
-        .map(|(reason, names)| MergeHint { names: names.into_iter().map(String::from).collect(), reason })
+        .filter(|(_, names, _)| names.len() > 1 && seen.insert(names.clone()))
+        .map(|(reason, names, variants)| MergeHint {
+            names: names.into_iter().map(String::from).collect(),
+            reason: if variants.len() > 1 { format!("{reason} (args differ)") } else { reason },
+        })
         .collect();
     hints.sort_by(|a, b| a.names.cmp(&b.names));
     hints
@@ -545,9 +551,34 @@ mod tests {
         let hint = |names: &[&str], reason: &str| MergeHint { names: names.iter().map(|n| n.to_string()).collect(), reason: reason.into() };
         assert_eq!(
             inv.merges,
-            [hint(&["context7", "ctx"], "same URL https://mcp.context7.com/mcp"), hint(&["figma", "figma-dev", "figma-pn"], "same package figma-developer-mcp")],
-            "read-only copies and other args don't count"
+            [
+                hint(&["context7", "ctx"], "same URL https://mcp.context7.com/mcp"),
+                hint(&["figma", "figma-dev", "figma-other", "figma-pn"], "same package figma-developer-mcp (args differ)")
+            ],
+            "read-only copies don't count; other args still merge, said so"
         );
+    }
+
+    #[test]
+    fn same_package_with_other_args_still_merges_without_leaking_keys() {
+        let (_dir, paths) = home();
+        claude_json(&paths, json!({ "mcpServers": { "a": { "command": "bunx", "args": ["-y", "figma-developer-mcp", "--figma-api-key=AAA", "--stdio"] } } }));
+        cursor_json(&paths, json!({ "mcpServers": { "b": { "command": "npx", "args": ["-y", "figma-developer-mcp", "--figma-api-key=BBB", "--stdio"] } } }));
+        let inv = scan(&Scope::Global, &paths);
+        assert_eq!(inv.merges.len(), 1);
+        let reason = &inv.merges[0].reason;
+        assert_eq!(reason, "same package figma-developer-mcp (args differ)");
+        assert!(!reason.contains("AAA") && !reason.contains("BBB"));
+    }
+
+    #[test]
+    fn opencode_lists_servers_from_both_global_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::isolated(dir.path());
+        write(&paths.config.join("opencode/opencode.json"), r#"{"mcp":{"only-json":{"type":"remote","url":"https://a.example/mcp"}}}"#);
+        write(&paths.config.join("opencode/opencode.jsonc"), r#"{"mcp":{"only-jsonc":{"type":"remote","url":"https://b.example/mcp"}}}"#);
+        let inv = scan(&Scope::Global, &paths);
+        assert_eq!(names(&inv), ["only-json", "only-jsonc"]);
     }
 
     #[test]
