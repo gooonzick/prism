@@ -1,5 +1,8 @@
 //! `prism doctor`: what is broken in a scope, read-only. Exit 3 when anything is.
 
+use std::collections::HashSet;
+use std::path::PathBuf;
+
 use serde_json::json;
 
 use super::{Ctx, Exit, Out};
@@ -18,18 +21,19 @@ struct Problem {
 /// The scopes to check: the named one, or with `--all` global plus every listed project.
 pub fn run(all: bool, scope: &Scope, ctx: &Ctx, out: &mut Out) -> Exit {
     let mut problems = Vec::new();
+    let mut seen = HashSet::new();
     if all {
-        check(&Scope::Global, ctx, &mut problems);
+        check(&Scope::Global, ctx, true, &mut seen, &mut problems);
         for project in &ctx.settings.projects {
             if project.is_dir() {
-                check(&Scope::Project(project.clone()), ctx, &mut problems);
+                check(&Scope::Project(project.clone()), ctx, true, &mut seen, &mut problems);
             } else {
                 let shown = agents::tilde(project, &ctx.paths);
                 problems.push(Problem { kind: "missing_project", scope: shown.clone(), subject: shown, detail: "the folder no longer exists".into() });
             }
         }
     } else {
-        check(scope, ctx, &mut problems);
+        check(scope, ctx, false, &mut seen, &mut problems);
     }
     report(&problems, out);
     if problems.is_empty() { Exit::Ok } else { Exit::Problems }
@@ -42,7 +46,8 @@ fn scope_name(scope: &Scope, ctx: &Ctx) -> String {
     }
 }
 
-fn check(scope: &Scope, ctx: &Ctx, problems: &mut Vec<Problem>) {
+/// `all`: every scope is being checked, so what belongs to the global scope is reported there only.
+fn check(scope: &Scope, ctx: &Ctx, all: bool, seen: &mut HashSet<PathBuf>, problems: &mut Vec<Problem>) {
     let name = scope_name(scope, ctx);
     let mut add = |kind, subject: String, detail: String| problems.push(Problem { kind, scope: name.clone(), subject, detail });
 
@@ -71,12 +76,14 @@ fn check(scope: &Scope, ctx: &Ctx, problems: &mut Vec<Problem>) {
     }
 
     let mcp = mcp_scan::scan(scope, &ctx.paths);
-    // A server a project only inherits is the global scope's to report.
-    for s in mcp.servers.iter().filter(|s| s.status == Status::Differs && !s.inherited) {
+    for s in mcp.servers.iter().filter(|s| s.status == Status::Differs && !(all && s.inherited)) {
         let fields: Vec<&str> = s.diffs.iter().map(|d| d.field.as_str()).collect();
-        add("mcp_differs", s.name.clone(), fields.join(", "));
+        // A server a project only inherits drifts in the global scope; say so when it shows up here.
+        let prefix = if s.inherited { "global: " } else { "" };
+        add("mcp_differs", s.name.clone(), format!("{prefix}{}", fields.join(", ")));
     }
-    for (file, message) in &mcp.errors {
+    // A project scan reads the global files too; under --all each file is reported once.
+    for (file, message) in mcp.errors.iter().filter(|(f, _)| !all || seen.insert(f.clone())) {
         add("mcp_unreadable", agents::tilde(file, &ctx.paths), message.clone());
     }
 }

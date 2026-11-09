@@ -1016,3 +1016,77 @@ fn disable_in_a_project_applies_and_labels() {
     assert!(doc["projects"][proj.to_str().unwrap()]["disabledMcpServers"].as_array().unwrap().iter().any(|n| n == "gl"), "{doc}");
     assert_eq!(store::load_last_change(&c.paths).unwrap().label, "disable gl");
 }
+
+// prism doctor, fix round 1
+
+fn settings_with(c: &mut Ctx, projects: &[&std::path::Path]) {
+    c.settings.projects = projects.iter().map(|p| p.to_path_buf()).collect();
+}
+
+#[test]
+fn all_reports_an_unreadable_global_file_once() {
+    let home = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(home.path()).unwrap();
+    std::fs::create_dir_all(root.join(".cursor")).unwrap();
+    std::fs::write(root.join(".cursor/mcp.json"), "{ broken").unwrap();
+    let (a, b) = (root.join("a"), root.join("b"));
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    let mut c = ctx(&root);
+    settings_with(&mut c, &[&a, &b]);
+    let (code, out, _) = go(&["doctor", "--all", "--json"], &mut c);
+    assert_eq!(code, 3, "{out}");
+    let v = json(&out);
+    let hits: Vec<_> = v["problems"].as_array().unwrap().iter().filter(|p| p["kind"] == "mcp_unreadable").collect();
+    assert_eq!(hits.len(), 1, "{out}");
+    assert_eq!(hits[0]["scope"], "global");
+    // A single project still shows the global file it reads.
+    let (_, out, _) = go(&["doctor", "--project", a.to_str().unwrap(), "--json"], &mut c);
+    assert_eq!(json(&out)["problems"].as_array().unwrap().iter().filter(|p| p["kind"] == "mcp_unreadable").count(), 1, "{out}");
+}
+
+#[test]
+fn inherited_drift_is_global_under_all_and_prefixed_under_one_project() {
+    let home = mcp_home();
+    let root = std::fs::canonicalize(home.path()).unwrap();
+    let proj = root.join("app");
+    std::fs::create_dir_all(&proj).unwrap();
+    let mut c = ctx(&root);
+    settings_with(&mut c, &[&proj]);
+
+    let (_, out, _) = go(&["doctor", "--all", "--json"], &mut c);
+    let v = json(&out);
+    let gl: Vec<_> = v["problems"].as_array().unwrap().iter().filter(|p| p["kind"] == "mcp_differs" && p["subject"] == "gl").collect();
+    assert_eq!(gl.len(), 1, "{out}");
+    assert_eq!(gl[0]["scope"], "global");
+    assert!(!gl[0]["detail"].as_str().unwrap().starts_with("global: "));
+
+    let (code, out, _) = go(&["doctor", "--project", proj.to_str().unwrap(), "--json"], &mut c);
+    assert_eq!(code, 3);
+    let v = json(&out);
+    let gl = v["problems"].as_array().unwrap().iter().find(|p| p["kind"] == "mcp_differs" && p["subject"] == "gl").unwrap().clone();
+    assert!(gl["detail"].as_str().unwrap().starts_with("global: args"), "{gl}");
+    assert_eq!(gl["scope"], "~/app");
+}
+
+#[test]
+fn a_mixed_row_is_reported_unprefixed_in_both_modes() {
+    let home = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(home.path()).unwrap();
+    std::fs::create_dir_all(root.join(".codex")).unwrap();
+    std::fs::write(root.join(".codex/config.toml"), "[mcp_servers.gl]\ncommand = \"npx\"\n").unwrap();
+    let proj = root.join("app");
+    std::fs::create_dir_all(proj.join(".cursor")).unwrap();
+    std::fs::create_dir_all(root.join(".cursor")).unwrap();
+    std::fs::write(proj.join(".cursor/mcp.json"), r#"{"mcpServers":{"gl":{"command":"uvx"}}}"#).unwrap();
+    let mut c = ctx(&root);
+    settings_with(&mut c, &[&proj]);
+    for args in [&["doctor", "--all", "--json"][..], &["doctor", "--project", proj.to_str().unwrap(), "--json"][..]] {
+        let (code, out, _) = go(args, &mut c);
+        assert_eq!(code, 3, "{out}");
+        let v = json(&out);
+        let gl = v["problems"].as_array().unwrap().iter().find(|p| p["kind"] == "mcp_differs" && p["subject"] == "gl").unwrap_or_else(|| panic!("{out}")).clone();
+        assert!(!gl["detail"].as_str().unwrap().starts_with("global: "), "{gl}");
+        assert_eq!(gl["scope"], "~/app");
+    }
+}
