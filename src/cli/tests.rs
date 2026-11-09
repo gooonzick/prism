@@ -413,6 +413,10 @@ fn new_skill_is_immediate() {
 #[test]
 fn a_partial_apply_saves_what_was_done_and_undo_restores_it() {
     use std::os::unix::fs::PermissionsExt;
+    // A read-only folder doesn't stop root, so there is no failure to provoke.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
     let home = tempfile::tempdir().unwrap();
     let h = home.path();
     write_skill(&h.join(".claude/skills"), "a", "d");
