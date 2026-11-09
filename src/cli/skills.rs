@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
 
-use super::{Ctx, Exit, Out, usage};
+use super::{Ctx, Exit, Out, failed, usage};
 use crate::agents::{self, AGENTS, CANONICAL, Scope};
 use crate::fsops::Journal;
 use crate::planid::{plan_id, tree_hash};
@@ -228,7 +228,8 @@ fn drive(ctx: &Ctx, mut plan: Planned, a: Apply, out: &mut Out, err: &mut dyn Wr
     let n = plan.actions.len();
     let run = std::mem::replace(&mut plan.run, Box::new(|_| Ok(0)));
     let result = run(&mut journal);
-    if !journal.is_empty() {
+    let undoable = !journal.is_empty();
+    if undoable {
         store::save_last_change(&ctx.paths, Some(&LastChange { label: plan.label.clone(), journal }));
     }
     match result {
@@ -249,7 +250,7 @@ fn drive(ctx: &Ctx, mut plan: Planned, a: Apply, out: &mut Out, err: &mut dyn Wr
                 v["error"] = json!(e);
                 out.emit("", v);
             } else {
-                let _ = writeln!(err, "Stopped after {done} of {n}: {e}");
+                let _ = writeln!(err, "Stopped after {done} of {n}: {e}{}", super::undo_hint(undoable));
             }
             Exit::Failed
         }
@@ -281,7 +282,7 @@ fn run_local(cmd: Cmd, ctx: &Ctx, scope: &Scope, out: &mut Out, err: &mut dyn Wr
                 Err(e) => return usage(err, &e),
             };
             if let Some(missing) = names.iter().find(|n| inv.get(n).is_none()) {
-                return missing_skill(err, missing, scope);
+                return missing_skill(out, err, missing, scope);
             }
             let plan = if names.is_empty() { sync::plan(&inv, &targets, &ctx.paths) } else { sync::plan_many(&inv, &names, &targets, &ctx.paths) };
             let n = plan.actions.len();
@@ -293,7 +294,7 @@ fn run_local(cmd: Cmd, ctx: &Ctx, scope: &Scope, out: &mut Out, err: &mut dyn Wr
                 Err(e) => return usage(err, &e),
             };
             if inv.get(&name).is_none() {
-                return missing_skill(err, &name, scope);
+                return missing_skill(out, err, &name, scope);
             }
             let plan = sync::plan_one(&inv, &name, &[agent], &ctx.paths);
             drive(ctx, Planned::of_actions(scope, ctx, plan, label::link(&name, agent)), apply, out, err)
@@ -314,7 +315,7 @@ fn run_local(cmd: Cmd, ctx: &Ctx, scope: &Scope, out: &mut Out, err: &mut dyn Wr
                 return usage(err, "that is the scope the skills already are in");
             }
             if let Some(missing) = names.iter().find(|n| inv.get(n).is_none()) {
-                return missing_skill(err, missing, scope);
+                return missing_skill(out, err, missing, scope);
             }
             copy(ctx, scope, &inv, names, dest, apply, out, err)
         }
@@ -333,14 +334,14 @@ fn run_local(cmd: Cmd, ctx: &Ctx, scope: &Scope, out: &mut Out, err: &mut dyn Wr
     }
 }
 
-fn missing_skill(err: &mut dyn Write, name: &str, scope: &Scope) -> Exit {
-    let _ = writeln!(err, "no skill named {name} in {}", scope.title());
-    Exit::Failed
+/// Refuses a plan for a skill the scope doesn't have.
+fn missing_skill(out: &mut Out, err: &mut dyn Write, name: &str, scope: &Scope) -> Exit {
+    failed(out, err, &format!("no skill named {name} in {}", scope.title()))
 }
 
 fn remove(ctx: &Ctx, scope: &Scope, inv: &Inventory, names: Vec<String>, apply: Apply, out: &mut Out, err: &mut dyn Write) -> Exit {
     if let Some(missing) = names.iter().find(|n| inv.get(n).is_none()) {
-        return missing_skill(err, missing, scope);
+        return missing_skill(out, err, missing, scope);
     }
     let describe = |n: &String| {
         let s = inv.get(n).expect("checked above");
@@ -368,7 +369,7 @@ fn unlink(ctx: &Ctx, scope: &Scope, inv: &Inventory, name: &str, agent: &str, ap
         Ok(a) => a,
         Err(e) => return usage(err, &e),
     };
-    let Some(s) = inv.get(name) else { return missing_skill(err, name, scope) };
+    let Some(s) = inv.get(name) else { return missing_skill(out, err, name, scope) };
     let (mut actions, mut conflicts) = (Vec::new(), Vec::new());
     match &s.placements[agent] {
         Placement::Linked | Placement::Link(_) | Placement::Broken(_) => actions.push(format!("Unlink {name} from {}", AGENTS[agent].name)),
@@ -488,16 +489,6 @@ fn placements(ps: &[Placement]) -> Value {
     AGENTS.iter().zip(ps).map(|(a, p)| (a.id.to_string(), Value::from(placement_label(p)))).collect::<serde_json::Map<_, _>>().into()
 }
 
-/// A failed `remote` call: the message on stderr, and in JSON mode on stdout too.
-fn failed(out: &mut Out, err: &mut dyn Write, msg: &str) -> Exit {
-    let msg = msg.trim();
-    let _ = writeln!(err, "{msg}");
-    if out.json {
-        out.emit("", json!({ "error": msg }));
-    }
-    Exit::Failed
-}
-
 fn search(query: &str, out: &mut Out, err: &mut dyn Write) -> Exit {
     let found = match remote::search(query) {
         Ok(f) => f,
@@ -509,8 +500,12 @@ fn search(query: &str, out: &mut Out, err: &mut dyn Write) -> Exit {
     Exit::Ok
 }
 
+/// Lists a repository named as `install` takes it, as the window's field does.
 fn repo(source: &str, out: &mut Out, err: &mut dyn Write) -> Exit {
-    let skills = match remote::list_repo(source) {
+    let Some((source, _)) = remote::parse_source(source) else {
+        return usage(err, &format!("{source} is not a skills source; use owner/repo, owner/repo@skill or a URL"));
+    };
+    let skills = match remote::list_repo(&source) {
         Ok(s) => s,
         Err(e) => return failed(out, err, &e),
     };

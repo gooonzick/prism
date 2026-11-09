@@ -81,8 +81,26 @@ impl Out<'_> {
 /// Words that route to the CLI. Anything else (a folder, Rune's `--snap`) opens the window.
 const SUBCOMMANDS: &[&str] = &["agents", "targets", "skills", "mcp", "projects", "undo", "doctor", "setup"];
 
+/// Whether `args` are a command line: help or the version, or a subcommand, maybe after the
+/// global flags (`--json`, `--project DIR`). Everything else is the window's.
+fn is_cli(args: &[&str]) -> bool {
+    if matches!(args.first(), Some(&("-h" | "--help" | "-V" | "--version" | "help"))) {
+        return true;
+    }
+    let mut rest = args;
+    loop {
+        rest = match rest {
+            ["--json", tail @ ..] => tail,
+            ["--project", _, tail @ ..] => tail,
+            [flag, tail @ ..] if flag.starts_with("--project=") => tail,
+            _ => break,
+        };
+    }
+    rest.first().is_some_and(|word| SUBCOMMANDS.contains(word))
+}
+
 #[derive(Parser)]
-#[command(name = "prism", about = "Manage agent skills and MCP servers")]
+#[command(name = "prism", version, about = "Manage agent skills and MCP servers")]
 struct Cli {
     #[command(flatten)]
     global: Global,
@@ -136,28 +154,44 @@ enum Command {
     Setup,
 }
 
-/// `None` when `args[0]` isn't a subcommand, so the caller opens the window.
+/// `None` when `args` aren't a command line (see [`is_cli`]), so the caller opens the window.
 pub fn run(args: Vec<OsString>) -> Option<i32> {
-    let first = args.first()?.to_str()?;
-    if !SUBCOMMANDS.contains(&first) {
+    let argv: Vec<&str> = args.iter().map(|a| a.to_str().unwrap_or("")).collect();
+    if !is_cli(&argv) {
         return None;
     }
-    let argv: Vec<&str> = args.iter().map(|a| a.to_str().unwrap_or("")).collect();
+    let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
+    // Help, the version and usage errors need no settings: parse before reading any.
+    let cli = match parse(&argv, &mut out, &mut err) {
+        Ok(cli) => cli,
+        Err(code) => return Some(code),
+    };
     let mut ctx = Ctx::from_env();
-    Some(run_with(&argv, &mut ctx, &mut std::io::stdout(), &mut std::io::stderr()))
+    Some(execute(cli, &mut ctx, &mut out, &mut err))
 }
 
-/// Runs one command line (without the program name) and returns its exit code.
+/// Runs one command line (without the program name) on `ctx` and returns its exit code; tests
+/// give their own home and streams.
+#[cfg(test)]
 pub fn run_with(args: &[&str], ctx: &mut Ctx, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
-    let cli = match Cli::try_parse_from(std::iter::once("prism").chain(args.iter().copied())) {
-        Ok(cli) => cli,
-        Err(e) => {
-            // --help and --version are not mistakes.
-            let code = if e.use_stderr() { Exit::Usage } else { Exit::Ok };
-            let _ = if e.use_stderr() { write!(err, "{e}") } else { write!(out, "{e}") };
-            return code as i32;
-        }
-    };
+    match parse(args, out, err) {
+        Ok(cli) => execute(cli, ctx, out, err),
+        Err(code) => code,
+    }
+}
+
+/// The parsed command line, or the exit code once clap has printed help, the version or why
+/// the line is wrong.
+fn parse(args: &[&str], out: &mut dyn Write, err: &mut dyn Write) -> Result<Cli, i32> {
+    Cli::try_parse_from(std::iter::once("prism").chain(args.iter().copied())).map_err(|e| {
+        // --help and --version are not mistakes.
+        let code = if e.use_stderr() { Exit::Usage } else { Exit::Ok };
+        let _ = if e.use_stderr() { write!(err, "{e}") } else { write!(out, "{e}") };
+        code as i32
+    })
+}
+
+fn execute(cli: Cli, ctx: &mut Ctx, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     let mut out = Out { json: cli.global.json, out };
     let exit = match cli.command {
         Command::Agents => {
@@ -188,6 +222,21 @@ pub fn run_with(args: &[&str], ctx: &mut Ctx, out: &mut dyn Write, err: &mut dyn
 fn usage(err: &mut dyn Write, msg: &str) -> Exit {
     let _ = writeln!(err, "{msg}");
     Exit::Usage
+}
+
+/// What follows a partial failure's message: how to take back what was done.
+fn undo_hint(undoable: bool) -> &'static str {
+    if undoable { "\nRun prism undo to take back what was done." } else { "" }
+}
+
+/// A refusal or failure: the message on stderr, and in JSON mode as `{"error"}` on stdout too.
+fn failed(out: &mut Out, err: &mut dyn Write, msg: &str) -> Exit {
+    let msg = msg.trim();
+    let _ = writeln!(err, "{msg}");
+    if out.json {
+        out.emit("", serde_json::json!({ "error": msg }));
+    }
+    Exit::Failed
 }
 
 fn undo_cmd(ctx: &Ctx, out: &mut Out, err: &mut dyn Write) -> Exit {

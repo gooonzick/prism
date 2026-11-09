@@ -158,6 +158,9 @@ pub struct McpPlan {
     pub actions: Vec<McpAction>,
     /// Agents left out, with the reason.
     pub skipped: Vec<(usize, String)>,
+    /// Of `skipped`, the agents an add left out because they have the server already: nothing
+    /// to do there, not a failure.
+    pub present: Vec<usize>,
     pub warnings: Vec<String>,
     /// Every file the plan writes, with its hash when planned (`None`: it doesn't exist yet).
     pub files: Vec<(PathBuf, Option<u64>)>,
@@ -541,6 +544,7 @@ impl<'a> Planner<'a> {
         for agent in unique(to) {
             if existing.is_some_and(|s| s.copies.iter().any(|c| c.agent == agent && in_scope(scope, &c.place))) {
                 self.skip(agent, format!("{} already has {}", agent_name(agent), server.name));
+                self.plan.present.push(agent);
                 continue;
             }
             let Some((file, place)) = self.target(agent, claude_scope) else { continue };

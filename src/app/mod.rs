@@ -452,6 +452,7 @@ impl App {
                 }
             }
             Err(e) => {
+                let e = if undoable { format!("{e}\nUndo takes back what was done.") } else { e };
                 self.notify("Couldn't finish that".into(), e, true);
                 if let Some(n) = &mut self.notice {
                     n.undo = undoable;
@@ -493,5 +494,26 @@ trait SetWaker {
 impl<T: Send + 'static> SetWaker for Latest<T> {
     fn set(&self, waker: Waker) {
         self.set_waker(waker);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_partial_failure_points_at_undo() {
+        let home = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(home.path()).unwrap();
+        let mut app = App::new(Paths::isolated(&root), Settings::default());
+        let mut j = app.new_journal();
+        j.write_file(&root.join("a.json"), b"1", &app.paths).unwrap();
+        app.changed("edit".into(), j, Err("Stopped after 1 of 2 files: can't write b.json".into()));
+        let notice = app.notice.as_ref().unwrap();
+        assert!(notice.undo && notice.error);
+        assert!(notice.detail.ends_with("Undo takes back what was done."), "{}", notice.detail);
+
+        app.changed("edit".into(), Journal::default(), Err("can't write a.json".into()));
+        assert_eq!(app.notice.as_ref().unwrap().detail, "can't write a.json", "nothing to undo, no hint");
     }
 }

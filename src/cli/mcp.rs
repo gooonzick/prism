@@ -8,7 +8,7 @@ use clap::{ArgGroup, Subcommand};
 use serde_json::{Value, json};
 
 use super::skills::Apply;
-use super::{Ctx, Exit, Out, usage};
+use super::{Ctx, Exit, Out, failed, usage};
 use crate::agents::{Paths, Scope, tilde};
 use crate::fsops::Journal;
 use crate::mcp::agents::{MCP_AGENTS, index_of};
@@ -59,7 +59,8 @@ pub enum Cmd {
         name: String,
         #[arg(long, value_name = "AGENT", num_args = 1.., required = true)]
         to: Vec<String>,
-        /// Copy this agent's version (default: the one most agents have).
+        /// Copy this agent's version. Needed when the copies differ; otherwise the shared
+        /// definition is copied.
         #[arg(long, value_name = "AGENT")]
         from: Option<String>,
         #[command(flatten)]
@@ -183,10 +184,7 @@ pub fn run(cmd: Cmd, ctx: &mut Ctx, scope: &Scope, out: &mut Out, err: &mut dyn 
     let inv = scan::scan(scope, &ctx.paths);
     match plan::plan(&inv, &request, &ctx.paths) {
         Ok(plan) => drive(ctx, plan, label, apply, immediate, out, err),
-        Err(e) => {
-            let _ = writeln!(err, "{e}");
-            Exit::Failed
-        }
+        Err(e) => failed(out, err, &e),
     }
 }
 
@@ -290,7 +288,9 @@ fn drive(ctx: &Ctx, plan: McpPlan, label: String, a: Apply, immediate: bool, out
     }
     if plan.is_empty() {
         out.emit(plan_text(&plan, &lines, &id), plan_json(&plan, &lines, &id, false));
-        return if immediate { Exit::Failed } else { Exit::Ok };
+        // An add that every agent already has is done; one an agent couldn't take failed.
+        let failed = immediate && plan.skipped.iter().any(|(a, _)| !plan.present.contains(a));
+        return if failed { Exit::Failed } else { Exit::Ok };
     }
     // Backups of the last change go only once the plan still matches the files.
     let mut journal = Journal::default();
@@ -298,7 +298,8 @@ fn drive(ctx: &Ctx, plan: McpPlan, label: String, a: Apply, immediate: bool, out
         store::begin_change(&ctx.paths);
         plan::apply(&plan, &ctx.paths, &mut journal)
     });
-    if !journal.is_empty() {
+    let undoable = !journal.is_empty();
+    if undoable {
         store::save_last_change(&ctx.paths, Some(&LastChange { label, journal }));
     }
     match result {
@@ -316,7 +317,7 @@ fn drive(ctx: &Ctx, plan: McpPlan, label: String, a: Apply, immediate: bool, out
                 v["error"] = json!(e);
                 out.emit("", v);
             } else {
-                let _ = writeln!(err, "Stopped after {done} of {} files: {e}", plan.files.len());
+                let _ = writeln!(err, "Stopped after {done} of {} files: {e}{}", plan.files.len(), super::undo_hint(undoable));
             }
             Exit::Failed
         }

@@ -20,6 +20,31 @@ fn a_folder_is_not_a_subcommand() {
 }
 
 #[test]
+fn help_and_version_route_to_the_cli() {
+    // Clap answers these before any settings or home are read.
+    for args in [&["--help"][..], &["-h"], &["help"], &["--version"], &["-V"], &["help", "mcp"]] {
+        let args: Vec<std::ffi::OsString> = args.iter().map(|a| a.into()).collect();
+        assert_eq!(run(args.clone()), Some(0), "{args:?}");
+    }
+}
+
+#[test]
+fn global_flags_before_a_subcommand_route_to_the_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().to_str().unwrap();
+    let with_project = format!("--project={project}");
+    for args in [&["--json", "skills", "--help"][..], &["--project", project, "mcp", "--help"], &[&with_project, "--json", "mcp", "list", "--help"]] {
+        let argv: Vec<std::ffi::OsString> = args.iter().map(|a| a.into()).collect();
+        assert_eq!(run(argv), Some(0), "{args:?}");
+    }
+    // The window's own flags, a folder, or global flags with no subcommand still open the window.
+    for args in [&["--json"][..], &["--project", project], &["--snap", "x.png", "skills"], &[project, "--json"]] {
+        let argv: Vec<std::ffi::OsString> = args.iter().map(|a| a.into()).collect();
+        assert_eq!(run(argv), None, "{args:?}");
+    }
+}
+
+#[test]
 fn agents_lists_detected_agents_as_json() {
     let home = tempfile::tempdir().unwrap();
     std::fs::create_dir(home.path().join(".claude")).unwrap();
@@ -343,6 +368,35 @@ fn plan_id_without_apply_is_usage() {
 }
 
 #[test]
+fn a_refused_skills_plan_prints_json_error() {
+    let home = tempfile::tempdir().unwrap();
+    let (code, out, err) = go(&["skills", "sync", "nosuch", "--json"], &mut unsynced(home.path()));
+    assert_eq!(code, 1);
+    assert!(err.contains("no skill named nosuch"), "{err}");
+    assert!(json(&out)["error"].as_str().unwrap().contains("no skill named nosuch"), "{out}");
+}
+
+#[test]
+fn a_partial_apply_points_at_undo() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    write_skill(&h.join(".claude/skills"), "a", "d");
+    write_skill(&h.join(".codex/skills"), "b", "d");
+    let mut c = ctx(h);
+    let locked = h.join(".codex/skills");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let (code, _, err) = go(&["skills", "remove", "a", "b", "--apply"], &mut c);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(code, 1);
+    assert!(err.contains("Stopped after 1 of 2"), "{err}");
+    assert!(err.contains("prism undo"), "{err}");
+}
+
+#[test]
 fn remove_needs_apply() {
     let home = tempfile::tempdir().unwrap();
     let mut c = unsynced(home.path());
@@ -535,6 +589,15 @@ fn install_bad_source_is_usage_error() {
     let home = tempfile::tempdir().unwrap();
     let (code, out, err) = go(&["skills", "install", "not a source!"], &mut ctx(home.path()));
     // Exit 2 and not 1: a runner was never looked for, let alone started.
+    assert_eq!(code, 2, "{out}{err}");
+    assert!(err.contains("not a source!"), "{err}");
+}
+
+#[test]
+fn repo_bad_source_is_usage_error() {
+    let home = tempfile::tempdir().unwrap();
+    let (code, out, err) = go(&["skills", "repo", "not a source!"], &mut ctx(home.path()));
+    // Rejected as the window rejects it, before any runner is looked for.
     assert_eq!(code, 2, "{out}{err}");
     assert!(err.contains("not a source!"), "{err}");
 }
@@ -898,6 +961,38 @@ fn remove_edit_and_merge_apply_and_label_the_change() {
     assert!(!std::fs::read_to_string(home.path().join(".codex/config.toml")).unwrap().contains("mcp_servers.gl"));
     let (_, undo, _) = go(&["undo"], &mut c);
     assert!(undo.contains("remove gl"), "{undo}");
+}
+
+#[test]
+fn a_refused_mcp_plan_prints_json_error() {
+    let home = empty_mcp_home();
+    let (code, out, err) = go(&["mcp", "remove", "nosuch", "--json"], &mut ctx(home.path()));
+    assert_eq!(code, 1);
+    assert!(err.contains("no server nosuch"), "{err}");
+    assert_eq!(json(&out)["error"], "no server nosuch");
+}
+
+#[test]
+fn adding_a_server_every_agent_has_is_nothing_to_do() {
+    let home = empty_mcp_home();
+    let mut c = ctx(home.path());
+    let add = ["mcp", "add", "plata", "--command", "npx", "--to", "cursor", "codex"];
+    assert_eq!(go(&add, &mut c).0, 0);
+    let (code, out, err) = go(&add, &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.starts_with("Nothing to do"), "{out}");
+    // An agent that isn't installed is a real skip: the add failed.
+    let (code, out, _) = go(&["mcp", "add", "plata", "--command", "npx", "--to", "cursor", "gemini"], &mut c);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("isn't installed"), "{out}");
+}
+
+#[test]
+fn copy_help_says_when_from_is_needed() {
+    let home = empty_mcp_home();
+    let (code, out, _) = go(&["mcp", "copy", "--help"], &mut ctx(home.path()));
+    assert_eq!(code, 0);
+    assert!(out.contains("Needed when the copies differ"), "{out}");
 }
 
 #[test]
