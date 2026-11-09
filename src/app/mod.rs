@@ -159,6 +159,9 @@ pub struct App {
     pub discovering: bool,
     pub found: Option<Found>,
 
+    /// The menu's "Install Command Line Tool…": (title, detail, failed).
+    pub cli_tool: Latest<(String, String, bool)>,
+
     // skills.sh.
     /// The install-scope menu is open.
     pub scope_menu: bool,
@@ -225,6 +228,7 @@ impl App {
             discover: Latest::default(),
             discovering: false,
             found: None,
+            cli_tool: Latest::default(),
             scope_menu: false,
             query: TextEdit::new(""),
             search: Latest::default().debounce(Duration::from_millis(250)),
@@ -251,7 +255,7 @@ impl App {
     /// Starts the background work a window needs: answers wake it, and the scope's folders
     /// are watched. Tests never call this, so they touch neither the network nor FSEvents.
     pub fn set_waker(&mut self, waker: Waker) {
-        for w in [&self.search as &dyn SetWaker, &self.remote_fetch, &self.install, &self.update_check, &self.update_run, &self.discover, &self.repo_fetch] {
+        for w in [&self.search as &dyn SetWaker, &self.remote_fetch, &self.install, &self.update_check, &self.update_run, &self.discover, &self.repo_fetch, &self.cli_tool] {
             w.set(waker.clone());
         }
         self.waker = Some(waker);
@@ -301,7 +305,29 @@ impl App {
             self.land_repo(source, result);
             changed = true;
         }
+        if let Some((title, detail, failed)) = self.cli_tool.take() {
+            self.notify(title, detail, failed);
+            changed = true;
+        }
         changed
+    }
+
+    /// The first half of `prism setup`, off the main thread: it asks the login shell for its
+    /// `PATH`, since an app opened from the Finder doesn't get the one with `~/.local/bin`.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn install_cli_tool(&mut self) {
+        let paths = self.paths.clone();
+        self.cli_tool.request((), move |()| {
+            use crate::cli::setup;
+            let path = setup::login_path().or_else(|| std::env::var_os("PATH"));
+            let r = setup::cli_part(&paths.home, path.as_deref());
+            let at = r.path.as_deref().map(|p| crate::agents::tilde(p, &paths)).unwrap_or_default();
+            match r.status {
+                setup::Status::Unchanged => ("The command line tool is installed".into(), at, false),
+                s if s.ok() => ("Installed the command line tool".into(), at, false),
+                _ => ("Command line tool not installed".into(), r.message, true),
+            }
+        });
     }
 
     // Scopes and projects.

@@ -3,7 +3,7 @@ use super::*;
 fn ctx(home: &std::path::Path) -> Ctx {
     let paths = Paths::isolated(home);
     let settings = Settings::load_from(&paths);
-    Ctx { paths, settings, stdin: None }
+    Ctx { paths, settings, stdin: None, path_var: None }
 }
 
 fn go(args: &[&str], ctx: &mut Ctx) -> (i32, String, String) {
@@ -1093,4 +1093,146 @@ fn a_mixed_row_is_reported_unprefixed_in_both_modes() {
         assert!(!gl["detail"].as_str().unwrap().starts_with("global: "), "{gl}");
         assert_eq!(gl["scope"], "~/app");
     }
+}
+
+/// A home with Claude Code and Codex installed and `~/.local/bin` on `PATH`.
+fn setup_home(h: &std::path::Path) -> Ctx {
+    std::fs::create_dir_all(h.join(".claude")).unwrap();
+    std::fs::create_dir_all(h.join(".codex")).unwrap();
+    let mut c = ctx(h);
+    c.path_var = Some(std::env::join_paths([h.join(".local/bin"), "/usr/bin".into()]).unwrap());
+    c
+}
+
+fn this_binary() -> std::path::PathBuf {
+    std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap()
+}
+
+fn installed_skill(h: &std::path::Path) -> String {
+    std::fs::read_to_string(h.join(".agents/skills/prism/SKILL.md")).unwrap()
+}
+
+#[test]
+fn setup_installs_skill_and_links_it() {
+    let home = tempfile::tempdir().unwrap();
+    let h = &std::fs::canonicalize(home.path()).unwrap();
+    let mut c = setup_home(h);
+
+    let (code, out, err) = go(&["setup", "--json"], &mut c);
+    let v = json(&out);
+    assert_eq!(v["skill"]["status"], "installed", "{out}{err}");
+    assert_eq!(v["skill"]["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(v["skill"]["linked"], 2);
+    let text = installed_skill(h);
+    let m = crate::skill::parse(&text);
+    assert_eq!(m.name.as_deref(), Some("prism"));
+    assert_eq!(crate::skill::metadata(&text, "prism-version").as_deref(), Some(env!("CARGO_PKG_VERSION")));
+    for agent in [".claude/skills/prism", ".codex/skills/prism"] {
+        assert!(std::fs::symlink_metadata(h.join(agent)).unwrap().file_type().is_symlink(), "{agent}");
+        assert_eq!(std::fs::canonicalize(h.join(agent)).unwrap(), h.join(".agents/skills/prism"));
+    }
+    assert_eq!(store::load_last_change(&c.paths).unwrap().label, "install prism skill");
+
+    let link = h.join(".local/bin/prism");
+    if cfg!(target_os = "macos") {
+        assert_eq!(code, 0, "{out}{err}");
+        assert_eq!(v["cli"]["status"], "installed");
+        assert_eq!(v["cli"]["path"], link.display().to_string());
+        assert_eq!(std::fs::read_link(&link).unwrap(), this_binary());
+    } else {
+        // Linux only checks: the tarball's installer puts prism on PATH, here nothing did.
+        assert_eq!(code, 1, "{out}");
+        assert_eq!(v["cli"]["status"], "failed");
+        assert!(std::fs::symlink_metadata(&link).is_err());
+    }
+
+    // Again: nothing left to do, and the last change is still the install.
+    let (_, out, _) = go(&["setup", "--json"], &mut c);
+    let v = json(&out);
+    assert_eq!(v["skill"]["status"], "unchanged", "{out}");
+    assert_eq!(v["skill"]["linked"], 0);
+    if cfg!(target_os = "macos") {
+        assert_eq!(v["cli"]["status"], "unchanged");
+    }
+    assert_eq!(store::load_last_change(&c.paths).unwrap().label, "install prism skill");
+
+    // Undo takes the links back; the skill stays in .agents.
+    assert_eq!(go(&["undo"], &mut c).0, 0);
+    assert!(std::fs::symlink_metadata(h.join(".claude/skills/prism")).is_err());
+    assert!(h.join(".agents/skills/prism/SKILL.md").is_file());
+}
+
+#[test]
+fn setup_upgrades_older_skill_only() {
+    let ours = env!("CARGO_PKG_VERSION");
+    // (installed SKILL.md, expected status, rewritten)
+    let cases = [
+        ("---\nname: prism\ndescription: old\nmetadata:\n  prism-version: \"0.0.1\"\n---\nold\n", "updated", true),
+        ("---\nname: prism\ndescription: old\nmetadata:\n  prism-version: not-a-version\n---\nold\n", "updated", true),
+        ("---\nname: prism\ndescription: new\nmetadata:\n  prism-version: \"999.0.0\"\n---\nnewer\n", "unchanged", false),
+        ("---\nname: prism\ndescription: mine\n---\nmy own prism skill\n", "skipped", false),
+        ("---\nname: prisma\ndescription: theirs\nmetadata:\n  prism-version: \"0.0.1\"\n---\nnot ours\n", "skipped", false),
+    ];
+    for (before, status, rewritten) in cases {
+        let home = tempfile::tempdir().unwrap();
+        let h = &std::fs::canonicalize(home.path()).unwrap();
+        let mut c = setup_home(h);
+        std::fs::create_dir_all(h.join(".agents/skills/prism")).unwrap();
+        std::fs::write(h.join(".agents/skills/prism/SKILL.md"), before).unwrap();
+
+        let (code, out, _) = go(&["setup", "--json"], &mut c);
+        let v = json(&out);
+        assert_eq!(v["skill"]["status"], status, "{before}\n{out}");
+        let after = installed_skill(h);
+        if rewritten {
+            assert_eq!(crate::skill::metadata(&after, "prism-version").as_deref(), Some(ours), "{before}");
+        } else {
+            assert_eq!(after, before);
+        }
+        if status == "skipped" {
+            // Someone else's skill: not linked anywhere, and setup says it didn't finish.
+            assert_eq!(code, 1, "{out}");
+            assert!(v["skill"]["message"].as_str().unwrap().contains("prism"), "{out}");
+            assert!(std::fs::symlink_metadata(h.join(".claude/skills/prism")).is_err());
+        } else {
+            assert!(h.join(".claude/skills/prism").exists(), "{before}");
+        }
+    }
+}
+
+#[test]
+fn setup_reports_path_problem_without_failing_skill_part() {
+    let home = tempfile::tempdir().unwrap();
+    let h = &std::fs::canonicalize(home.path()).unwrap();
+    let mut c = setup_home(h);
+    // Someone else's `prism` program sits where the link would go.
+    let theirs = h.join(".local/bin/prism");
+    std::fs::create_dir_all(theirs.parent().unwrap()).unwrap();
+    std::fs::write(&theirs, "#!/bin/sh\n").unwrap();
+
+    let (code, out, _) = go(&["setup", "--json"], &mut c);
+    assert_eq!(code, 1, "{out}");
+    let v = json(&out);
+    assert_eq!(v["cli"]["status"], "failed");
+    let message = v["cli"]["message"].as_str().unwrap();
+    assert!(message.contains(&theirs.display().to_string()), "{message}");
+    assert_eq!(std::fs::read_to_string(&theirs).unwrap(), "#!/bin/sh\n", "left alone");
+    assert_eq!(v["skill"]["status"], "installed");
+    assert!(h.join(".claude/skills/prism/SKILL.md").is_file());
+
+    // The same, for people.
+    let (code, out, err) = go(&["setup"], &mut c);
+    assert_eq!(code, 1);
+    assert!(format!("{out}{err}").contains(&theirs.display().to_string()), "{out}{err}");
+}
+
+#[test]
+fn setup_works_on_the_global_setup_only() {
+    let home = tempfile::tempdir().unwrap();
+    let h = &std::fs::canonicalize(home.path()).unwrap();
+    let mut c = setup_home(h);
+    let (code, _, err) = go(&["setup", "--project", &h.display().to_string()], &mut c);
+    assert_eq!(code, 2);
+    assert!(err.contains("global"), "{err}");
+    assert!(!h.join(".agents/skills/prism").exists());
 }

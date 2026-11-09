@@ -544,7 +544,7 @@ fn window_picks_up_a_cli_change() {
     std::thread::sleep(std::time::Duration::from_millis(300));
 
     let project = h.project_dir().display().to_string();
-    let mut ctx = crate::cli::Ctx { paths: h.rt.state.paths.clone(), settings: h.rt.state.settings.clone(), stdin: None };
+    let mut ctx = crate::cli::Ctx { paths: h.rt.state.paths.clone(), settings: h.rt.state.settings.clone(), stdin: None, path_var: None };
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let args = ["mcp", "add", "fresh", "--command", "fresh-mcp", "--to", "cursor", "--project", &project];
     let code = crate::cli::run_with(&args, &mut ctx, &mut out, &mut err);

@@ -73,6 +73,22 @@ fn unquote(v: &str) -> String {
     v.to_string()
 }
 
+/// A value under the frontmatter's `metadata:` map (string keys and values, as the skills
+/// format has it), like `metadata.prism-version`.
+pub fn metadata(src: &str, key: &str) -> Option<String> {
+    let mut lines = src.strip_prefix('\u{feff}').unwrap_or(src).lines();
+    if lines.next().map(str::trim_end) != Some("---") {
+        return None;
+    }
+    let front: Vec<&str> = lines.take_while(|l| l.trim_end() != "---").collect();
+    let start = front.iter().position(|l| l.trim_end() == "metadata:")?;
+    let prefix = format!("{key}:");
+    front[start + 1..]
+        .iter()
+        .take_while(|l| l.is_empty() || l.starts_with(' ') || l.starts_with('\t'))
+        .find_map(|l| l.trim().strip_prefix(&prefix).map(|v| unquote(v.trim())))
+}
+
 /// Skill names as agents accept them: lowercase letters, digits and single hyphens.
 pub fn valid_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
@@ -148,6 +164,16 @@ mod tests {
         assert_eq!(m.description.as_deref(), Some("Use when testing."));
         let m = parse("---\ndescription: \"Say \\\"hi\\\"\"\n---\n");
         assert_eq!(m.description.as_deref(), Some("Say \"hi\""));
+    }
+
+    #[test]
+    fn reads_metadata_values() {
+        let src = "---\nname: prism\nmetadata:\n  author: me\n  prism-version: \"1.2.3\"\nlicense: MIT\n---\nversion: 9\n";
+        assert_eq!(metadata(src, "prism-version").as_deref(), Some("1.2.3"));
+        assert_eq!(metadata(src, "author").as_deref(), Some("me"));
+        assert_eq!(metadata(src, "license"), None, "top-level keys are not metadata");
+        assert_eq!(metadata("---\nname: x\nprism-version: 1\n---\n", "prism-version"), None);
+        assert_eq!(metadata("# no frontmatter\nmetadata:\n  a: b\n", "a"), None);
     }
 
     #[test]

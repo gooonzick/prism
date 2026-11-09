@@ -36,6 +36,12 @@ fn setup(s: &mut App, waker: Waker) {
     s.set_waker(waker);
 }
 
+/// The app menu's "Install Command Line Tool…".
+#[cfg(target_os = "macos")]
+fn install_cli_tool(s: &mut App, _: &mut Tx) {
+    s.install_cli_tool();
+}
+
 /// How long a notice stays up.
 const NOTICE_SECS: f64 = 5.0;
 
@@ -169,5 +175,9 @@ fn main() {
         scenes: SCENES,
         ..AppSpec::new("Prism", (1180.0, 760.0), init, ui::view)
     };
-    rune::App::new(spec).chrome(ui::chrome()).run();
+    let app = rune::App::new(spec).chrome(ui::chrome());
+    // Native menus are macOS only; on Linux the tarball's installer puts prism on PATH.
+    #[cfg(target_os = "macos")]
+    let app = app.menu_item(rune::MenuItem::new("Install Command Line Tool…", install_cli_tool));
+    app.run();
 }

@@ -14,6 +14,7 @@ use crate::store::{self, Settings};
 mod doctor;
 mod mcp;
 mod projects;
+pub mod setup;
 mod skills;
 #[cfg(test)]
 mod tests;
@@ -34,13 +35,15 @@ pub struct Ctx {
     pub settings: Settings,
     /// Where `K=-` values come from; `None` is the process's stdin. Tests feed their own.
     pub stdin: Option<Box<dyn Read>>,
+    /// `$PATH`, for `setup` to find where `prism` goes. Tests set their own.
+    pub path_var: Option<OsString>,
 }
 
 impl Ctx {
     fn from_env() -> Ctx {
         let paths = Paths::from_env();
         let settings = Settings::load_from(&paths);
-        Ctx { paths, settings, stdin: None }
+        Ctx { paths, settings, stdin: None, path_var: std::env::var_os("PATH") }
     }
 
     /// The scope `--project` names (any folder, registered or not), else the global one.
@@ -129,6 +132,8 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
+    /// Put `prism` on PATH and install the prism skill for agents.
+    Setup,
 }
 
 /// `None` when `args[0]` isn't a subcommand, so the caller opens the window.
@@ -174,6 +179,8 @@ pub fn run_with(args: &[&str], ctx: &mut Ctx, out: &mut dyn Write, err: &mut dyn
         },
         Command::Projects { command } => projects::run(command, ctx, &mut out, err),
         Command::Targets { command } => projects::run_targets(command, ctx, &mut out, err),
+        Command::Setup if cli.global.project.is_some() => usage(err, "setup works on the global setup; drop --project"),
+        Command::Setup => setup::run(ctx, &mut out),
     };
     exit as i32
 }
