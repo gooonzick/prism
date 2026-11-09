@@ -2,10 +2,8 @@
 
 use super::{App, Install, Page};
 use crate::agents::{AGENTS, CANONICAL, Scope};
-use crate::fsops::Journal;
 use crate::remote::{self, RemoteSkill};
-use crate::scan;
-use crate::sync::{self, Action};
+use crate::sync;
 
 /// A skill in a repository listing: name, description, ticked.
 pub type RepoSkill = (String, String, bool);
@@ -128,7 +126,7 @@ impl App {
             self.notify(format!("Installing {} failed", job.label), "The log is in the details pane".into(), true);
             return;
         }
-        let detail = match self.link_installed(&job.scope, &skills) {
+        let detail = match sync::link_installed(&job.scope, &self.paths, &self.targets(), &skills) {
             Ok(n) => format!("Into {} · {} link{}", self.scope_label(&job.scope), n, if n == 1 { "" } else { "s" }),
             Err(e) => e,
         };
@@ -137,20 +135,6 @@ impl App {
             self.rescan();
         }
         self.refresh_stats();
-    }
-
-    /// Links freshly installed skills (all of the scope's when `skills` is empty) into the
-    /// sync targets. Returns how many links it made.
-    fn link_installed(&mut self, scope: &Scope, skills: &[String]) -> Result<usize, String> {
-        let inv = scan::scan(scope, &self.paths);
-        let names: Vec<String> = if skills.is_empty() || skills.iter().any(|s| s == "*") {
-            inv.skills.iter().filter(|s| s.canonical().present()).map(|s| s.name.clone()).collect()
-        } else {
-            skills.to_vec()
-        };
-        let plan = sync::plan_many(&inv, &names, &self.targets(), &self.paths);
-        let links: Vec<Action> = plan.actions.into_iter().filter(|a| matches!(a, Action::Link { .. } | Action::Replace { .. })).collect();
-        sync::apply(scope, &self.paths, &links, &mut Journal::default()).map_err(|(_, e)| e)
     }
 
     // Updates.

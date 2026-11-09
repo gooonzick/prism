@@ -207,6 +207,21 @@ fn apply_one(scope: &Scope, paths: &Paths, action: &Action, j: &mut Journal) -> 
     }
 }
 
+/// Links freshly installed skills (all of the scope's when `skills` is empty or `*`) into
+/// `targets`. Installs are not undoable, so the journal is thrown away. Returns how many
+/// links it made.
+pub fn link_installed(scope: &Scope, paths: &Paths, targets: &[usize], skills: &[String]) -> Result<usize, String> {
+    let inv = crate::scan::scan(scope, paths);
+    let names: Vec<String> = if skills.is_empty() || skills.iter().any(|s| s == "*") {
+        inv.skills.iter().filter(|s| s.canonical().present()).map(|s| s.name.clone()).collect()
+    } else {
+        skills.to_vec()
+    };
+    let plan = plan_many(&inv, &names, targets, paths);
+    let links: Vec<Action> = plan.actions.into_iter().filter(|a| matches!(a, Action::Link { .. } | Action::Replace { .. })).collect();
+    apply(scope, paths, &links, &mut Journal::default()).map_err(|(_, e)| e)
+}
+
 /// Links `skill` into `agent`, moving it into `.agents` first if it isn't there yet.
 pub fn link(inv: &Inventory, paths: &Paths, skill: &str, agent: usize, j: &mut Journal) -> Result<(), String> {
     let plan = plan_one(inv, skill, &[agent], paths);

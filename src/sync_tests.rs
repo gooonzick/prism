@@ -205,3 +205,16 @@ fn copy_to_another_scope_lands_in_its_agents_and_links() {
     assert_eq!(fs::read_link(project.join(".claude/skills/alpha")).unwrap(), PathBuf::from("../../.agents/skills/alpha"));
     assert!(copy_to(&f.inv(), &f.paths, "alpha", &dest, &[], &mut Journal::default()).is_err(), "an existing copy is kept");
 }
+
+#[test]
+fn link_installed_links_into_targets_only() {
+    let fx = Fixture::new();
+    fx.skill("agents", "fresh", "x");
+    let claude = index_of("claude").unwrap();
+    let n = link_installed(&Scope::Global, &fx.paths, &[claude], &["fresh".to_string()]).unwrap();
+    assert_eq!(n, 1);
+    assert!(fs::symlink_metadata(fx.dir("claude").join("fresh")).unwrap().file_type().is_symlink());
+    assert!(fs::symlink_metadata(fx.dir("codex").join("fresh")).is_err());
+    // `*` means every skill in the canonical store; nothing is left to link now.
+    assert_eq!(link_installed(&Scope::Global, &fx.paths, &[claude], &["*".to_string()]).unwrap(), 0);
+}

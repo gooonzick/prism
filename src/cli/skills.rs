@@ -12,6 +12,7 @@ use crate::agents::{self, AGENTS, CANONICAL, Scope};
 use crate::fsops::Journal;
 use crate::planid::{plan_id, tree_hash};
 use crate::scan::{self, Inventory, Placement};
+use crate::remote;
 use crate::skill;
 use crate::store::{self, LastChange};
 use crate::sync::{self, Action, Conflict, label};
@@ -84,6 +85,25 @@ pub enum Cmd {
         #[command(flatten)]
         apply: Apply,
     },
+    /// Search skills.sh.
+    Search { query: String },
+    /// List the skills in a repository.
+    Repo { source: String },
+    /// Install from skills.sh and link into the targets (acts at once).
+    Install {
+        /// `owner/repo`, `owner/repo@skill`, or a GitHub or skills.sh URL.
+        source: String,
+        /// Install only these skills (default: all).
+        #[arg(long, value_name = "NAME", num_args = 1..)]
+        skill: Vec<String>,
+        /// Link into these agents instead of the targets.
+        #[arg(long, value_name = "AGENT", num_args = 1..)]
+        to: Vec<String>,
+    },
+    /// List the skills that have an update.
+    Updates,
+    /// Update skills from their sources (default: every one with an update).
+    Update { names: Vec<String> },
     /// Create a skill in .agents and link it into the targets (acts at once).
     New {
         name: String,
@@ -237,6 +257,18 @@ fn drive(ctx: &Ctx, mut plan: Planned, a: Apply, out: &mut Out, err: &mut dyn Wr
 }
 
 pub fn run(cmd: Cmd, ctx: &Ctx, scope: &Scope, out: &mut Out, err: &mut dyn Write) -> Exit {
+    // The skills.sh commands work on the CLI's own output, not on the inventory.
+    match cmd {
+        Cmd::Search { query } => search(&query, out, err),
+        Cmd::Repo { source } => repo(&source, out, err),
+        Cmd::Install { source, skill, to } => install(ctx, scope, &source, skill, to, out, err),
+        Cmd::Updates => updates(ctx, scope, out, err),
+        Cmd::Update { names } => update(ctx, scope, names, out, err),
+        cmd => run_local(cmd, ctx, scope, out, err),
+    }
+}
+
+fn run_local(cmd: Cmd, ctx: &Ctx, scope: &Scope, out: &mut Out, err: &mut dyn Write) -> Exit {
     let inv = scan::scan(scope, &ctx.paths);
     match cmd {
         Cmd::List => list(ctx, &inv, out),
@@ -286,6 +318,7 @@ pub fn run(cmd: Cmd, ctx: &Ctx, scope: &Scope, out: &mut Out, err: &mut dyn Writ
             }
             copy(ctx, scope, &inv, names, dest, apply, out, err)
         }
+        Cmd::Search { .. } | Cmd::Repo { .. } | Cmd::Install { .. } | Cmd::Updates | Cmd::Update { .. } => unreachable!("routed in run"),
         Cmd::CleanBroken { apply } => {
             let broken = sync::broken_links(&inv);
             let plan = Planned {
@@ -453,4 +486,93 @@ fn placement_label(p: &Placement) -> &'static str {
 
 fn placements(ps: &[Placement]) -> Value {
     AGENTS.iter().zip(ps).map(|(a, p)| (a.id.to_string(), Value::from(placement_label(p)))).collect::<serde_json::Map<_, _>>().into()
+}
+
+/// A failed `remote` call: the message on stderr, and in JSON mode on stdout too.
+fn failed(out: &mut Out, err: &mut dyn Write, msg: &str) -> Exit {
+    let msg = msg.trim();
+    let _ = writeln!(err, "{msg}");
+    if out.json {
+        out.emit("", json!({ "error": msg }));
+    }
+    Exit::Failed
+}
+
+fn search(query: &str, out: &mut Out, err: &mut dyn Write) -> Exit {
+    let found = match remote::search(query) {
+        Ok(f) => f,
+        Err(e) => return failed(out, err, &e),
+    };
+    let text = found.iter().map(|r| format!("{:<44} {:>9} installs", r.id, r.installs)).collect::<Vec<_>>().join("\n");
+    let rows = found.iter().map(|r| json!({ "id": r.id, "source": r.source, "skill": r.skill_id, "name": r.name, "installs": r.installs }));
+    out.emit(if text.is_empty() { "No skills found".to_string() } else { text }, Value::Array(rows.collect()));
+    Exit::Ok
+}
+
+fn repo(source: &str, out: &mut Out, err: &mut dyn Write) -> Exit {
+    let skills = match remote::list_repo(source) {
+        Ok(s) => s,
+        Err(e) => return failed(out, err, &e),
+    };
+    let text = skills.iter().map(|(n, d)| format!("{n:<28} {d}")).collect::<Vec<_>>().join("\n");
+    out.emit(text, Value::Array(skills.iter().map(|(n, d)| json!({ "name": n, "description": d })).collect()));
+    Exit::Ok
+}
+
+/// Installs into `.agents` and links into the targets, as the window does. Like the window,
+/// it does not become the last change.
+fn install(ctx: &Ctx, scope: &Scope, source: &str, mut skills: Vec<String>, to: Vec<String>, out: &mut Out, err: &mut dyn Write) -> Exit {
+    let Some((source, at)) = remote::parse_source(source) else {
+        return usage(err, &format!("{source} is not a skills source; use owner/repo, owner/repo@skill or a URL"));
+    };
+    let targets = if to.is_empty() { Ok(ctx.targets()) } else { to.iter().map(|t| agent_index(t)).collect::<Result<Vec<_>, _>>() };
+    let targets = match targets {
+        Ok(t) => t,
+        Err(e) => return usage(err, &e),
+    };
+    skills.extend(at);
+    skills.dedup();
+    let log = match remote::install(&source, &skills, scope, &ctx.paths) {
+        Ok(l) => l,
+        Err(e) => return failed(out, err, &e),
+    };
+    let installed = if skills.is_empty() { vec!["*".to_string()] } else { skills.clone() };
+    let linked = sync::link_installed(scope, &ctx.paths, &targets, &installed);
+    let (n, note) = match &linked {
+        Ok(n) => (*n, String::new()),
+        Err(e) => (0, format!("\nCould not link it: {e}")),
+    };
+    out.emit(format!("Installed {} from {source} into {} ({}){note}", installed.join(", "), scope.title(), sync::plural(n, "link", "links")), json!({ "installed": installed, "linked": n, "log": log }));
+    if linked.is_ok() { Exit::Ok } else { Exit::Failed }
+}
+
+fn updates(ctx: &Ctx, scope: &Scope, out: &mut Out, err: &mut dyn Write) -> Exit {
+    match remote::check_updates(scope, &ctx.paths) {
+        Ok(names) => {
+            let text = if names.is_empty() { "Everything is up to date".to_string() } else { names.join("\n") };
+            out.emit(text, json!({ "updates": names }));
+            Exit::Ok
+        }
+        Err(e) => failed(out, err, &e),
+    }
+}
+
+fn update(ctx: &Ctx, scope: &Scope, mut names: Vec<String>, out: &mut Out, err: &mut dyn Write) -> Exit {
+    if names.is_empty() {
+        names = match remote::check_updates(scope, &ctx.paths) {
+            Ok(n) => n,
+            Err(e) => return failed(out, err, &e),
+        };
+        if names.is_empty() {
+            out.emit("Everything is up to date", json!({ "updated": [], "log": "" }));
+            return Exit::Ok;
+        }
+    }
+    match remote::update(&names, scope, &ctx.paths) {
+        Ok(log) => {
+            out.emit(format!("Updated {}", names.join(", ")), json!({ "updated": names, "log": log }));
+            Exit::Ok
+        }
+        Err(e) => failed(out, err, &e),
+    }
 }

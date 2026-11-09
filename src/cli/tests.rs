@@ -492,3 +492,43 @@ fn changing_targets_changes_the_copy_plan_id() {
     let (code, _, _) = go(&["skills", "copy", "local", "--to-global", "--project", proj.to_str().unwrap(), "--apply", "--plan-id", &before], &mut c);
     assert_eq!(code, 4);
 }
+
+#[test]
+fn install_bad_source_is_usage_error() {
+    let home = tempfile::tempdir().unwrap();
+    let (code, out, err) = go(&["skills", "install", "not a source!"], &mut ctx(home.path()));
+    // Exit 2 and not 1: a runner was never looked for, let alone started.
+    assert_eq!(code, 2, "{out}{err}");
+    assert!(err.contains("not a source!"), "{err}");
+}
+
+#[test]
+fn install_rejects_unknown_target_agent() {
+    let home = tempfile::tempdir().unwrap();
+    let (code, _, err) = go(&["skills", "install", "owner/repo", "--to", "nope"], &mut ctx(home.path()));
+    assert_eq!(code, 2);
+    assert!(err.contains("nope") && err.contains("claude"), "{err}");
+}
+
+#[test]
+#[ignore = "needs network and Node"]
+fn search_finds_find_skills() {
+    let home = tempfile::tempdir().unwrap();
+    let (code, out, err) = go(&["skills", "search", "find-skills", "--json"], &mut ctx(home.path()));
+    assert_eq!(code, 0, "{err}");
+    assert!(json(&out).as_array().unwrap().iter().any(|r| r["skill"] == "find-skills"), "{out}");
+}
+
+#[test]
+#[ignore = "needs network and Node"]
+fn install_links_into_targets() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    std::fs::create_dir_all(h.join(".codex")).unwrap();
+    let mut c = ctx(h);
+    c.settings.targets = Some(vec!["codex".into()]);
+    let (code, out, err) = go(&["skills", "install", "vercel-labs/skills@find-skills", "--json"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(json(&out)["installed"][0], "find-skills");
+    assert!(std::fs::symlink_metadata(h.join(".codex/skills/find-skills")).unwrap().file_type().is_symlink());
+}

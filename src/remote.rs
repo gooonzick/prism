@@ -228,7 +228,8 @@ fn path_with(dir: Option<&Path>) -> std::ffi::OsString {
 /// or a skills.sh URL (`https://skills.sh/owner/repo/skill`).
 pub fn parse_source(input: &str) -> Option<(String, Option<String>)> {
     let s = input.trim().trim_end_matches('/');
-    if s.is_empty() {
+    // No source has spaces; this keeps a typo from reaching the `skills` CLI.
+    if s.is_empty() || s.contains(char::is_whitespace) {
         return None;
     }
     if let Some(rest) = s.strip_prefix("https://skills.sh/").or_else(|| s.strip_prefix("https://www.skills.sh/")) {
@@ -306,6 +307,7 @@ mod tests {
         assert_eq!(p("https://skills.sh/o/r/skill"), Some(("o/r".into(), Some("skill".into()))));
         assert_eq!(p("https://github.com/o/r"), Some(("https://github.com/o/r".into(), None)));
         assert_eq!(p("  "), None);
+        assert_eq!(p("not a source!"), None);
     }
 
     #[test]
