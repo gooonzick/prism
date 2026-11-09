@@ -42,6 +42,7 @@ Prism keeps **one real copy** of each skill in `.agents/skills`, the same place 
   - folders that differ are skipped, never overwritten.
 - **Install from skills.sh.** Search the index, preview `SKILL.md`, list every skill in a repository and pick the ones you want. Installs and updates run through the official `skills` CLI.
 - **Updates.** Prism checks your skills against their sources in the background and updates one, several, or all of them.
+- **MCP servers.** One list of the MCP servers in Claude Code, Claude Desktop, Codex, Cursor, OpenCode, Gemini CLI, Windsurf and Kiro, with the agents that have each one. Prism shows where copies differ, suggests merging servers that are one under two names, and adds, copies, edits or removes a server in several agents' configs at once, leaving the rest of each file as it was. Env and header values stay hidden until you reveal them.
 - **Projects.** Add project folders one by one, or let *Find projects* scan a folder for projects that already have skills. Skills move between scopes with *Copy to*.
 - **Safe by default.** Nothing is deleted outright: replaced folders go to the Trash (the freedesktop trash on Linux, so your file manager can put them back). The last change (a sync, remove, cleanup or copy) can be undone with ⌘Z.
 - **Live.** Prism watches the skill folders, so changes from the terminal, an editor or git show up on their own.
@@ -55,6 +56,12 @@ Prism keeps **one real copy** of each skill in `.agents/skills`, the same place 
   <tr>
     <td align="center">Every sync shows its plan first</td>
     <td align="center">Search and install from skills.sh</td>
+  </tr>
+  <tr>
+    <td colspan="2"><img src="docs/mcp.png" alt="MCP servers in Claude Code, Cursor and Codex, one with copies that differ"></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center">MCP servers across agents, with the differences between copies</td>
   </tr>
 </table>
 
@@ -120,6 +127,37 @@ To run it straight from the terminal, optionally opening a project:
 cargo run --release -- ~/path/to/project
 ```
 
+## Command line
+
+The app is also a command line tool, for you and for your agents. On macOS, choose **Install Command Line Tool…** in the app menu, or run the binary inside the app once:
+
+```bash
+/Applications/Prism.app/Contents/MacOS/prism setup
+```
+
+`prism setup` links `prism` into `~/.local/bin` (or `/usr/local/bin`) and installs the `prism` skill, which tells Claude Code, Codex and the rest how to use it. On Linux the installer already put `prism` on your `PATH`; `setup` checks that and installs the skill.
+
+```bash
+prism skills list                         # every skill and the agents that have it
+prism mcp list                            # every MCP server, with drift and merge hints
+prism doctor --all                        # broken links, invalid skills, servers that differ
+prism mcp add github --command npx --arg -y --arg @modelcontextprotocol/server-github \
+  --env GITHUB_TOKEN=@token.txt --to claude cursor codex
+```
+
+Commands that change or remove something print their plan first and act only with `--apply`. Pass the plan's id back, and Prism stops if anything changed in between:
+
+```bash
+prism skills sync
+# Plan 3f9c2a1b7d40:
+#   - Link pdf into Codex
+# Run again with --apply --plan-id 3f9c2a1b7d40 to do it.
+prism skills sync --apply --plan-id 3f9c2a1b7d40
+prism undo                                # takes back the last change, from here or the app
+```
+
+Add `--json` to any command for output a script or an agent can read. Secrets print as `***` unless you ask for `--show-secrets`; pass them in with `KEY=@file` or `KEY=-` (stdin) to keep them out of your shell history.
+
 ## Keyboard
 
 On Linux, ⌘ is Ctrl.
@@ -152,7 +190,7 @@ Any screen renders without a window, which is handy for checking layout:
 ./target/debug/prism --snap out.png --scene sync --theme dark
 ```
 
-Scenes: `detail`, `sync`, `remove`, `bulk`, `bulk-remove`, `updates`, `copy`, `new-skill`, `browse`, `repo`, `notice`.
+Scenes: `detail`, `sync`, `remove`, `bulk`, `bulk-remove`, `updates`, `copy`, `new-skill`, `browse`, `repo`, `notice`, `mcp`, `mcp-add`, `mcp-copy`.
 
 | Path | What it does |
 | --- | --- |
@@ -161,6 +199,8 @@ Scenes: `detail`, `sync`, `remove`, `bulk`, `bulk-remove`, `updates`, `copy`, `n
 | `src/sync.rs` | sync plans, linking, removing, copying, broken links |
 | `src/fsops.rs` | the change journal behind undo, and the Trash |
 | `src/remote.rs` | skills.sh search, previews from GitHub, the `skills` CLI |
+| `src/mcp/` | MCP servers: each agent's config format, scans, plans and edits |
+| `src/cli/` | the `prism` command line and `prism setup` |
 | `src/app/` | app state and actions |
 | `src/ui/` | the screens, built with rune-kit |
 
