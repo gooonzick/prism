@@ -63,6 +63,12 @@ impl McpInventory {
     }
 }
 
+/// A read error's first line, safe to show. TOML errors go on to quote the offending line of the
+/// file, which may be a secret; the first line is the position.
+pub fn safe_error(message: &str) -> &str {
+    message.lines().next().unwrap_or_default()
+}
+
 /// Every detected agent's servers in `scope`. In a project, an agent's global copy joins the
 /// row unless that agent has its own copy of the name in the project (as each agent resolves
 /// it); a row of global copies only is inherited. Missing config files are skipped; unreadable

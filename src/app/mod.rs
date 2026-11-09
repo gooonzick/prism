@@ -3,6 +3,7 @@
 
 mod discover;
 mod installed;
+mod mcp;
 mod remote;
 mod watch;
 
@@ -17,12 +18,14 @@ use rune_kit::shell::PaneState;
 
 use crate::agents::{self, Paths, Scope};
 use crate::fsops::Journal;
+use crate::mcp::scan::{self as mcp_scan, McpInventory};
 use crate::remote::RemoteSkill;
 use crate::scan::{self, Inventory};
 use crate::store::{self, LastChange, Settings};
 use crate::sync::Plan;
 
 pub use installed::{open_path, reveal_path};
+pub use mcp::McpFilter;
 pub use remote::{RepoListing, UpdateJob};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -31,6 +34,8 @@ pub enum Page {
     Installed,
     /// Searching skills.sh.
     Browse,
+    /// The MCP servers in [`App::scope`].
+    Mcp,
 }
 
 /// Which installed skills the list shows.
@@ -123,6 +128,13 @@ pub struct App {
     /// Names of the global skills, to mark project skills that shadow one.
     pub global_names: HashSet<String>,
 
+    // MCP servers.
+    pub mcp: McpInventory,
+    pub mcp_selected: Option<String>,
+    pub mcp_filter: McpFilter,
+    /// Servers whose values the inspector shows unmasked.
+    pub mcp_revealed: HashSet<String>,
+
     // Watching the scope's folders.
     waker: Option<Waker>,
     watcher: Option<notify::RecommendedWatcher>,
@@ -162,6 +174,7 @@ impl App {
     pub fn new(paths: Paths, settings: Settings) -> App {
         let scope = Scope::Global;
         let inv = scan::scan(&scope, &paths);
+        let mcp = mcp_scan::scan(&scope, &paths);
         let last_change = store::load_last_change(&paths);
         let mut app = App {
             paths,
@@ -188,6 +201,10 @@ impl App {
             last_change,
             stats: HashMap::new(),
             global_names: HashSet::new(),
+            mcp,
+            mcp_selected: None,
+            mcp_filter: McpFilter::All,
+            mcp_revealed: HashSet::new(),
             waker: None,
             watcher: None,
             dirty: Arc::new(AtomicBool::new(false)),
@@ -238,6 +255,11 @@ impl App {
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
         if self.take_dirty() {
+            // Watch first: a file replaced by a rename, or a folder that appeared, needs a new
+            // watch, and the rescan after it sees anything that landed in between.
+            self.watch();
+            // The CLI may have made or undone a change.
+            self.last_change = store::load_last_change(&self.paths);
             self.rescan();
             changed = true;
         }
@@ -276,8 +298,11 @@ impl App {
 
     // Scopes and projects.
 
+    /// Opens `scope` on the page that's open (skills or MCP); from skills.sh, on its skills.
     pub fn open_scope(&mut self, scope: Scope) {
-        self.page = Page::Installed;
+        if self.page == Page::Browse {
+            self.page = Page::Installed;
+        }
         if scope != self.scope {
             self.scope = scope;
             self.selected = None;
@@ -286,6 +311,9 @@ impl App {
             self.anchor = None;
             self.status_filter = Filter::All;
             self.filter = TextEdit::new("");
+            self.mcp_selected = None;
+            self.mcp_filter = McpFilter::All;
+            self.mcp_revealed.clear();
             self.watch();
             self.check_updates_once();
         }
@@ -322,6 +350,7 @@ impl App {
             self.global_names = self.inv.skills.iter().map(|s| s.name.clone()).collect();
         }
         self.load_preview();
+        self.rescan_mcp();
     }
 
     fn stats_of(&self, inv: &Inventory) -> ScopeStats {

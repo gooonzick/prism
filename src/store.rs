@@ -40,7 +40,7 @@ pub struct LastChange {
     pub journal: Journal,
 }
 
-fn last_change_file(paths: &Paths) -> PathBuf {
+pub fn last_change_file(paths: &Paths) -> PathBuf {
     paths.state.join("last-change.json")
 }
 

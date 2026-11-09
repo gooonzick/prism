@@ -104,6 +104,14 @@ static SCENES: &[Scene] = &[
         s.select(&names[0]);
     }),
     ("new-skill", |s| s.open_new_skill()),
+    ("mcp", |s| {
+        s.open_mcp();
+        // A server whose copies differ shows the most: its diff under the copies.
+        let pick = s.mcp.servers.iter().find(|x| !x.diffs.is_empty()).or(s.mcp.servers.first()).map(|x| x.name.clone());
+        if let Some(name) = pick {
+            s.select_mcp(&name);
+        }
+    }),
     ("copy", |s| {
         let names: Vec<String> = s.inv.skills.iter().take(2).map(|x| x.name.clone()).collect();
         s.open_copy(names);

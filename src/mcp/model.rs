@@ -29,6 +29,18 @@ impl EnvValue {
         self.0.iter().all(|p| matches!(p, Part::Text(_)))
     }
 
+    /// As written, secrets and all, with references in one syntax (`${NAME}`, `${NAME:-default}`).
+    pub fn written(&self) -> String {
+        self.0
+            .iter()
+            .map(|p| match p {
+                Part::Text(t) => t.clone(),
+                Part::Var { name, default: None } => format!("${{{name}}}"),
+                Part::Var { name, default: Some(d) } => format!("${{{name}:-{d}}}"),
+            })
+            .collect()
+    }
+
     /// For printing: references stay readable (`${GITLAB_TOKEN}`, `Bearer ${TOKEN}`); any other
     /// text shows as `***`, since a secret can sit around a reference too (`https://u:pw@${HOST}`).
     /// Defaults may be secrets, so they are masked.

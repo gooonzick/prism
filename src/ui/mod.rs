@@ -5,6 +5,7 @@ mod browse;
 mod dialogs;
 mod inspector;
 mod installed;
+mod mcp;
 
 use rune::{Chrome, Color, Cx, El, Icon, KeyEvent, ScrollSpec, Spring, Tx, col, el, row, text};
 use rune_kit::shell::{self, PaneMotion, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView};
@@ -54,6 +55,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     let mut layer = Vec::new();
     let (main, toolbar, inspector) = match s.page {
         Page::Installed => installed::page(s, &k, &mut layer),
+        Page::Mcp => mcp::page(s, &k, &mut layer),
         Page::Browse => browse::page(s, &k, &mut layer),
     };
     dialogs::sync(s, &k, &mut layer);
@@ -88,7 +90,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
 }
 
 fn sidebar(s: &App, k: &Kit) -> El {
-    let installed = s.page == Page::Installed;
+    let installed = s.page != Page::Browse;
     // The badge counts what needs attention: skills not linked into every target.
     let counted = |row: SidebarRow, scope: &Scope| {
         let stats = s.stats.get(scope).copied().unwrap_or_default();
@@ -166,6 +168,53 @@ fn sidebar(s: &App, k: &Kit) -> El {
         .header(browse)
         .section(SidebarSection::new("Projects").key("projects").count(s.settings.projects.len()).rows(projects).row(add).row(find))
         .build(k)
+}
+
+/// The toolbar title for a scope: "Global" or the project folder's name.
+pub fn scope_title(scope: &Scope) -> String {
+    match scope {
+        Scope::Global => "Global".to_string(),
+        Scope::Project(p) => p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned()),
+    }
+}
+
+/// Skills or MCP servers of the open scope, in the toolbar: segments as the kit draws them,
+/// keyed so a test (or a scene) can pick one.
+pub fn page_tabs(s: &App, k: &Kit) -> El {
+    let c = &k.c;
+    let tab = |key: &str, label: &str, on: bool, open: fn(&mut App)| {
+        let seg = row()
+            .key(key.to_string())
+            .role("radio")
+            .label(label.to_string())
+            .focusable(true)
+            .focus_selected(on)
+            .focus_ring(2.0, 1.0, c.border_focus)
+            .h(28.0)
+            .px(12.0)
+            .center()
+            .radius(6.0)
+            .cursor(rune::Cursor::Pointer)
+            .on_press(open)
+            .child(text(label.to_string()).font(rune::TextStyle { line_height: 13.0, ..k.ty.ui }).color(if on { c.text_base } else { c.text_muted }).a11y_hidden());
+        if on {
+            seg.fill(c.bg_base).box_shadow(rune::Shadow { spread: 0.5, color: c.border_strong, ..Default::default() })
+        } else {
+            seg.hover(c.hover)
+        }
+    };
+    row()
+        .key("page-tabs")
+        .role("radiogroup")
+        .label("Show")
+        .focus_group()
+        .h(28.0)
+        .center_y()
+        .radius(6.0)
+        .fill(c.layer_01)
+        .box_shadow(rune::Shadow { spread: 0.5, color: c.border_base, ..Default::default() })
+        .child(tab("tab-skills", "Skills", s.page == Page::Installed, |s| s.open_skills()))
+        .child(tab("tab-mcp", "MCP servers", s.page == Page::Mcp, |s| s.open_mcp()))
 }
 
 /// A pane's content in a vertical scroll view that fills the pane.

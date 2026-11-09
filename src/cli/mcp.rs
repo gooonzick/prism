@@ -14,7 +14,7 @@ use crate::fsops::Journal;
 use crate::mcp::agents::{MCP_AGENTS, index_of};
 use crate::mcp::model::{EnvValue, McpCopy, Part, Place, Server, Transport, masked_args, masked_url};
 use crate::mcp::plan::{self, ClaudeScope, EditChange, McpPlan, Request};
-use crate::mcp::scan::{self, FieldDiff, McpServer, Status};
+use crate::mcp::scan::{self, FieldDiff, McpServer, Status, safe_error};
 use crate::store::{self, LastChange};
 
 #[derive(Subcommand)]
@@ -360,12 +360,6 @@ fn kind(t: &Transport) -> &'static str {
     }
 }
 
-/// A parse error's first line. TOML errors go on to quote the offending line of the file, which
-/// may be a secret; the first line is the position.
-fn safe_error(message: &str) -> &str {
-    message.lines().next().unwrap_or_default()
-}
-
 fn list(ctx: &Ctx, scope: &Scope, out: &mut Out) -> Exit {
     let inv = scan::scan(scope, &ctx.paths);
     let mut human = Vec::new();
@@ -437,19 +431,7 @@ fn place_key(p: &Place) -> &'static str {
 
 /// The text shown for an env or header value.
 fn value(v: &EnvValue, secrets: bool) -> String {
-    if secrets { raw(v) } else { v.masked() }
-}
-
-/// References as written in the model (`${NAME}`, `${NAME:-default}`).
-fn raw(v: &EnvValue) -> String {
-    use crate::mcp::model::Part;
-    v.0.iter()
-        .map(|p| match p {
-            Part::Text(t) => t.clone(),
-            Part::Var { name, default: None } => format!("${{{name}}}"),
-            Part::Var { name, default: Some(d) } => format!("${{{name}:-{d}}}"),
-        })
-        .collect()
+    if secrets { v.written() } else { v.masked() }
 }
 
 fn text(s: &str, secrets: bool) -> String {

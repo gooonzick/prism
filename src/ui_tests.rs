@@ -438,3 +438,127 @@ fn a_new_change_clears_the_backups_of_the_last_one() {
     assert!(!backups("a.json").exists());
     assert!(backups("b.json").exists());
 }
+
+/// Claude Code and Cursor installed, both with the same global `plata` server, whose env holds a
+/// literal token and a reference, and which Claude Code skips in the project; the window opens on the project, as in [`Harness::project`].
+fn mcp_home() -> Harness {
+    let mut h = Harness::project();
+    fs::create_dir_all(h.root.join(".claude")).unwrap();
+    fs::create_dir_all(h.root.join(".cursor")).unwrap();
+    let plata = serde_json::json!({
+        "command": "npx",
+        "args": ["-y", "plata-mcp", "--api-key=fake-arg-secret"],
+        "env": { "PLATA_TOKEN": "fake-env-secret", "PLATA_HOST": "${PLATA_HOST}" }
+    });
+    let project = h.project_dir().display().to_string();
+    let claude = serde_json::json!({
+        "mcpServers": { "plata": plata },
+        "projects": { project: { "mcpServers": {}, "disabledMcpServers": ["plata"] } }
+    });
+    fs::write(h.root.join(".claude.json"), claude.to_string()).unwrap();
+    // The same server in Cursor's syntax for references.
+    let mut cursor = plata.clone();
+    cursor["env"]["PLATA_HOST"] = "${env:PLATA_HOST}".into();
+    fs::write(h.root.join(".cursor/mcp.json"), serde_json::json!({ "mcpServers": { "plata": cursor } }).to_string()).unwrap();
+    h.rescan();
+    h
+}
+
+impl Harness {
+    /// Every text drawn in the window, one per line.
+    fn texts(&self) -> String {
+        self.rt.elements().into_iter().filter_map(|e| e.text).collect::<Vec<_>>().join("\n")
+    }
+}
+
+#[test]
+fn mcp_tab_lists_servers_with_agents() {
+    let mut h = mcp_home();
+    h.click("scope-global");
+    h.click("tab-mcp");
+    assert_eq!(h.rt.state.page, crate::app::Page::Mcp);
+    assert!(h.rt.find("mcp-row-plata").is_some());
+    for agent in ["claude", "cursor"] {
+        assert!(h.rt.find(&format!("mcp-row-plata/agents/agent-{agent}")).is_some(), "{agent} chip");
+    }
+    assert!(h.texts().contains("in sync"), "{}", h.texts());
+
+    // Another scope keeps the MCP page; the skills tab goes back.
+    h.click("project-0");
+    assert_eq!(h.rt.state.page, crate::app::Page::Mcp);
+    assert_eq!(h.rt.state.mcp.scope, Scope::Project(h.project_dir()));
+    h.click("tab-skills");
+    assert_eq!(h.rt.state.page, crate::app::Page::Installed);
+    assert!(h.rt.find("skill-review").is_some());
+}
+
+#[test]
+fn inspector_masks_until_reveal() {
+    let mut h = mcp_home();
+    h.click("scope-global");
+    h.click("tab-mcp");
+    h.click("mcp-row-plata");
+    assert_eq!(h.rt.state.mcp_selected.as_deref(), Some("plata"));
+    let shown = h.texts();
+    assert!(shown.contains("PLATA_TOKEN") && shown.contains("${PLATA_HOST}"), "{shown}");
+    assert!(shown.contains("--api-key=***"), "{shown}");
+    assert!(!shown.contains("fake-env-secret") && !shown.contains("fake-arg-secret"), "{shown}");
+
+    h.click("mcp-reveal");
+    assert!(h.rt.state.mcp_revealed.contains("plata"));
+    let shown = h.texts();
+    assert!(shown.contains("fake-env-secret") && shown.contains("--api-key=fake-arg-secret"), "{shown}");
+    assert!(shown.contains("${PLATA_HOST}"), "references show as written: {shown}");
+
+    h.click("mcp-reveal");
+    assert!(!h.texts().contains("fake-env-secret"));
+}
+
+#[test]
+fn inherited_global_server_shows_in_project() {
+    let mut h = mcp_home();
+    let own = h.project_dir().join(".cursor/mcp.json");
+    fs::create_dir_all(own.parent().unwrap()).unwrap();
+    fs::write(&own, r#"{"mcpServers":{"local-db":{"command":"db-mcp"}}}"#).unwrap();
+    h.rescan();
+    h.click("tab-mcp");
+    assert_eq!(h.rt.state.scope, Scope::Project(h.project_dir()));
+    assert!(h.rt.state.mcp.get("plata").is_some_and(|s| s.inherited));
+    assert!(h.rt.find("mcp-row-plata/tags/global-tag").is_some(), "the inherited row says global");
+    assert!(h.rt.find("mcp-row-plata/tags/disabled-tag").is_some(), "Claude Code skips it here");
+    assert!(h.rt.find("mcp-row-local-db").is_some());
+    assert!(h.rt.find("mcp-row-local-db/tags/global-tag").is_none(), "the project's own server isn't");
+}
+
+#[test]
+fn window_picks_up_a_cli_change() {
+    let mut h = mcp_home();
+    h.click("tab-mcp");
+    let wakes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = wakes.clone();
+    h.rt.update(move |s, _| {
+        s.watch_with(std::sync::Arc::new(move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }))
+    });
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let project = h.project_dir().display().to_string();
+    let mut ctx = crate::cli::Ctx { paths: h.rt.state.paths.clone(), settings: h.rt.state.settings.clone(), stdin: None };
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let args = ["mcp", "add", "fresh", "--command", "fresh-mcp", "--to", "cursor", "--project", &project];
+    let code = crate::cli::run_with(&args, &mut ctx, &mut out, &mut err);
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+
+    let start = std::time::Instant::now();
+    while h.rt.state.mcp.get("fresh").is_none() {
+        assert!(start.elapsed() < std::time::Duration::from_secs(5), "the window never saw the new server");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        h.rt.update(|s, _| {
+            s.poll();
+        });
+    }
+    h.settle();
+    assert!(h.rt.find("mcp-row-fresh").is_some());
+    assert!(h.rt.state.last_change.as_ref().is_some_and(|c| c.label.contains("fresh")), "the CLI's change is the one to undo");
+}
