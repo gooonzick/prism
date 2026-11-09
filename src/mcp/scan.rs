@@ -311,13 +311,15 @@ fn likeness(t: &Transport) -> (Vec<String>, Vec<String>, String) {
 
 fn package<'a>(command: &str, args: &'a [String]) -> Option<(&'a str, &'a [String])> {
     let runner = Path::new(command).file_name()?.to_str()?;
-    let args = match runner {
-        "npx" | "bunx" if args.first().is_some_and(|a| a == "-y" || a == "--yes") => &args[1..],
-        "npx" | "bunx" | "pnpx" => args,
-        _ => return None,
-    };
-    let (package, rest) = args.split_first()?;
-    Some((package, rest))
+    if !matches!(runner, "npx" | "bunx" | "pnpx") {
+        return None;
+    }
+    let skip = args.iter().take_while(|a| matches!(a.as_str(), "-y" | "--yes" | "-q" | "--quiet" | "--no-install")).count();
+    let (package, rest) = args[skip..].split_first()?;
+    // Another flag may take a value (`--registry URL`, `-p X`), so the package is a guess; a path
+    // is a local script, not a package.
+    let path_like = package.starts_with(['/', '~']) || package.starts_with("./") || package.starts_with("../");
+    (!package.starts_with('-') && !path_like).then_some((package.as_str(), rest))
 }
 
 /// Groups of differently named servers sharing a URL or a package, each group once.
@@ -569,6 +571,21 @@ mod tests {
         let reason = &inv.merges[0].reason;
         assert_eq!(reason, "same package figma-developer-mcp (args differ)");
         assert!(!reason.contains("AAA") && !reason.contains("BBB"));
+    }
+
+    #[test]
+    fn package_hints_skip_runner_flags_and_give_up_on_unclear_ones() {
+        let (_dir, paths) = home();
+        let hints = |a: serde_json::Value, b: serde_json::Value| {
+            claude_json(&paths, json!({ "mcpServers": { "a": a } }));
+            cursor_json(&paths, json!({ "mcpServers": { "b": b } }));
+            scan(&Scope::Global, &paths).merges.into_iter().map(|h| h.reason).collect::<Vec<_>>()
+        };
+        let run = |cmd: &str, args: &[&str]| json!({ "command": cmd, "args": args });
+        assert!(hints(run("npx", &["--registry", "https://x", "pkgA"]), run("npx", &["--registry", "https://y", "pkgB"])).is_empty());
+        assert_eq!(hints(run("pnpx", &["-y", "pkg", "--a", "1"]), run("npx", &["pkg", "--a", "2"])), ["same package pkg (args differ)"]);
+        assert!(hints(run("bunx", &["-y", "./local.js", "--x"]), run("bunx", &["-y", "./local.js", "--y"])).is_empty());
+        assert_eq!(hints(run("bunx", &["-y", "./local.js", "--x"]), run("bunx", &["-y", "./local.js", "--x"])), ["same command bunx -y ./local.js --x"]);
     }
 
     #[test]

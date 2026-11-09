@@ -676,3 +676,18 @@ fn mcp_list_in_a_project_marks_inherited_rows() {
     let (_, human, _) = go(&["mcp", "list", "--project", project.path().to_str().unwrap()], &mut ctx(home.path()));
     assert!(human.contains("(global)"));
 }
+
+#[test]
+fn mcp_list_names_an_agent_once_per_row() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(project.path()).unwrap();
+    let entry = r#"{"command":"npx","args":["x-mcp"]}"#;
+    std::fs::write(home.path().join(".claude.json"), format!(r#"{{"projects":{{{}:{{"mcpServers":{{"x":{entry}}}}}}}}}"#, serde_json::to_string(&root).unwrap())).unwrap();
+    std::fs::write(root.join(".mcp.json"), format!(r#"{{"mcpServers":{{"x":{entry}}}}}"#)).unwrap();
+    let (code, out, _) = go(&["mcp", "list", "--project", root.to_str().unwrap()], &mut ctx(home.path()));
+    assert_eq!(code, 0);
+    let line = out.lines().find(|l| l.starts_with('x')).unwrap();
+    assert_eq!(line.matches("claude").count(), 1, "{line}");
+}
