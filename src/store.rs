@@ -19,13 +19,14 @@ pub struct Settings {
     pub persist: bool,
 }
 
-fn file(paths: &Paths) -> PathBuf {
+/// Where the settings live; the window watches it for the CLI's changes.
+pub fn settings_file(paths: &Paths) -> PathBuf {
     paths.state.join("settings.json")
 }
 
 /// Settings from before the rename to Prism move over on first launch.
 fn migrate(paths: &Paths) {
-    let new = file(paths);
+    let new = settings_file(paths);
     let Some(config) = paths.state.parent() else { return };
     let old = config.join("skills-explorer");
     if !new.exists() && old.join("settings.json").exists() {
@@ -78,7 +79,7 @@ pub fn drop_backups(paths: &Paths) {
 impl Settings {
     pub fn load_from(paths: &Paths) -> Settings {
         migrate(paths);
-        std::fs::read(file(paths)).ok().and_then(|b| serde_json::from_slice(&b).ok()).map(|s: Settings| Settings { persist: true, ..s })
+        std::fs::read(settings_file(paths)).ok().and_then(|b| serde_json::from_slice(&b).ok()).map(|s: Settings| Settings { persist: true, ..s })
             .unwrap_or(Settings { persist: true, ..Settings::default() })
     }
 
@@ -86,10 +87,11 @@ impl Settings {
         if !self.persist {
             return;
         }
-        let f = file(paths);
+        let f = settings_file(paths);
         let _ = std::fs::create_dir_all(f.parent().unwrap());
         if let Ok(json) = serde_json::to_vec_pretty(self) {
-            let _ = std::fs::write(f, json);
+            // Whole or not at all: the other process (window or CLI) may read it any time.
+            let _ = crate::fsops::write_atomic(&f, &json);
         }
     }
 

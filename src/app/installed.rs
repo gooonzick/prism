@@ -267,15 +267,18 @@ impl App {
     }
 
     pub fn toggle_target(&mut self, agent: usize) {
-        let mut t = self.targets();
-        if let Some(i) = t.iter().position(|&a| a == agent) {
-            t.remove(i);
-        } else {
-            t.push(agent);
-            t.sort();
-        }
-        self.settings.targets = Some(t.iter().map(|&a| AGENTS[a].id.to_string()).collect());
-        self.settings.save_to(&self.paths);
+        let paths = self.paths.clone();
+        self.edit_settings(|s| {
+            // From the targets on disk: the CLI may have set them since.
+            let mut t = crate::agents::target_indices(s.targets.as_deref(), &paths);
+            if let Some(i) = t.iter().position(|&a| a == agent) {
+                t.remove(i);
+            } else {
+                t.push(agent);
+                t.sort();
+            }
+            s.targets = Some(t.iter().map(|&a| AGENTS[a].id.to_string()).collect());
+        });
         if self.sync_plan.is_some() {
             self.open_sync_for(self.sync_only.clone());
         }

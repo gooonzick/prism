@@ -1,5 +1,6 @@
 //! Rescanning when something the window shows changes on disk: an agent's skills folder or
-//! MCP config (a CLI install, an editor, git, the agent itself), or Prism's last change (the CLI).
+//! MCP config (a CLI install, an editor, git, the agent itself), or Prism's last change and
+//! settings (the CLI).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -67,7 +68,8 @@ impl App {
         self.watcher = Some(watcher);
     }
 
-    /// The skills folders and the files (MCP configs, the last change) the scope's view reads.
+    /// The skills folders and the files (MCP configs, the last change, the settings) the
+    /// scope's view reads.
     fn watch_targets(&self) -> (Vec<PathBuf>, Vec<PathBuf>) {
         let folders = AGENTS.iter().map(|a| a.dir(&self.scope, &self.paths)).collect();
         let mut scopes = vec![self.scope.clone()];
@@ -86,6 +88,7 @@ impl App {
             }
         }
         files.push(crate::store::last_change_file(&self.paths));
+        files.push(crate::store::settings_file(&self.paths));
         files.sort();
         files.dedup();
         (folders, files)
@@ -180,6 +183,46 @@ mod tests {
         }
         assert!(app.poll());
         assert_eq!(app.last_change.map(|c| c.label).as_deref(), Some("add fresh"));
+    }
+
+    #[test]
+    fn a_project_the_cli_adds_shows_up_and_survives_the_window_forgetting_another() {
+        let home = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(home.path()).unwrap();
+        let paths = Paths::isolated(&root);
+        let (old, new) = (root.join("old-app"), root.join("new-app"));
+        fs::create_dir_all(&old).unwrap();
+        fs::create_dir_all(&new).unwrap();
+        let mut settings = Settings::load_from(&paths);
+        settings.add_project(old.clone());
+        settings.save_to(&paths);
+        let mut app = App::new(paths.clone(), Settings::load_from(&paths));
+        watching(&mut app);
+
+        let mut cli = crate::cli::Ctx { paths: paths.clone(), settings: Settings::load_from(&paths), stdin: None, path_var: None };
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert_eq!(crate::cli::run_with(&["projects", "add", new.to_str().unwrap()], &mut cli, &mut out, &mut err), 0);
+        poll_until(&mut app, "the project the CLI added", |a| a.settings.projects.contains(&new));
+
+        app.forget_project(&old);
+        assert_eq!(Settings::load_from(&paths).projects, [new], "the CLI's project stays, the forgotten one goes");
+    }
+
+    #[test]
+    fn window_settings_changes_keep_what_the_cli_saved_meanwhile() {
+        let home = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(home.path()).unwrap();
+        let paths = Paths::isolated(&root);
+        let (a, b) = (root.join("a"), root.join("b"));
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        let mut app = App::new(paths.clone(), Settings::load_from(&paths));
+        // The CLI saves while the window isn't watching: the window's next change still keeps it.
+        let mut cli = Settings::load_from(&paths);
+        cli.add_project(a.clone());
+        cli.save_to(&paths);
+        app.add_project(b.clone());
+        assert_eq!(Settings::load_from(&paths).projects, [a, b]);
     }
 
     /// Starts watching with a waker that does nothing, then gives the watch time to start.

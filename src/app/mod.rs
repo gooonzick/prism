@@ -270,9 +270,13 @@ impl App {
             // Watch first: a file replaced by a rename, or a folder that appeared, needs a new
             // watch, and the rescan after it sees anything that landed in between.
             self.watch();
-            // The CLI may have made or undone a change.
+            // The CLI may have made or undone a change, or changed the projects or targets.
             self.last_change = store::load_last_change(&self.paths);
+            let settings_changed = self.reload_settings();
             self.rescan();
+            if settings_changed {
+                self.refresh_stats();
+            }
             changed = true;
         }
         if let Some(r) = self.search.take() {
@@ -354,17 +358,35 @@ impl App {
         self.rescan();
     }
 
-    pub fn add_project(&mut self, dir: PathBuf) {
-        if self.settings.add_project(dir.clone()) {
-            self.settings.save_to(&self.paths);
+    /// The settings as on disk, where the CLI may have changed them. Settings built in memory
+    /// (tests) have no disk to come from. True when they changed.
+    fn reload_settings(&mut self) -> bool {
+        if !self.settings.persist {
+            return false;
         }
+        let disk = Settings::load_from(&self.paths);
+        let changed = disk != self.settings;
+        self.settings = disk;
+        changed
+    }
+
+    /// Changes the settings as they are on disk now and saves them, so a change the CLI made
+    /// since the window last looked isn't written over.
+    pub(super) fn edit_settings<R>(&mut self, change: impl FnOnce(&mut Settings) -> R) -> R {
+        let _ = self.reload_settings();
+        let r = change(&mut self.settings);
+        self.settings.save_to(&self.paths);
+        r
+    }
+
+    pub fn add_project(&mut self, dir: PathBuf) {
+        self.edit_settings(|s| s.add_project(dir.clone()));
         self.open_scope(Scope::Project(dir));
         self.refresh_stats();
     }
 
     pub fn forget_project(&mut self, dir: &PathBuf) {
-        self.settings.projects.retain(|p| p != dir);
-        self.settings.save_to(&self.paths);
+        self.edit_settings(|s| s.projects.retain(|p| p != dir));
         self.stats.remove(&Scope::Project(dir.clone()));
         if self.scope == Scope::Project(dir.clone()) {
             self.open_scope(Scope::Global);

@@ -44,10 +44,11 @@ impl App {
     pub fn add_found(&mut self) {
         let Some(found) = self.found.take() else { return };
         let picked: Vec<PathBuf> = found.projects.into_iter().filter(|p| p.2).map(|p| p.0).collect();
-        for p in &picked {
-            self.settings.add_project(p.clone());
-        }
-        self.settings.save_to(&self.paths);
+        self.edit_settings(|s| {
+            for p in &picked {
+                s.add_project(p.clone());
+            }
+        });
         self.refresh_stats();
         let n = picked.len();
         self.notify(format!("Added {n} project{}", if n == 1 { "" } else { "s" }), String::new(), false);
