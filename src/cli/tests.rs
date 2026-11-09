@@ -62,3 +62,40 @@ fn unknown_flag_is_usage_error() {
     assert!(out.is_empty());
     assert!(!err.is_empty());
 }
+
+#[test]
+fn cli_undo_reverts_last_change() {
+    let home = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(home.path()).unwrap();
+    let mut c = ctx(&root);
+    let (src, at) = (root.join("skill"), root.join("links/skill"));
+    std::fs::create_dir_all(&src).unwrap();
+    let mut journal = crate::fsops::Journal::default();
+    journal.link(&at, &src).unwrap();
+    store::save_last_change(&c.paths, Some(&store::LastChange { label: "Link skill".into(), journal }));
+
+    let (code, out, _) = go(&["undo"], &mut c);
+    assert_eq!(code, 0);
+    assert_eq!(out.trim(), "Undid: Link skill");
+    assert!(std::fs::symlink_metadata(&at).is_err());
+    assert_eq!(store::load_last_change(&c.paths), None);
+
+    let (code, out, _) = go(&["undo"], &mut c);
+    assert_eq!(code, 0);
+    assert!(out.contains("Nothing to undo"));
+}
+
+#[test]
+fn cli_undo_fails_when_the_change_was_edited_since() {
+    let home = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(home.path()).unwrap();
+    let mut c = ctx(&root);
+    let f = root.join("a.json");
+    let mut journal = crate::fsops::Journal::default();
+    journal.write_file(&f, b"1", &c.paths).unwrap();
+    std::fs::write(&f, "hand").unwrap();
+    store::save_last_change(&c.paths, Some(&store::LastChange { label: "Edit".into(), journal }));
+    let (code, _, err) = go(&["undo"], &mut c);
+    assert_eq!(code, 1);
+    assert!(err.contains("changed since"), "{err}");
+}

@@ -19,7 +19,7 @@ use crate::agents::{self, CANONICAL, Paths, Scope};
 use crate::fsops::Journal;
 use crate::remote::RemoteSkill;
 use crate::scan::{self, Inventory};
-use crate::store::Settings;
+use crate::store::{self, LastChange, Settings};
 use crate::sync::Plan;
 
 pub use installed::{open_path, reveal_path};
@@ -117,7 +117,7 @@ pub struct App {
     /// When the notice went up, on the app clock.
     pub notice_at: Option<f64>,
     /// The last change, to undo: what it was, and its steps.
-    pub last_change: Option<(String, Journal)>,
+    pub last_change: Option<LastChange>,
     /// Skill count and unsynced count per scope.
     pub stats: HashMap<Scope, ScopeStats>,
     /// Names of the global skills, to mark project skills that shadow one.
@@ -162,6 +162,7 @@ impl App {
     pub fn new(paths: Paths, settings: Settings) -> App {
         let scope = Scope::Global;
         let inv = scan::scan(&scope, &paths);
+        let last_change = store::load_last_change(&paths);
         let mut app = App {
             paths,
             settings,
@@ -184,7 +185,7 @@ impl App {
             new_skill: None,
             notice: None,
             notice_at: None,
-            last_change: None,
+            last_change,
             stats: HashMap::new(),
             global_names: HashSet::new(),
             waker: None,
@@ -293,7 +294,7 @@ impl App {
 
     pub fn add_project(&mut self, dir: PathBuf) {
         if self.settings.add_project(dir.clone()) {
-            self.settings.save();
+            self.settings.save_to(&self.paths);
         }
         self.open_scope(Scope::Project(dir));
         self.refresh_stats();
@@ -301,7 +302,7 @@ impl App {
 
     pub fn forget_project(&mut self, dir: &PathBuf) {
         self.settings.projects.retain(|p| p != dir);
-        self.settings.save();
+        self.settings.save_to(&self.paths);
         self.stats.remove(&Scope::Project(dir.clone()));
         if self.scope == Scope::Project(dir.clone()) {
             self.open_scope(Scope::Global);
@@ -374,7 +375,8 @@ impl App {
     fn changed(&mut self, label: String, j: Journal, result: Result<String, String>) {
         let undoable = !j.is_empty();
         if undoable {
-            self.last_change = Some((label, j));
+            self.last_change = Some(LastChange { label, journal: j });
+            self.save_last_change();
         }
         match result {
             Ok(title) => {
@@ -393,9 +395,14 @@ impl App {
         self.rescan();
     }
 
+    fn save_last_change(&self) {
+        store::save_last_change(&self.paths, self.last_change.as_ref());
+    }
+
     pub fn undo(&mut self) {
-        let Some((label, j)) = self.last_change.take() else { return };
-        match j.undo(&self.paths) {
+        let Some(LastChange { label, journal }) = self.last_change.take() else { return };
+        self.save_last_change();
+        match journal.undo(&self.paths) {
             Ok(_) => self.notify(format!("Undid: {label}"), String::new(), false),
             Err(e) => self.notify(format!("Couldn't fully undo: {label}"), e, true),
         }

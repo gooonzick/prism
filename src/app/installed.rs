@@ -283,7 +283,7 @@ impl App {
             t.sort();
         }
         self.settings.targets = Some(t.iter().map(|&a| AGENTS[a].id.to_string()).collect());
-        self.settings.save();
+        self.settings.save_to(&self.paths);
         if self.sync_plan.is_some() {
             self.open_sync_for(self.sync_only.clone());
         }

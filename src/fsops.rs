@@ -6,10 +6,12 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::agents::Paths;
 
-#[derive(Clone, Debug, PartialEq)]
-enum Step {
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Step {
     /// A symlink was made at this path.
     Linked(PathBuf),
     /// A symlink was removed; it pointed at `target` (as written, relative or not).
@@ -20,11 +22,14 @@ enum Step {
     Trashed { from: PathBuf, to: PathBuf, info: Option<PathBuf> },
     /// A folder was copied here.
     Copied(PathBuf),
+    /// A file was rewritten. `backup` is the original (`None`: it didn't exist), `hash_after`
+    /// the hash of what was written, so undo can tell if anything else touched it since.
+    Rewrote { path: PathBuf, backup: Option<PathBuf>, hash_after: u64 },
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Journal {
-    steps: Vec<Step>,
+    pub(crate) steps: Vec<Step>,
 }
 
 impl Journal {
@@ -90,6 +95,50 @@ impl Journal {
         Ok(())
     }
 
+    /// Replaces `path` with `contents`, atomically (a temp file next to it, then a rename). The
+    /// first time this journal touches `path` its original goes to `<state>/backups/`.
+    #[allow(dead_code)] // the MCP commands write configs through it
+    pub fn write_file(&mut self, path: &Path, contents: &[u8], paths: &Paths) -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let earlier = self.steps.iter().position(|s| matches!(s, Step::Rewrote { path: p, .. } if p == path));
+        let original = match fs::read(path) {
+            Ok(bytes) => Some(bytes),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        let backup = match (&original, earlier) {
+            (Some(bytes), None) => Some(back_up(path, bytes, paths)?),
+            _ => None,
+        };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".prism-tmp");
+        let tmp = PathBuf::from(tmp);
+        let written = fs::write(&tmp, contents)
+            .and_then(|()| match fs::metadata(path) {
+                Ok(m) => fs::set_permissions(&tmp, fs::Permissions::from_mode(m.permissions().mode() & 0o7777)),
+                Err(_) => Ok(()),
+            })
+            .and_then(|()| fs::rename(&tmp, path));
+        if let Err(e) = written {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
+        let hash_after = hash(contents);
+        match earlier {
+            // A second write to the same file: undo goes back to the first original.
+            Some(i) => {
+                if let Step::Rewrote { hash_after: h, .. } = &mut self.steps[i] {
+                    *h = hash_after;
+                }
+            }
+            None => self.steps.push(Step::Rewrote { path: path.to_path_buf(), backup, hash_after }),
+        }
+        Ok(())
+    }
+
     /// Reverses every step, last first. Stops at the first step that can't be reversed (the
     /// path was changed since), leaving the rest as they are.
     pub fn undo(self, paths: &Paths) -> Result<usize, String> {
@@ -118,11 +167,46 @@ impl Journal {
                     }),
                 },
                 Step::Copied(at) => trash(at, paths).map(|_| ()),
+                Step::Rewrote { path, backup, hash_after } => match fs::read(path) {
+                    Ok(now) if hash(&now) == *hash_after => match backup {
+                        Some(b) => fs::read(b).and_then(|bytes| fs::write(path, bytes)),
+                        None => fs::remove_file(path),
+                    },
+                    _ => Err(io::Error::other(format!("{} changed since", path.display()))),
+                },
             };
             result.map_err(|e| format!("Undid {done} of {n} steps: {e}"))?;
         }
         Ok(n)
     }
+}
+
+fn hash(bytes: &[u8]) -> u64 {
+    use std::hash::{DefaultHasher, Hasher};
+    let mut h = DefaultHasher::new();
+    h.write(bytes);
+    h.finish()
+}
+
+/// Copies a config's original bytes into the private backups folder. Returns the copy.
+fn back_up(path: &Path, bytes: &[u8], paths: &Paths) -> io::Result<PathBuf> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let dir = paths.state.join("backups");
+    fs::create_dir_all(&dir)?;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+    let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    for n in 0.. {
+        let to = dir.join(format!("{n}-{name}"));
+        match fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&to) {
+            Ok(mut f) => {
+                io::Write::write_all(&mut f, bytes)?;
+                return Ok(to);
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!()
 }
 
 /// Moves `path` to the trash. Returns where it went and, in a freedesktop trash, its info file.
@@ -312,5 +396,89 @@ mod tests {
     fn relative_paths() {
         assert_eq!(relative(Path::new("/h/.claude/skills"), Path::new("/h/.agents/skills/a")), PathBuf::from("../../.agents/skills/a"));
         assert_eq!(relative(Path::new("/h/a"), Path::new("/h/a/b")), PathBuf::from("b"));
+    }
+
+    fn setup() -> (tempfile::TempDir, PathBuf, Paths) {
+        let home = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(home.path()).unwrap();
+        let paths = Paths::isolated(&root);
+        (home, root, paths)
+    }
+
+    #[test]
+    fn rewrite_backs_up_and_undo_restores() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_h, root, paths) = setup();
+        let a = root.join("a.json");
+        fs::write(&a, br#"{"x":1}"#).unwrap();
+        let mut j = Journal::default();
+        j.write_file(&a, br#"{"x":2}"#, &paths).unwrap();
+        assert_eq!(fs::read(&a).unwrap(), br#"{"x":2}"#);
+        assert!(!root.join("a.json.prism-tmp").exists());
+        let Step::Rewrote { backup: Some(backup), .. } = &j.steps[0] else { panic!("{:?}", j.steps) };
+        assert_eq!(fs::read(backup).unwrap(), br#"{"x":1}"#);
+        assert_eq!(fs::metadata(backup).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::metadata(backup.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+        j.undo(&paths).unwrap();
+        assert_eq!(fs::read(&a).unwrap(), br#"{"x":1}"#);
+    }
+
+    #[test]
+    fn rewriting_twice_undoes_to_the_original() {
+        let (_h, root, paths) = setup();
+        let a = root.join("a.json");
+        fs::write(&a, "0").unwrap();
+        let mut j = Journal::default();
+        j.write_file(&a, b"1", &paths).unwrap();
+        j.write_file(&a, b"2", &paths).unwrap();
+        j.undo(&paths).unwrap();
+        assert_eq!(fs::read(&a).unwrap(), b"0");
+    }
+
+    #[test]
+    fn rewrite_keeps_the_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_h, root, paths) = setup();
+        let a = root.join("a.json");
+        fs::write(&a, "0").unwrap();
+        fs::set_permissions(&a, fs::Permissions::from_mode(0o640)).unwrap();
+        Journal::default().write_file(&a, b"1", &paths).unwrap();
+        assert_eq!(fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o640);
+    }
+
+    #[test]
+    fn rewrite_of_new_file_undo_deletes_it() {
+        let (_h, root, paths) = setup();
+        let a = root.join("sub/new.json");
+        let mut j = Journal::default();
+        j.write_file(&a, b"{}", &paths).unwrap();
+        assert!(a.is_file());
+        j.undo(&paths).unwrap();
+        assert!(!a.exists());
+    }
+
+    #[test]
+    fn undo_refuses_after_outside_edit() {
+        let (_h, root, paths) = setup();
+        let a = root.join("a.json");
+        fs::write(&a, "1").unwrap();
+        let mut j = Journal::default();
+        j.write_file(&a, "2".as_bytes(), &paths).unwrap();
+        fs::write(&a, "by hand").unwrap();
+        let err = j.undo(&paths).unwrap_err();
+        assert!(err.contains("changed since"), "{err}");
+        assert_eq!(fs::read(&a).unwrap(), b"by hand");
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_temp_file() {
+        let (_h, root, paths) = setup();
+        // A folder where the file should go: the rename fails after the temp file was written.
+        let a = root.join("a.json");
+        fs::create_dir_all(a.join("inner")).unwrap();
+        let mut j = Journal::default();
+        assert!(j.write_file(&a, b"1", &paths).is_err());
+        assert!(!root.join("a.json.prism-tmp").exists());
+        assert!(j.is_empty());
     }
 }

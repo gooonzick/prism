@@ -24,7 +24,9 @@ use crate::app::App;
 use crate::store::Settings;
 
 fn init() -> App {
-    App::new(Paths::from_env(), Settings::load())
+    let paths = Paths::from_env();
+    let settings = Settings::load_from(&paths);
+    App::new(paths, settings)
 }
 
 fn setup(s: &mut App, waker: Waker) {

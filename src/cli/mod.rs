@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 
 use crate::agents::{self, Paths};
-use crate::store::Settings;
+use crate::store::{self, Settings};
 
 #[cfg(test)]
 mod tests;
@@ -33,7 +33,9 @@ pub struct Ctx {
 
 impl Ctx {
     fn from_env() -> Ctx {
-        Ctx { paths: Paths::from_env(), settings: Settings::load() }
+        let paths = Paths::from_env();
+        let settings = Settings::load_from(&paths);
+        Ctx { paths, settings }
     }
 }
 
@@ -80,6 +82,8 @@ struct Global {
 enum Command {
     /// List the supported agents and which are installed.
     Agents,
+    /// Take back the last change, from the window or the command line.
+    Undo,
 }
 
 /// `None` when `args[0]` isn't a subcommand, so the caller opens the window.
@@ -105,10 +109,33 @@ pub fn run_with(args: &[&str], ctx: &mut Ctx, out: &mut dyn Write, err: &mut dyn
         }
     };
     let mut out = Out { json: cli.global.json, out };
-    match cli.command {
-        Command::Agents => agents_cmd(ctx, &mut out),
+    let exit = match cli.command {
+        Command::Agents => {
+            agents_cmd(ctx, &mut out);
+            Exit::Ok
+        }
+        Command::Undo => undo_cmd(ctx, &mut out, err),
+    };
+    exit as i32
+}
+
+fn undo_cmd(ctx: &Ctx, out: &mut Out, err: &mut dyn Write) -> Exit {
+    let Some(change) = store::load_last_change(&ctx.paths) else {
+        out.emit("Nothing to undo", serde_json::json!({ "undone": null }));
+        return Exit::Ok;
+    };
+    // Cleared either way: after a partial undo the journal no longer matches the disk.
+    store::save_last_change(&ctx.paths, None);
+    match change.journal.undo(&ctx.paths) {
+        Ok(_) => {
+            out.emit(format!("Undid: {}", change.label), serde_json::json!({ "undone": change.label }));
+            Exit::Ok
+        }
+        Err(e) => {
+            let _ = writeln!(err, "{e}");
+            Exit::Failed
+        }
     }
-    Exit::Ok as i32
 }
 
 fn agents_cmd(ctx: &Ctx, out: &mut Out) {
