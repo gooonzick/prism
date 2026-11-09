@@ -11,6 +11,7 @@ use clap::{Args, Parser, Subcommand};
 use crate::agents::{self, Paths, Scope};
 use crate::store::{self, Settings};
 
+mod mcp;
 mod projects;
 mod skills;
 #[cfg(test)]
@@ -103,6 +104,11 @@ enum Command {
         #[command(subcommand)]
         command: skills::Cmd,
     },
+    /// List and show MCP servers from every agent's config.
+    Mcp {
+        #[command(subcommand)]
+        command: mcp::Cmd,
+    },
     /// List, add, remove and find projects.
     Projects {
         #[command(subcommand)]
@@ -148,6 +154,10 @@ pub fn run_with(args: &[&str], ctx: &mut Ctx, out: &mut dyn Write, err: &mut dyn
         Command::Undo => undo_cmd(ctx, &mut out, err),
         Command::Skills { command } => match ctx.scope(cli.global.project.as_deref()) {
             Ok(scope) => skills::run(command, ctx, &scope, &mut out, err),
+            Err(e) => usage(err, &e),
+        },
+        Command::Mcp { command } => match ctx.scope(cli.global.project.as_deref()) {
+            Ok(scope) => mcp::run(command, ctx, &scope, &mut out, err),
             Err(e) => usage(err, &e),
         },
         Command::Projects { command } => projects::run(command, ctx, &mut out, err),

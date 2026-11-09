@@ -532,3 +532,147 @@ fn install_links_into_targets() {
     assert_eq!(json(&out)["installed"][0], "find-skills");
     assert!(std::fs::symlink_metadata(h.join(".codex/skills/find-skills")).unwrap().file_type().is_symlink());
 }
+
+/// A home with Cursor and Codex holding `gl` (the first with a literal env value and a header
+/// secret, the second differing in args), plus a broken Codex-style file for the error path.
+fn mcp_home() -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+    std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+    std::fs::write(
+        home.path().join(".cursor/mcp.json"),
+        r#"{"mcpServers":{
+            "gl":{"command":"npx","args":["-y","gl-mcp","--api-key=FIXTURE_ARG_SECRET"],"env":{"GITLAB_TOKEN":"FIXTURE_ENV_SECRET","HOST":"${env:GITLAB_HOST}"},"extraSecret":"FIXTURE_EXTRA_SECRET"},
+            "web":{"url":"https://u:FIXTURE_URL_SECRET@mcp.example.com/mcp","headers":{"Authorization":"Bearer FIXTURE_HEADER_SECRET"}}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        home.path().join(".codex/config.toml"),
+        "[mcp_servers.gl]\ncommand = \"npx\"\nargs = [\"-y\", \"gl-mcp\"]\n[mcp_servers.gl.env]\nGITLAB_TOKEN = \"FIXTURE_ENV_SECRET\"\n",
+    )
+    .unwrap();
+    home
+}
+
+const FIXTURES: [&str; 5] = ["FIXTURE_ENV_SECRET", "FIXTURE_HEADER_SECRET", "FIXTURE_ARG_SECRET", "FIXTURE_URL_SECRET", "FIXTURE_EXTRA_SECRET"];
+
+#[test]
+fn mcp_list_json_masks_env_and_headers() {
+    let home = mcp_home();
+    let (code, out, _) = go(&["mcp", "list", "--json"], &mut ctx(home.path()));
+    assert_eq!(code, 0);
+    for secret in FIXTURES {
+        assert!(!out.contains(secret), "{secret} leaked: {out}");
+    }
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let gl = v["servers"].as_array().unwrap().iter().find(|s| s["name"] == "gl").unwrap();
+    assert_eq!(gl["agents"], serde_json::json!(["codex", "cursor"]));
+    assert_eq!(gl["status"], "differs");
+    assert_eq!(gl["inherited"], false);
+    assert_eq!(gl["transport"], "stdio");
+    assert_eq!(gl["disabled_for"], serde_json::json!([]));
+    let web = v["servers"].as_array().unwrap().iter().find(|s| s["name"] == "web").unwrap();
+    assert_eq!(web["transport"], "http");
+    assert_eq!(web["status"], "in_sync");
+    assert!(v["merges"].as_array().unwrap().is_empty() && v["errors"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn mcp_list_human_has_one_line_per_server() {
+    let home = mcp_home();
+    let (code, out, _) = go(&["mcp", "list"], &mut ctx(home.path()));
+    assert_eq!(code, 0);
+    let line = out.lines().find(|l| l.starts_with("gl")).unwrap();
+    assert!(line.contains("codex") && line.contains("cursor") && line.contains("differs"), "{line}");
+    assert!(out.lines().any(|l| l.starts_with("web") && l.contains("in sync")));
+    assert!(FIXTURES.iter().all(|s| !out.contains(s)));
+}
+
+#[test]
+fn mcp_show_masks_by_default() {
+    let home = mcp_home();
+    for json in [true, false] {
+        let args: &[&str] = if json { &["mcp", "show", "gl", "--json"] } else { &["mcp", "show", "gl"] };
+        let (code, out, _) = go(args, &mut ctx(home.path()));
+        assert_eq!(code, 0);
+        for secret in FIXTURES {
+            assert!(!out.contains(secret), "{secret} leaked: {out}");
+        }
+        assert!(out.contains("${GITLAB_HOST}") && out.contains("--api-key=***"), "{out}");
+    }
+    let (_, out, _) = go(&["mcp", "show", "gl", "--json"], &mut ctx(home.path()));
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["name"], "gl");
+    let cursor = v["copies"].as_array().unwrap().iter().find(|c| c["agent"] == "cursor").unwrap();
+    assert_eq!(cursor["place"], "global");
+    assert_eq!(cursor["enabled"], true);
+    assert!(cursor["read_only"].is_null());
+    assert_eq!(cursor["file"], "~/.cursor/mcp.json");
+    assert_eq!(cursor["transport"]["env"]["GITLAB_TOKEN"], "***");
+    assert_eq!(cursor["extra_keys"], serde_json::json!(["extraSecret"]));
+    assert!(v["diffs"].as_array().unwrap().iter().any(|d| d["field"] == "args"));
+}
+
+#[test]
+fn mcp_show_masks_headers_and_url() {
+    let home = mcp_home();
+    let (_, out, _) = go(&["mcp", "show", "web", "--json"], &mut ctx(home.path()));
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let t = &v["copies"][0]["transport"];
+    assert_eq!(t["type"], "http");
+    assert_eq!(t["headers"]["Authorization"], "***");
+    assert_eq!(t["url"], "https://***@mcp.example.com/mcp");
+}
+
+#[test]
+fn mcp_show_secrets_reveals_values() {
+    let home = mcp_home();
+    let (code, out, _) = go(&["mcp", "show", "gl", "web", "--show-secrets", "--json"], &mut ctx(home.path()));
+    assert_eq!(code, 2, "one name only");
+    assert!(out.is_empty());
+    let (code, out, _) = go(&["mcp", "show", "gl", "--show-secrets"], &mut ctx(home.path()));
+    assert_eq!(code, 0);
+    for secret in ["FIXTURE_ENV_SECRET", "FIXTURE_ARG_SECRET"] {
+        assert!(out.contains(secret), "{secret} missing: {out}");
+    }
+    assert!(out.contains("${GITLAB_HOST}"));
+    assert!(!out.contains("FIXTURE_EXTRA_SECRET"), "extras are never printed");
+    let (_, out, _) = go(&["mcp", "show", "web", "--show-secrets", "--json"], &mut ctx(home.path()));
+    assert!(out.contains("Bearer FIXTURE_HEADER_SECRET") && out.contains("FIXTURE_URL_SECRET"));
+}
+
+#[test]
+fn mcp_show_unknown_is_exit_1() {
+    let home = mcp_home();
+    let (code, out, err) = go(&["mcp", "show", "nope"], &mut ctx(home.path()));
+    assert_eq!(code, 1);
+    assert!(out.is_empty());
+    assert!(err.contains("nope"));
+}
+
+#[test]
+fn mcp_list_reports_unreadable_files_without_their_content() {
+    let home = mcp_home();
+    std::fs::write(home.path().join(".codex/config.toml"), "[mcp_servers.gl\ncommand = \"FIXTURE_ENV_SECRET\"\n").unwrap();
+    let (code, out, _) = go(&["mcp", "list", "--json"], &mut ctx(home.path()));
+    assert_eq!(code, 0);
+    assert!(!out.contains("FIXTURE_ENV_SECRET"), "{out}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let e = &v["errors"][0];
+    assert_eq!(e["file"], "~/.codex/config.toml");
+    assert!(e["error"].as_str().unwrap().contains("line 1"), "{e}");
+    let (_, human, _) = go(&["mcp", "list"], &mut ctx(home.path()));
+    assert!(human.contains("~/.codex/config.toml") && !human.contains("FIXTURE_ENV_SECRET"));
+}
+
+#[test]
+fn mcp_list_in_a_project_marks_inherited_rows() {
+    let home = mcp_home();
+    let project = tempfile::tempdir().unwrap();
+    let (code, out, _) = go(&["mcp", "list", "--json", "--project", project.path().to_str().unwrap()], &mut ctx(home.path()));
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(v["servers"].as_array().unwrap().iter().all(|s| s["inherited"] == true));
+    let (_, human, _) = go(&["mcp", "list", "--project", project.path().to_str().unwrap()], &mut ctx(home.path()));
+    assert!(human.contains("(global)"));
+}

@@ -8,8 +8,6 @@ mod agents;
 mod app;
 mod cli;
 mod fsops;
-// Read-only for now: `mcp list` and the writers build on it next.
-#[allow(dead_code)]
 mod mcp;
 mod planid;
 mod projects;

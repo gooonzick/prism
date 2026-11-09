@@ -24,6 +24,7 @@ pub enum Flavor {
 pub struct McpAgent {
     /// Same id as in `agents::AGENTS` where the agent is in both.
     pub id: &'static str,
+    #[allow(dead_code)] // the add/copy commands print it
     pub name: &'static str,
     pub flavor: Flavor,
 }
@@ -39,6 +40,7 @@ pub static MCP_AGENTS: &[McpAgent] = &[
     McpAgent { id: "kiro", name: "Kiro", flavor: Flavor::Kiro },
 ];
 
+#[allow(dead_code)] // the write commands resolve `--agent` with it
 pub fn index_of(id: &str) -> Option<usize> {
     MCP_AGENTS.iter().position(|a| a.id == id)
 }
