@@ -4,13 +4,15 @@
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 
-use crate::agents::{self, Paths};
+use crate::agents::{self, Paths, Scope};
 use crate::store::{self, Settings};
 
+mod projects;
+mod skills;
 #[cfg(test)]
 mod tests;
 
@@ -36,6 +38,20 @@ impl Ctx {
         let paths = Paths::from_env();
         let settings = Settings::load_from(&paths);
         Ctx { paths, settings }
+    }
+
+    /// The scope `--project` names (any folder, registered or not), else the global one.
+    fn scope(&self, project: Option<&Path>) -> Result<Scope, String> {
+        let Some(dir) = project else { return Ok(Scope::Global) };
+        match std::fs::canonicalize(dir) {
+            Ok(p) if p.is_dir() => Ok(Scope::Project(p)),
+            _ => Err(format!("{} is not a folder", dir.display())),
+        }
+    }
+
+    /// Agent indices a sync links into, as the window computes them.
+    fn targets(&self) -> Vec<usize> {
+        agents::target_indices(self.settings.targets.as_deref(), &self.paths)
     }
 }
 
@@ -82,6 +98,21 @@ struct Global {
 enum Command {
     /// List the supported agents and which are installed.
     Agents,
+    /// List and show skills.
+    Skills {
+        #[command(subcommand)]
+        command: skills::Cmd,
+    },
+    /// List, add, remove and find projects.
+    Projects {
+        #[command(subcommand)]
+        command: projects::Cmd,
+    },
+    /// Choose which agents a sync links into.
+    Targets {
+        #[command(subcommand)]
+        command: projects::TargetsCmd,
+    },
     /// Take back the last change, from the window or the command line.
     Undo,
 }
@@ -115,8 +146,19 @@ pub fn run_with(args: &[&str], ctx: &mut Ctx, out: &mut dyn Write, err: &mut dyn
             Exit::Ok
         }
         Command::Undo => undo_cmd(ctx, &mut out, err),
+        Command::Skills { command } => match ctx.scope(cli.global.project.as_deref()) {
+            Ok(scope) => skills::run(command, ctx, &scope, &mut out, err),
+            Err(e) => usage(err, &e),
+        },
+        Command::Projects { command } => projects::run(command, ctx, &mut out, err),
+        Command::Targets { command } => projects::run_targets(command, ctx, &mut out, err),
     };
     exit as i32
+}
+
+fn usage(err: &mut dyn Write, msg: &str) -> Exit {
+    let _ = writeln!(err, "{msg}");
+    Exit::Usage
 }
 
 fn undo_cmd(ctx: &Ctx, out: &mut Out, err: &mut dyn Write) -> Exit {

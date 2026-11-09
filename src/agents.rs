@@ -169,6 +169,12 @@ pub fn default_targets(paths: &Paths) -> Vec<String> {
     AGENTS.iter().skip(1).filter(|a| a.detected(paths)).map(|a| a.id.to_string()).collect()
 }
 
+/// Agent indices a sync links into: the chosen `targets` (or the defaults), minus the canonical store.
+pub fn target_indices(targets: Option<&[String]>, paths: &Paths) -> Vec<usize> {
+    let ids = targets.map_or_else(|| default_targets(paths), <[String]>::to_vec);
+    ids.iter().filter_map(|id| index_of(id)).filter(|&i| i != CANONICAL).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

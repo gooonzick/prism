@@ -15,7 +15,7 @@ use std::time::Duration;
 use rune::{Latest, TextEdit, Waker};
 use rune_kit::shell::PaneState;
 
-use crate::agents::{self, CANONICAL, Paths, Scope};
+use crate::agents::{self, Paths, Scope};
 use crate::fsops::Journal;
 use crate::remote::RemoteSkill;
 use crate::scan::{self, Inventory};
@@ -345,8 +345,7 @@ impl App {
 
     /// Agent indices a sync links into.
     pub fn targets(&self) -> Vec<usize> {
-        let ids = self.settings.targets.clone().unwrap_or_else(|| agents::default_targets(&self.paths));
-        ids.iter().filter_map(|id| agents::index_of(id)).filter(|&i| i != CANONICAL).collect()
+        agents::target_indices(self.settings.targets.as_deref(), &self.paths)
     }
 
     pub fn scope_label(&self, scope: &Scope) -> String {

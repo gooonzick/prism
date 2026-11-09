@@ -9,6 +9,7 @@ mod app;
 mod cli;
 mod fsops;
 mod planid;
+mod projects;
 mod remote;
 mod scan;
 mod skill;
