@@ -1,15 +1,21 @@
 //! `prism mcp`: the MCP servers found in every agent's own config.
 
-use std::io::Write;
+use std::collections::BTreeMap;
+use std::io::{Read, Write};
+use std::path::Path;
 
-use clap::Subcommand;
+use clap::{ArgGroup, Subcommand};
 use serde_json::{Value, json};
 
-use super::{Ctx, Exit, Out};
+use super::skills::Apply;
+use super::{Ctx, Exit, Out, usage};
 use crate::agents::{Paths, Scope, tilde};
-use crate::mcp::agents::MCP_AGENTS;
-use crate::mcp::model::{EnvValue, McpCopy, Place, Transport, masked_args, masked_url};
+use crate::fsops::Journal;
+use crate::mcp::agents::{MCP_AGENTS, index_of};
+use crate::mcp::model::{EnvValue, McpCopy, Part, Place, Server, Transport, masked_args, masked_url};
+use crate::mcp::plan::{self, ClaudeScope, EditChange, McpPlan, Request};
 use crate::mcp::scan::{self, FieldDiff, McpServer, Status};
+use crate::store::{self, LastChange};
 
 #[derive(Subcommand)]
 pub enum Cmd {
@@ -22,12 +28,308 @@ pub enum Cmd {
         #[arg(long)]
         show_secrets: bool,
     },
+    /// Add a server to agents (acts at once).
+    #[command(group(ArgGroup::new("transport").required(true).args(["command", "url"])))]
+    Add {
+        name: String,
+        /// The program that starts a local server.
+        #[arg(long, value_name = "CMD")]
+        command: Option<String>,
+        /// An argument for the program (repeat for more).
+        #[arg(long = "arg", value_name = "A", allow_hyphen_values = true, requires = "command")]
+        args: Vec<String>,
+        /// `KEY=VALUE`, `KEY=@file`, `KEY=-` (stdin) or `KEY=${VAR}`.
+        #[arg(long, value_name = "K=V", requires = "command")]
+        env: Vec<String>,
+        /// The address of a remote server.
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+        /// `KEY=VALUE`, `KEY=@file`, `KEY=-` (stdin) or `KEY=${VAR}`.
+        #[arg(long, value_name = "K=V", requires = "url")]
+        header: Vec<String>,
+        /// The agents to add it to.
+        #[arg(long, value_name = "AGENT", num_args = 1.., required = true)]
+        to: Vec<String>,
+        /// Where Claude Code keeps a project server: local (this machine) or project (`.mcp.json`).
+        #[arg(long, value_name = "SCOPE", default_value = "local", value_parser = ["local", "project"])]
+        claude_scope: String,
+    },
+    /// Copy a server into other agents.
+    Copy {
+        name: String,
+        #[arg(long, value_name = "AGENT", num_args = 1.., required = true)]
+        to: Vec<String>,
+        /// Copy this agent's version (default: the one most agents have).
+        #[arg(long, value_name = "AGENT")]
+        from: Option<String>,
+        #[command(flatten)]
+        apply: Apply,
+    },
+    /// Change fields of a server in every agent that has it.
+    Edit {
+        name: String,
+        #[arg(long, value_name = "CMD")]
+        command: Option<String>,
+        /// Replaces the arguments (repeat for more).
+        #[arg(long = "arg", value_name = "A", allow_hyphen_values = true)]
+        args: Vec<String>,
+        #[arg(long, value_name = "K=V")]
+        env: Vec<String>,
+        #[arg(long, value_name = "KEY")]
+        unset_env: Vec<String>,
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+        #[arg(long, value_name = "K=V")]
+        header: Vec<String>,
+        #[arg(long, value_name = "KEY")]
+        unset_header: Vec<String>,
+        #[command(flatten)]
+        apply: Apply,
+    },
+    /// Remove a server (default: from every agent).
+    Remove {
+        name: String,
+        #[arg(long, value_name = "AGENT", num_args = 1..)]
+        from: Vec<String>,
+        #[command(flatten)]
+        apply: Apply,
+    },
+    /// Switch a server off for the project (needs --project).
+    Disable {
+        name: String,
+        #[command(flatten)]
+        apply: Apply,
+    },
+    /// Switch a server back on for the project (needs --project).
+    Enable {
+        name: String,
+        #[command(flatten)]
+        apply: Apply,
+    },
+    /// Fold servers that are one into a single name.
+    Merge {
+        #[arg(required = true)]
+        names: Vec<String>,
+        #[arg(long, value_name = "NEW")]
+        into: String,
+        #[command(flatten)]
+        apply: Apply,
+    },
 }
 
 pub fn run(cmd: Cmd, ctx: &mut Ctx, scope: &Scope, out: &mut Out, err: &mut dyn Write) -> Exit {
-    match cmd {
-        Cmd::List => list(ctx, scope, out),
-        Cmd::Show { name, show_secrets } => show(ctx, scope, &name, show_secrets, out, err),
+    let now = Apply { apply: true, plan_id: None };
+    let (request, label, apply) = match cmd {
+        Cmd::List => return list(ctx, scope, out),
+        Cmd::Show { name, show_secrets } => return show(ctx, scope, &name, show_secrets, out, err),
+        Cmd::Add { name, command, args, env, url, header, to, claude_scope } => {
+            let built = (|| {
+                let mut values = Values::new(ctx);
+                let transport = match (command, url) {
+                    (Some(command), _) => Transport::Stdio { command, args, env: values.pairs("--env", &env)?, cwd: None },
+                    (None, Some(url)) => Transport::Http { url, headers: values.pairs("--header", &header)?, sse: false },
+                    (None, None) => return Err("give --command or --url".to_string()),
+                };
+                let claude_scope = if claude_scope == "project" { ClaudeScope::Project } else { ClaudeScope::Local };
+                Ok(Request::Add { server: Server { name: name.clone(), transport }, to: agent_indices(&to)?, claude_scope })
+            })();
+            match built {
+                Ok(r) => (r, format!("add {name}"), now),
+                Err(e) => return usage(err, &e),
+            }
+        }
+        Cmd::Copy { name, to, from, apply } => {
+            let built = agent_indices(&to).and_then(|to| Ok(Request::Copy { name: name.clone(), to, from: from.as_deref().map(agent_index).transpose()? }));
+            match built {
+                Ok(r) => (r, format!("copy {name}"), apply),
+                Err(e) => return usage(err, &e),
+            }
+        }
+        Cmd::Edit { name, command, args, env, unset_env, url, header, unset_header, apply } => {
+            let built = (|| {
+                let mut values = Values::new(ctx);
+                let mut changes = Vec::new();
+                changes.extend(command.map(EditChange::Command));
+                if !args.is_empty() {
+                    changes.push(EditChange::Args(args));
+                }
+                changes.extend(values.pairs("--env", &env)?.into_iter().map(|(k, v)| EditChange::SetEnv(k, v)));
+                changes.extend(unset_env.into_iter().map(EditChange::UnsetEnv));
+                changes.extend(url.map(EditChange::Url));
+                changes.extend(values.pairs("--header", &header)?.into_iter().map(|(k, v)| EditChange::SetHeader(k, v)));
+                changes.extend(unset_header.into_iter().map(EditChange::UnsetHeader));
+                if changes.is_empty() {
+                    return Err("nothing to change: give --command, --arg, --env, --url, --header, --unset-env or --unset-header".to_string());
+                }
+                Ok(Request::Edit { name: name.clone(), changes })
+            })();
+            match built {
+                Ok(r) => (r, format!("edit {name}"), apply),
+                Err(e) => return usage(err, &e),
+            }
+        }
+        Cmd::Remove { name, from, apply } => match agent_indices(&from) {
+            Ok(from) => (Request::Remove { name: name.clone(), from }, format!("remove {name}"), apply),
+            Err(e) => return usage(err, &e),
+        },
+        Cmd::Disable { name, apply } => (Request::SetDisabled { name: name.clone(), disabled: true }, format!("disable {name}"), apply),
+        Cmd::Enable { name, apply } => (Request::SetDisabled { name: name.clone(), disabled: false }, format!("enable {name}"), apply),
+        Cmd::Merge { names, into, apply } => (Request::Merge { names, into: into.clone() }, format!("merge into {into}"), apply),
+    };
+    if matches!(request, Request::SetDisabled { .. }) && matches!(scope, Scope::Global) {
+        return usage(err, "disabling or enabling a server applies to one project: add --project DIR");
+    }
+    let immediate = matches!(request, Request::Add { .. });
+    let inv = scan::scan(scope, &ctx.paths);
+    match plan::plan(&inv, &request, &ctx.paths) {
+        Ok(plan) => drive(ctx, plan, label, apply, immediate, out, err),
+        Err(e) => {
+            let _ = writeln!(err, "{e}");
+            Exit::Failed
+        }
+    }
+}
+
+/// An MCP agent id from the command line.
+fn agent_index(id: &str) -> Result<usize, String> {
+    index_of(id).ok_or_else(|| format!("unknown agent {id}; valid ids: {}", MCP_AGENTS.iter().map(|a| a.id).collect::<Vec<_>>().join(", ")))
+}
+
+fn agent_indices(ids: &[String]) -> Result<Vec<usize>, String> {
+    ids.iter().map(|id| agent_index(id)).collect()
+}
+
+/// Turns `KEY=VALUE` arguments into env or header values. Errors name the key or the file,
+/// never a value: the value may be a secret.
+struct Values<'a> {
+    ctx: &'a mut Ctx,
+    stdin_used: bool,
+}
+
+impl<'a> Values<'a> {
+    fn new(ctx: &'a mut Ctx) -> Self {
+        Values { ctx, stdin_used: false }
+    }
+
+    fn pairs(&mut self, flag: &str, args: &[String]) -> Result<BTreeMap<String, EnvValue>, String> {
+        let mut map = BTreeMap::new();
+        for arg in args {
+            // The argument itself is not echoed: with no `=`, it may be the secret.
+            let Some((key, v)) = arg.split_once('=').filter(|(k, _)| !k.is_empty()) else {
+                return Err(format!("{flag} needs KEY=VALUE"));
+            };
+            map.insert(key.to_string(), self.value(flag, key, v)?);
+        }
+        Ok(map)
+    }
+
+    fn value(&mut self, flag: &str, key: &str, v: &str) -> Result<EnvValue, String> {
+        if v == "-" {
+            if std::mem::replace(&mut self.stdin_used, true) {
+                return Err(format!("{flag} {key}=-: stdin can be read only once"));
+            }
+            let mut reader = self.ctx.stdin.take().unwrap_or_else(|| Box::new(std::io::stdin()));
+            return read_text(&mut reader).map(|t| EnvValue::literal(&t)).map_err(|_| format!("{flag} {key}=-: could not read stdin as text"));
+        }
+        if let Some(path) = v.strip_prefix('@') {
+            let text = std::fs::read(path).ok().and_then(|b| String::from_utf8(b).ok());
+            return text.map(|t| EnvValue::literal(trim_newline(&t))).ok_or_else(|| format!("{flag} {key}: cannot read {}", Path::new(path).display()));
+        }
+        Ok(parse_value(v))
+    }
+}
+
+fn read_text(r: &mut dyn Read) -> std::io::Result<String> {
+    let mut text = String::new();
+    r.read_to_string(&mut text)?;
+    Ok(trim_newline(&text).to_string())
+}
+
+/// Files and stdin end in a newline the value doesn't have.
+fn trim_newline(t: &str) -> &str {
+    let t = t.strip_suffix('\n').unwrap_or(t);
+    t.strip_suffix('\r').unwrap_or(t)
+}
+
+/// `${VAR}` and `${VAR:-default}` are references; anything else is literal text.
+fn parse_value(v: &str) -> EnvValue {
+    let reference = v.strip_prefix("${").and_then(|r| r.strip_suffix('}')).filter(|r| !r.contains(['$', '{', '}']));
+    let Some(inner) = reference else { return EnvValue::literal(v) };
+    let (name, default) = match inner.split_once(":-") {
+        Some((n, d)) => (n, Some(d.to_string())),
+        None => (inner, None),
+    };
+    let valid = !name.is_empty() && !name.starts_with(|c: char| c.is_ascii_digit()) && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if valid { EnvValue(vec![Part::Var { name: name.into(), default }]) } else { EnvValue::literal(v) }
+}
+
+fn plan_json(plan: &McpPlan, lines: &[String], id: &str, applied: bool) -> Value {
+    let skipped: Vec<Value> = plan.skipped.iter().map(|(a, why)| json!({ "agent": MCP_AGENTS[*a].id, "reason": why })).collect();
+    json!({ "applied": applied, "plan_id": id, "actions": lines, "skipped": skipped, "warnings": plan.warnings })
+}
+
+/// The skipped agents and warnings, as lines under a plan or a result.
+fn notes(plan: &McpPlan) -> String {
+    let skipped = plan.skipped.iter().map(|(a, why)| format!("\nSkipped {}: {why}", MCP_AGENTS[*a].name));
+    let warnings = plan.warnings.iter().map(|w| format!("\nWarning: {w}"));
+    skipped.chain(warnings).collect()
+}
+
+fn plan_text(plan: &McpPlan, lines: &[String], id: &str) -> String {
+    if lines.is_empty() {
+        return format!("Nothing to do{}", notes(plan));
+    }
+    let steps: String = lines.iter().map(|l| format!("\n  - {l}")).collect();
+    format!("Plan {id}:{steps}{}\nRun again with --apply --plan-id {id} to do it.", notes(plan))
+}
+
+/// Prints the plan, or with `--apply` (or for `add`, at once) does it, unless it changed
+/// since `--plan-id`. Same contract and JSON as `skills`.
+fn drive(ctx: &Ctx, plan: McpPlan, label: String, a: Apply, immediate: bool, out: &mut Out, err: &mut dyn Write) -> Exit {
+    if a.plan_id.is_some() && !a.apply {
+        return usage(err, "--plan-id only goes with --apply");
+    }
+    let (lines, id) = (plan.lines(&ctx.paths), plan.id());
+    if !a.apply {
+        out.emit(plan_text(&plan, &lines, &id), plan_json(&plan, &lines, &id, false));
+        return Exit::Ok;
+    }
+    if let Some(old) = a.plan_id.as_deref().filter(|old| *old != id) {
+        let mut v = plan_json(&plan, &lines, &id, false);
+        v["plan_changed"] = json!(true);
+        out.emit(format!("The plan changed since {old}; nothing was done. It now is:\n{}", plan_text(&plan, &lines, &id)), v);
+        return Exit::PlanChanged;
+    }
+    if plan.is_empty() {
+        out.emit(plan_text(&plan, &lines, &id), plan_json(&plan, &lines, &id, false));
+        return if immediate { Exit::Failed } else { Exit::Ok };
+    }
+    // Backups of the last change go only now that there is a change to make.
+    store::begin_change(&ctx.paths);
+    let mut journal = Journal::default();
+    let result = plan::apply(&plan, &ctx.paths, &mut journal);
+    if !journal.is_empty() {
+        store::save_last_change(&ctx.paths, Some(&LastChange { label, journal }));
+    }
+    match result {
+        Ok(done) => {
+            let mut v = plan_json(&plan, &lines, &id, true);
+            v["done"] = json!(done);
+            let steps: String = lines.iter().map(|l| format!("\n  - {l}")).collect();
+            out.emit(format!("Done:{steps}{}", notes(&plan)), v);
+            Exit::Ok
+        }
+        Err((done, e)) => {
+            if out.json {
+                let mut v = plan_json(&plan, &lines, &id, false);
+                v["done"] = json!(done);
+                v["error"] = json!(e);
+                out.emit("", v);
+            } else {
+                let _ = writeln!(err, "Stopped after {done} of {} files: {e}", plan.files.len());
+            }
+            Exit::Failed
+        }
     }
 }
 

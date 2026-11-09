@@ -3,7 +3,7 @@
 
 use std::ffi::OsString;
 use std::fmt::Display;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
@@ -32,13 +32,15 @@ pub enum Exit {
 pub struct Ctx {
     pub paths: Paths,
     pub settings: Settings,
+    /// Where `K=-` values come from; `None` is the process's stdin. Tests feed their own.
+    pub stdin: Option<Box<dyn Read>>,
 }
 
 impl Ctx {
     fn from_env() -> Ctx {
         let paths = Paths::from_env();
         let settings = Settings::load_from(&paths);
-        Ctx { paths, settings }
+        Ctx { paths, settings, stdin: None }
     }
 
     /// The scope `--project` names (any folder, registered or not), else the global one.
@@ -104,7 +106,7 @@ enum Command {
         #[command(subcommand)]
         command: skills::Cmd,
     },
-    /// List and show MCP servers from every agent's config.
+    /// List, show and change MCP servers in every agent's config.
     Mcp {
         #[command(subcommand)]
         command: mcp::Cmd,

@@ -16,7 +16,6 @@ pub enum Part {
 pub struct EnvValue(pub Vec<Part>);
 
 impl EnvValue {
-    #[allow(dead_code)] // the write commands build values with it
     pub fn literal(text: &str) -> EnvValue {
         EnvValue(vec![Part::Text(text.into())])
     }

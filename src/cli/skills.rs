@@ -22,10 +22,10 @@ use crate::sync::{self, Action, Conflict, label};
 pub struct Apply {
     /// Do it, instead of only printing the plan.
     #[arg(long)]
-    apply: bool,
+    pub(super) apply: bool,
     /// With --apply: stop (exit 4) unless the plan still has this id.
     #[arg(long, value_name = "ID")]
-    plan_id: Option<String>,
+    pub(super) plan_id: Option<String>,
 }
 
 #[derive(Subcommand)]

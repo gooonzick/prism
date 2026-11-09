@@ -3,7 +3,7 @@ use super::*;
 fn ctx(home: &std::path::Path) -> Ctx {
     let paths = Paths::isolated(home);
     let settings = Settings::load_from(&paths);
-    Ctx { paths, settings }
+    Ctx { paths, settings, stdin: None }
 }
 
 fn go(args: &[&str], ctx: &mut Ctx) -> (i32, String, String) {
@@ -690,4 +690,179 @@ fn mcp_list_names_an_agent_once_per_row() {
     assert_eq!(code, 0);
     let line = out.lines().find(|l| l.starts_with('x')).unwrap();
     assert_eq!(line.matches("claude").count(), 1, "{line}");
+}
+
+/// A home where Cursor and Codex exist but hold no servers yet.
+fn empty_mcp_home() -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+    std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+    home
+}
+
+fn agents_of(out: &str, name: &str) -> Vec<String> {
+    let v = json(out);
+    let row = v["servers"].as_array().unwrap().iter().find(|s| s["name"] == name).unwrap().clone();
+    row["agents"].as_array().unwrap().iter().map(|a| a.as_str().unwrap().to_string()).collect()
+}
+
+#[test]
+fn add_then_list_shows_server_in_both_agents() {
+    let home = empty_mcp_home();
+    let mut c = ctx(home.path());
+    let (code, out, err) = go(&["mcp", "add", "plata", "--command", "npx", "--arg", "-y", "--arg", "plata-mcp", "--to", "cursor", "codex"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("Add plata"), "{out}");
+    let (_, list, _) = go(&["mcp", "list", "--json"], &mut c);
+    let mut agents = agents_of(&list, "plata");
+    agents.sort();
+    assert_eq!(agents, ["codex", "cursor"]);
+    let (_, undo, _) = go(&["undo"], &mut c);
+    assert!(undo.contains("add plata"), "{undo}");
+}
+
+#[test]
+fn env_from_file_is_read_and_masked() {
+    let home = empty_mcp_home();
+    let secret = home.path().join("token.txt");
+    std::fs::write(&secret, "FIXTURE_FILE_SECRET\n").unwrap();
+    let mut c = ctx(home.path());
+    let arg = format!("TOKEN=@{}", secret.display());
+    let (code, out, err) = go(&["mcp", "add", "plata", "--command", "npx", "--env", &arg, "--env", "HOST=${PLATA_HOST}", "--to", "cursor"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(!out.contains("FIXTURE_FILE_SECRET") && !err.contains("FIXTURE_FILE_SECRET"));
+    let written: serde_json::Value = json(&std::fs::read_to_string(home.path().join(".cursor/mcp.json")).unwrap());
+    assert_eq!(written["mcpServers"]["plata"]["env"]["TOKEN"], "FIXTURE_FILE_SECRET");
+    assert_eq!(written["mcpServers"]["plata"]["env"]["HOST"], "${env:PLATA_HOST}");
+    let (_, shown, _) = go(&["mcp", "show", "plata"], &mut c);
+    assert!(shown.contains("TOKEN = ***") && shown.contains("${PLATA_HOST}") && !shown.contains("FIXTURE_FILE_SECRET"), "{shown}");
+}
+
+#[test]
+fn env_from_stdin_is_read_once() {
+    let home = empty_mcp_home();
+    let mut c = ctx(home.path());
+    c.stdin = Some(Box::new(std::io::Cursor::new("FIXTURE_STDIN_SECRET\n")));
+    let (code, out, err) = go(&["mcp", "add", "plata", "--command", "npx", "--env", "TOKEN=-", "--to", "cursor"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    let written = std::fs::read_to_string(home.path().join(".cursor/mcp.json")).unwrap();
+    assert!(written.contains("\"FIXTURE_STDIN_SECRET\""), "{written}");
+    let home = empty_mcp_home();
+    let mut c = ctx(home.path());
+    c.stdin = Some(Box::new(std::io::Cursor::new("FIXTURE_STDIN_SECRET\n")));
+    let (code, out, err) = go(&["mcp", "add", "plata", "--command", "npx", "--env", "A=-", "--env", "B=-", "--to", "cursor"], &mut c);
+    assert_eq!(code, 2, "{out}{err}");
+    assert!(!home.path().join(".cursor/mcp.json").exists());
+}
+
+#[test]
+fn unreadable_env_file_names_the_path_only() {
+    let home = empty_mcp_home();
+    let (code, out, err) = go(&["mcp", "add", "plata", "--command", "npx", "--env", "TOKEN=@/nonexistent/FIXTURE_PATH", "--to", "cursor"], &mut ctx(home.path()));
+    assert_eq!(code, 2, "{out}{err}");
+    assert!(err.contains("/nonexistent/FIXTURE_PATH"));
+}
+
+#[test]
+fn copy_without_apply_changes_nothing() {
+    let home = mcp_home();
+    let before = std::fs::read_to_string(home.path().join(".codex/config.toml")).unwrap();
+    let mut c = ctx(home.path());
+    let (code, out, err) = go(&["mcp", "copy", "web", "--to", "codex", "--json"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    let v = json(&out);
+    assert_eq!(v["applied"], false);
+    assert!(!v["actions"].as_array().unwrap().is_empty());
+    assert!(v["skipped"].is_array() && v["warnings"].is_array());
+    assert_eq!(std::fs::read_to_string(home.path().join(".codex/config.toml")).unwrap(), before);
+    assert!(!out.contains("FIXTURE_"), "{out}");
+    let id = v["plan_id"].as_str().unwrap();
+    let (code, out, err) = go(&["mcp", "copy", "web", "--to", "codex", "--apply", "--plan-id", id, "--json"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(json(&out)["applied"], true);
+    assert!(std::fs::read_to_string(home.path().join(".codex/config.toml")).unwrap().contains("[mcp_servers.web]"));
+    let (_, undo, _) = go(&["undo"], &mut c);
+    assert!(undo.contains("copy web"), "{undo}");
+    assert_eq!(std::fs::read_to_string(home.path().join(".codex/config.toml")).unwrap(), before);
+}
+
+#[test]
+fn plan_id_without_apply_is_usage_error() {
+    let home = mcp_home();
+    let (code, _, _) = go(&["mcp", "remove", "gl", "--plan-id", "abc"], &mut ctx(home.path()));
+    assert_eq!(code, 2);
+}
+
+#[test]
+fn stale_plan_id_exits_4() {
+    let home = mcp_home();
+    let mut c = ctx(home.path());
+    let (_, out, _) = go(&["mcp", "remove", "gl", "--json"], &mut c);
+    let old = json(&out)["plan_id"].as_str().unwrap().to_string();
+    let cursor = home.path().join(".cursor/mcp.json");
+    let text = std::fs::read_to_string(&cursor).unwrap().replace("gl-mcp", "gl-mcp2");
+    std::fs::write(&cursor, &text).unwrap();
+    let (code, out, _) = go(&["mcp", "remove", "gl", "--apply", "--plan-id", &old, "--json"], &mut c);
+    assert_eq!(code, 4, "{out}");
+    let v = json(&out);
+    assert_eq!(v["applied"], false);
+    assert_eq!(v["plan_changed"], true);
+    assert_ne!(v["plan_id"], old.as_str());
+    assert_eq!(std::fs::read_to_string(&cursor).unwrap(), text);
+}
+
+#[test]
+fn remove_edit_and_merge_apply_and_label_the_change() {
+    let home = mcp_home();
+    let mut c = ctx(home.path());
+    let (code, out, err) = go(&["mcp", "edit", "gl", "--env", "HOST=${GL_HOST}", "--unset-env", "GITLAB_TOKEN", "--apply"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    let (_, undo, _) = go(&["undo"], &mut c);
+    assert!(undo.contains("edit gl"), "{undo}");
+    let (code, out, err) = go(&["mcp", "remove", "gl", "--from", "codex", "--apply"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(!std::fs::read_to_string(home.path().join(".codex/config.toml")).unwrap().contains("mcp_servers.gl"));
+    let (_, undo, _) = go(&["undo"], &mut c);
+    assert!(undo.contains("remove gl"), "{undo}");
+}
+
+#[test]
+fn unknown_agent_is_usage_error_listing_ids() {
+    let home = empty_mcp_home();
+    let (code, _, err) = go(&["mcp", "add", "x", "--command", "npx", "--to", "nope"], &mut ctx(home.path()));
+    assert_eq!(code, 2);
+    assert!(err.contains("nope") && err.contains("cursor") && err.contains("codex"), "{err}");
+}
+
+#[test]
+fn disable_without_project_is_usage_error() {
+    let home = mcp_home();
+    let (code, _, err) = go(&["mcp", "disable", "gl"], &mut ctx(home.path()));
+    assert_eq!(code, 2, "{err}");
+    let (code, _, _) = go(&["mcp", "enable", "gl", "--apply"], &mut ctx(home.path()));
+    assert_eq!(code, 2);
+}
+
+#[test]
+fn errors_never_echo_values() {
+    let home = mcp_home();
+    let all = |code: i32, out: String, err: String| {
+        assert_ne!(code, 0, "{out}{err}");
+        assert!(!out.contains("FIXTURE_SECRET_V") && !err.contains("FIXTURE_SECRET_V"), "{out}{err}");
+    };
+    let cases: [&[&str]; 6] = [
+        &["mcp", "add", "n", "--command", "npx", "--env", "TOKEN=FIXTURE_SECRET_V", "--to", "nope"],
+        &["mcp", "add", "n", "--command", "npx", "--env", "FIXTURE_SECRET_V", "--to", "cursor"],
+        &["mcp", "add", "n", "--command", "npx", "--env", "=FIXTURE_SECRET_V", "--to", "cursor"],
+        &["mcp", "add", "n", "--command", "npx", "--url", "https://x", "--env", "T=FIXTURE_SECRET_V", "--to", "cursor"],
+        &["mcp", "add", "n", "--url", "https://x", "--header", "Authorization=FIXTURE_SECRET_V", "--header", "NOEQUALS", "--to", "cursor"],
+        &["mcp", "edit", "missing", "--env", "T=FIXTURE_SECRET_V", "--apply"],
+    ];
+    for args in cases {
+        let (code, out, err) = go(args, &mut ctx(home.path()));
+        all(code, out, err);
+    }
+    // The failure inside the core (an existing server) must not echo either.
+    let (code, out, err) = go(&["mcp", "add", "gl", "--command", "npx", "--env", "T=FIXTURE_SECRET_V", "--to", "cursor", "--json"], &mut ctx(home.path()));
+    assert!(!out.contains("FIXTURE_SECRET_V") && !err.contains("FIXTURE_SECRET_V"), "{code} {out}{err}");
 }
