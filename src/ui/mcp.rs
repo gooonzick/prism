@@ -18,7 +18,7 @@ pub fn page(s: &App, k: &Kit, _layer: &mut Vec<El>) -> (El, Toolbar, El) {
 }
 
 fn toolbar(s: &App, k: &Kit) -> Toolbar {
-    Toolbar::new().leading(page_tabs(s, k)).title(scope_title(&s.scope)).trailing(
+    Toolbar::new().leading(page_tabs(s, k)).title(scope_title(&s.scope, "MCP servers")).trailing(
         IconButton::new(&REFRESH)
             .variant(IconButtonVariant::GhostMuted)
             .label("Rescan")
@@ -81,7 +81,7 @@ fn main(s: &App, k: &Kit) -> El {
     if !s.mcp.merges.is_empty() {
         let mut hints = col().key("mcp-merges").w_full().pt(10.0).px(12.0).gap(6.0);
         for m in &s.mcp.merges {
-            hints = hints.child(notice_line(k.c.info.icon, format!("Maybe one server: {} ({})", m.names.join(", "), m.reason), k));
+            hints = hints.child(notice_line(k.c.info.icon, format!("Maybe one server: {} — {}", m.names.join(", "), m.reason), k));
         }
         list = list.child(hints);
     }

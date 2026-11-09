@@ -19,7 +19,10 @@ impl App {
         let Some(waker) = self.waker.clone() else { return };
         let dirty = self.dirty.clone();
         let (folders, files) = self.watch_targets();
-        let targets: Vec<PathBuf> = folders.iter().chain(&files).map(|p| real(p)).collect();
+        // As given and with links resolved: inotify reports paths under the watched path as
+        // given, FSEvents reports them resolved.
+        let mut targets: Vec<PathBuf> = folders.iter().chain(&files).flat_map(|p| [p.clone(), real(p)]).collect();
+        targets.dedup();
         let Ok(mut watcher) = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
             // A watched parent folder reports its other entries too; only ours count.
             let relevant = event.is_ok_and(|e| {
@@ -177,5 +180,91 @@ mod tests {
         }
         assert!(app.poll());
         assert_eq!(app.last_change.map(|c| c.label).as_deref(), Some("add fresh"));
+    }
+
+    /// Starts watching with a waker that does nothing, then gives the watch time to start.
+    fn watching(app: &mut App) {
+        app.watch_with(Arc::new(|| {}));
+        std::thread::sleep(Duration::from_millis(300));
+    }
+
+    /// Polls until `done` holds, as the window does on each wake; fails after 5 seconds.
+    fn poll_until(app: &mut App, what: &str, done: impl Fn(&App) -> bool) {
+        let start = Instant::now();
+        while !done(app) {
+            assert!(start.elapsed() < Duration::from_secs(5), "never saw {what}");
+            std::thread::sleep(Duration::from_millis(50));
+            app.poll();
+        }
+    }
+
+    /// Writes `text` the way agents and Prism do: a temp file next to it, renamed over it.
+    fn replace(path: &std::path::Path, text: &str) {
+        let tmp = path.with_extension("tmp");
+        fs::write(&tmp, text).unwrap();
+        fs::rename(&tmp, path).unwrap();
+    }
+
+    fn claude_json(names: &[&str]) -> String {
+        let servers: serde_json::Map<String, serde_json::Value> = names.iter().map(|n| (n.to_string(), serde_json::json!({ "command": format!("{n}-mcp") }))).collect();
+        serde_json::json!({ "mcpServers": servers }).to_string()
+    }
+
+    #[test]
+    fn claude_json_replaced_twice_lands_both_times() {
+        let home = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(home.path()).unwrap();
+        fs::create_dir_all(root.join(".claude")).unwrap();
+        let file = root.join(".claude.json");
+        fs::write(&file, claude_json(&["one"])).unwrap();
+        let mut app = App::new(Paths::isolated(&root), Settings::default());
+        assert!(app.mcp.get("one").is_some());
+        watching(&mut app);
+
+        replace(&file, &claude_json(&["one", "two"]));
+        poll_until(&mut app, "the first replacement", |a| a.mcp.get("two").is_some());
+        // The rename swapped the file the watch was on; the second change needs a new watch.
+        replace(&file, &claude_json(&["one", "two", "three"]));
+        poll_until(&mut app, "the second replacement", |a| a.mcp.get("three").is_some());
+        assert!(!app.paths.state.join("last-change.json").exists(), "only the config changed");
+    }
+
+    #[test]
+    fn a_project_config_edited_in_place_lands() {
+        let home = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(home.path()).unwrap();
+        fs::create_dir_all(root.join(".cursor")).unwrap();
+        let project = root.join("app");
+        let file = project.join(".cursor/mcp.json");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, r#"{"mcpServers":{"db":{"command":"db-mcp"}}}"#).unwrap();
+        let mut app = App::new(Paths::isolated(&root), Settings::default());
+        app.open_scope(Scope::Project(project));
+        watching(&mut app);
+
+        fs::write(&file, r#"{"mcpServers":{"db":{"command":"db-mcp"},"cache":{"command":"cache-mcp"}}}"#).unwrap();
+        poll_until(&mut app, "the edit", |a| a.mcp.get("cache").is_some());
+    }
+
+    #[test]
+    fn a_project_reached_through_a_link_reports_changes() {
+        let home = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(home.path()).unwrap();
+        fs::create_dir_all(root.join(".cursor")).unwrap();
+        let real = root.join("real-app");
+        fs::create_dir_all(real.join(".cursor")).unwrap();
+        fs::create_dir_all(real.join(".claude/skills")).unwrap();
+        let linked = root.join("linked-app");
+        std::os::unix::fs::symlink(&real, &linked).unwrap();
+        let mut app = App::new(Paths::isolated(&root), Settings::default());
+        app.open_scope(Scope::Project(linked.clone()));
+        watching(&mut app);
+
+        fs::write(linked.join(".cursor/mcp.json"), r#"{"mcpServers":{"db":{"command":"db-mcp"}}}"#).unwrap();
+        poll_until(&mut app, "the new config", |a| a.mcp.get("db").is_some());
+        let dir = linked.join(".claude/skills/fresh");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("SKILL.md"), "---\nname: fresh\ndescription: New\n---\n").unwrap();
+        poll_until(&mut app, "the new skill", |a| a.inv.get("fresh").is_some());
     }
 }

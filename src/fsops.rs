@@ -180,7 +180,7 @@ pub fn content_hash(bytes: &[u8]) -> u64 {
 /// Writes `contents` to `path` through a temp file next to it, so a reader never sees half a
 /// file. The temp file is created with the file's mode (0600 for a new one) from the start:
 /// configs hold secrets. It never outlives an error.
-fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let mode = fs::metadata(path).map_or(0o600, |m| m.permissions().mode() & 0o7777);
     let mut tmp = path.as_os_str().to_owned();

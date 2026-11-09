@@ -50,7 +50,8 @@ pub fn save_last_change(paths: &Paths, change: Option<&LastChange>) {
     match change.and_then(|c| serde_json::to_vec_pretty(c).ok()) {
         Some(json) => {
             let _ = std::fs::create_dir_all(&paths.state);
-            let _ = std::fs::write(f, json);
+            // Whole or not at all: the other process (window or CLI) may read it any time.
+            let _ = crate::fsops::write_atomic(&f, &json);
         }
         None => {
             let _ = std::fs::remove_file(f);

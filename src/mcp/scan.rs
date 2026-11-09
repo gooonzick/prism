@@ -348,7 +348,7 @@ fn merges(servers: &[McpServer], project: bool) -> Vec<MergeHint> {
         .filter(|(_, names, _)| names.len() > 1 && seen.insert(names.clone()))
         .map(|(reason, names, variants)| MergeHint {
             names: names.into_iter().map(String::from).collect(),
-            reason: if variants.len() > 1 { format!("{reason} (args differ)") } else { reason },
+            reason: if variants.len() > 1 { format!("{reason}, args differ") } else { reason },
         })
         .collect();
     hints.sort_by(|a, b| a.names.cmp(&b.names));
@@ -561,7 +561,7 @@ mod tests {
             inv.merges,
             [
                 hint(&["context7", "ctx"], "same URL https://mcp.context7.com/mcp"),
-                hint(&["figma", "figma-dev", "figma-other", "figma-pn"], "same package figma-developer-mcp (args differ)")
+                hint(&["figma", "figma-dev", "figma-other", "figma-pn"], "same package figma-developer-mcp, args differ")
             ],
             "read-only copies don't count; other args still merge, said so"
         );
@@ -575,7 +575,7 @@ mod tests {
         let inv = scan(&Scope::Global, &paths);
         assert_eq!(inv.merges.len(), 1);
         let reason = &inv.merges[0].reason;
-        assert_eq!(reason, "same package figma-developer-mcp (args differ)");
+        assert_eq!(reason, "same package figma-developer-mcp, args differ");
         assert!(!reason.contains("AAA") && !reason.contains("BBB"));
     }
 
@@ -589,7 +589,7 @@ mod tests {
         };
         let run = |cmd: &str, args: &[&str]| json!({ "command": cmd, "args": args });
         assert!(hints(run("npx", &["--registry", "https://x", "pkgA"]), run("npx", &["--registry", "https://y", "pkgB"])).is_empty());
-        assert_eq!(hints(run("pnpx", &["-y", "pkg", "--a", "1"]), run("npx", &["pkg", "--a", "2"])), ["same package pkg (args differ)"]);
+        assert_eq!(hints(run("pnpx", &["-y", "pkg", "--a", "1"]), run("npx", &["pkg", "--a", "2"])), ["same package pkg, args differ"]);
         assert!(hints(run("bunx", &["-y", "./local.js", "--x"]), run("bunx", &["-y", "./local.js", "--y"])).is_empty());
         assert_eq!(hints(run("bunx", &["-y", "./local.js", "--x"]), run("bunx", &["-y", "./local.js", "--x"])), ["same command bunx -y ./local.js --x"]);
     }

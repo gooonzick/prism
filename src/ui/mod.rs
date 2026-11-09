@@ -170,10 +170,10 @@ fn sidebar(s: &App, k: &Kit) -> El {
         .build(k)
 }
 
-/// The toolbar title for a scope: "Global" or the project folder's name.
-pub fn scope_title(scope: &Scope) -> String {
+/// The toolbar title for a scope's page: "Global skills", or the project folder's name.
+pub fn scope_title(scope: &Scope, what: &str) -> String {
     match scope {
-        Scope::Global => "Global".to_string(),
+        Scope::Global => format!("Global {what}"),
         Scope::Project(p) => p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned()),
     }
 }

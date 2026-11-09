@@ -21,7 +21,7 @@ pub fn page(s: &App, k: &Kit, _layer: &mut Vec<El>) -> (El, Toolbar, El) {
 fn toolbar(s: &App, unsynced: usize, k: &Kit) -> Toolbar {
     let checking = s.checking.contains(&s.scope);
     let check_label = if checking { "Checking for updates…" } else { "Check skills.sh for updates" };
-    Toolbar::new().leading(page_tabs(s, k)).title(scope_title(&s.scope)).trailing(
+    Toolbar::new().leading(page_tabs(s, k)).title(scope_title(&s.scope, "skills")).trailing(
         row()
             .gap(6.0)
             .center_y()
