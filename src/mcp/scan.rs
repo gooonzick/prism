@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use crate::agents::{Paths, Scope};
 use crate::mcp::agents::{Flavor, MCP_AGENTS};
 use crate::mcp::formats::{self, Disabled};
-use crate::mcp::model::{self, EnvValue, McpCopy, Place, Transport};
+use crate::mcp::model::{self, EnvValue, McpCopy, Place, Transport, masked_args, masked_url};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -160,13 +160,22 @@ fn server(name: String, mut copies: Vec<McpCopy>, inherited: bool) -> McpServer 
     copies.sort_by_key(|c| (c.agent, place_rank(&c.place)));
     let status = if copies.iter().any(|c| c.read_only.is_some()) {
         Status::ReadOnly
-    } else if copies.windows(2).any(|w| w[0].server.transport != w[1].server.transport) {
+    } else if copies.windows(2).any(|w| !alike(&w[0].server.transport, &w[1].server.transport)) {
         Status::Differs
     } else {
         Status::InSync
     };
     let diffs = diffs(&copies);
     McpServer { name, copies, inherited, status, diffs, disabled_for: Vec::new() }
+}
+
+/// Equal apart from the HTTP flavour: agents infer SSE differently (a Cursor `url` and a Claude
+/// `type: sse` are the same server), so the flavour stays in the model but not in comparisons.
+fn alike(a: &Transport, b: &Transport) -> bool {
+    match (a, b) {
+        (Transport::Http { url: u1, headers: h1, .. }, Transport::Http { url: u2, headers: h2, .. }) => u1 == u2 && h1 == h2,
+        _ => a == b,
+    }
 }
 
 /// A field's value in one copy: compared as decoded, shown masked.
@@ -180,8 +189,8 @@ enum Field<'a> {
 impl Field<'_> {
     fn shown(&self) -> String {
         match self {
-            Field::Text(t) => t.clone(),
-            Field::Args(args) => args.join(" "),
+            Field::Text(t) => masked_url(t),
+            Field::Args(args) => masked_args(args).join(" "),
             Field::Value(v) => v.masked(),
         }
     }
@@ -204,8 +213,8 @@ fn fields(t: &Transport) -> BTreeMap<String, Field<'_>> {
             }
             f.extend(env.iter().map(|(k, v)| (format!("env.{k}"), Field::Value(v))));
         }
-        Transport::Http { url, headers, sse } => {
-            f.insert("transport kind".into(), Field::Text(if *sse { "sse" } else { "http" }.into()));
+        Transport::Http { url, headers, .. } => {
+            f.insert("transport kind".into(), Field::Text("http".into()));
             f.insert("url".into(), Field::Text(url.clone()));
             f.extend(headers.iter().map(|(k, v)| (format!("headers.{k}"), Field::Value(v))));
         }
@@ -266,7 +275,7 @@ fn likeness(t: &Transport) -> (String, Vec<String>) {
         Transport::Http { url, .. } => (format!("same URL {url}"), vec![]),
         Transport::Stdio { command, args, .. } => match package(command, args) {
             Some((package, rest)) => (format!("same package {package}"), rest.to_vec()),
-            None => (format!("same command {}", std::iter::once(command).chain(args).cloned().collect::<Vec<_>>().join(" ")), vec![]),
+            None => (format!("same command {}", std::iter::once(command.clone()).chain(masked_args(args)).collect::<Vec<_>>().join(" ")), args.clone()),
         },
     }
 }
@@ -283,10 +292,11 @@ fn package<'a>(command: &str, args: &'a [String]) -> Option<(&'a str, &'a [Strin
 }
 
 /// Groups of differently named servers sharing a URL or a package, each group once.
-/// Read-only servers are left out: Prism can't rename them.
+/// Read-only servers are left out: Prism can't rename them. So are inherited ones: renaming
+/// them from a project would edit the global configs.
 fn merges(servers: &[McpServer]) -> Vec<MergeHint> {
     let mut alike: BTreeMap<(String, Vec<String>), BTreeSet<&str>> = BTreeMap::new();
-    for s in servers.iter().filter(|s| s.status != Status::ReadOnly) {
+    for s in servers.iter().filter(|s| s.status != Status::ReadOnly && !s.inherited) {
         for c in &s.copies {
             alike.entry(likeness(&c.server.transport)).or_default().insert(&s.name);
         }
@@ -404,8 +414,51 @@ mod tests {
         let x = scan(&Scope::Global, &paths).get("x").cloned().unwrap();
         let fields: Vec<_> = x.diffs.iter().map(|d| d.field.as_str()).collect();
         assert_eq!(fields, ["transport kind", "command", "args", "url"]);
-        assert_eq!(x.diffs[0].values, [(agent("claude"), Some("sse".into())), (agent("cursor"), Some("stdio".into()))]);
+        assert_eq!(x.diffs[0].values, [(agent("claude"), Some("http".into())), (agent("cursor"), Some("stdio".into()))]);
         assert_eq!(x.diffs[2].values, [(agent("claude"), None), (agent("cursor"), Some("x-mcp".into()))]);
+    }
+
+    #[test]
+    fn sse_and_http_flavours_are_the_same_server() {
+        let (_dir, paths) = home();
+        let url = "http://127.0.0.1:3845/sse";
+        claude_json(&paths, json!({ "mcpServers": { "figma": { "type": "sse", "url": url } } }));
+        cursor_json(&paths, json!({ "mcpServers": { "figma": { "url": url } } }));
+
+        let figma = scan(&Scope::Global, &paths).get("figma").cloned().unwrap();
+        assert_eq!((figma.status, figma.diffs.len()), (Status::InSync, 0));
+        let Transport::Http { sse, .. } = &figma.copies[0].server.transport else { panic!("figma is http") };
+        assert!(*sse, "the model keeps the flavour");
+    }
+
+    #[test]
+    fn diffs_mask_secrets_in_args_and_urls() {
+        let (_dir, paths) = home();
+        claude_json(
+            &paths,
+            json!({ "mcpServers": {
+                "figma": { "command": "npx", "args": ["-y", "figma-developer-mcp", "--figma-api-key=fake-a"] },
+                "remote": { "type": "http", "url": "https://u:fake@mcp.example.com/mcp?api_key=fake-a&team=1" }
+            } }),
+        );
+        cursor_json(
+            &paths,
+            json!({ "mcpServers": {
+                "figma": { "command": "npx", "args": ["-y", "figma-developer-mcp", "--figma-api-key=fake-b"] },
+                "remote": { "url": "https://mcp.example.com/mcp?api_key=fake-b&team=1" }
+            } }),
+        );
+
+        let inv = scan(&Scope::Global, &paths);
+        let figma = inv.get("figma").unwrap();
+        let shown = Some("-y figma-developer-mcp --figma-api-key=***".to_string());
+        assert_eq!(figma.diffs, [FieldDiff { field: "args".into(), values: vec![(agent("claude"), shown.clone()), (agent("cursor"), shown)] }]);
+        let remote = inv.get("remote").unwrap();
+        let values = vec![
+            (agent("claude"), Some("https://***@mcp.example.com/mcp?api_key=***&team=1".to_string())),
+            (agent("cursor"), Some("https://mcp.example.com/mcp?api_key=***&team=1".to_string())),
+        ];
+        assert_eq!(remote.diffs, [FieldDiff { field: "url".into(), values }]);
     }
 
     #[test]
@@ -465,6 +518,28 @@ mod tests {
             [hint(&["context7", "ctx"], "same URL https://mcp.context7.com/mcp"), hint(&["figma", "figma-dev", "figma-pn"], "same package figma-developer-mcp")],
             "read-only copies and other args don't count"
         );
+    }
+
+    #[test]
+    fn project_merge_hints_skip_inherited_servers() {
+        let (dir, paths) = home();
+        let root = dir.path().join("app");
+        std::fs::create_dir_all(&root).unwrap();
+        let ctx7 = json!({ "type": "http", "url": "https://mcp.context7.com/mcp" });
+        claude_json(
+            &paths,
+            json!({
+                "mcpServers": { "ctx": ctx7, "ctx-old": ctx7 },
+                "projects": { root.to_string_lossy(): { "mcpServers": { "context7": ctx7 } } }
+            }),
+        );
+        write(&root.join(".cursor/mcp.json"), &json!({ "mcpServers": { "c7": { "url": "https://mcp.context7.com/mcp" } } }).to_string());
+
+        let names = |inv: McpInventory| inv.merges.into_iter().map(|h| h.names).collect::<Vec<_>>();
+        assert_eq!(names(scan(&Scope::Global, &paths)), [["ctx", "ctx-old"]]);
+        let project = scan(&Scope::Project(root), &paths);
+        assert!(project.get("ctx").unwrap().inherited);
+        assert_eq!(names(project), [["c7", "context7"]], "renaming an inherited server would edit the global configs");
     }
 
     #[test]

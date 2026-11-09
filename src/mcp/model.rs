@@ -100,6 +100,80 @@ pub fn read_only(server: &Server) -> Option<String> {
     bundle.file_stem().map(|s| s.to_string_lossy().into_owned())
 }
 
+/// A flag or query key that usually carries a secret.
+fn secret_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    ["key", "token", "secret", "password", "auth", "bearer"].iter().any(|w| name.contains(w))
+}
+
+/// 24+ characters of `[A-Za-z0-9_-]` with a digit or a capital: an API token. Long package
+/// names (`mcp-server-sequential-thinking`) are lower-case words, so they stay readable.
+fn opaque_token(arg: &str) -> bool {
+    arg.len() >= 24
+        && !arg.starts_with('-')
+        && arg.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        && arg.bytes().any(|b| b.is_ascii_digit() || b.is_ascii_uppercase())
+}
+
+/// Args for printing, with likely secrets as `***`: the value of a secret-named flag
+/// (`--api-key=***`, or the arg after `--token`), opaque tokens, and credentials in URLs.
+/// Package names, paths and plain URLs stay readable.
+pub fn masked_args(args: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut hide_next = false;
+    for arg in args {
+        if std::mem::take(&mut hide_next) {
+            out.push("***".into());
+            continue;
+        }
+        let shown = match arg.starts_with('-').then(|| arg.split_once('=')) {
+            Some(Some((flag, value))) if secret_name(flag) || opaque_token(value) => format!("{flag}=***"),
+            Some(Some((flag, value))) => format!("{flag}={}", masked_url(value)),
+            Some(None) => {
+                hide_next = secret_name(arg);
+                arg.clone()
+            }
+            None if opaque_token(arg) => "***".into(),
+            None => masked_url(arg),
+        };
+        out.push(shown);
+    }
+    out
+}
+
+/// A URL (or any text) for printing: userinfo (`https://***@host`) and the values of
+/// secret-named query keys (`?api_key=***`) masked, the rest as written.
+pub fn masked_url(text: &str) -> String {
+    let (head, fragment) = text.split_once('#').map_or((text, None), |(h, f)| (h, Some(f)));
+    let (base, query) = head.split_once('?').map_or((head, None), |(b, q)| (b, Some(q)));
+    let mut out = match base.split_once("://") {
+        Some((scheme, rest)) => {
+            let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+            match authority.rfind('@') {
+                Some(at) => format!("{scheme}://***{}{path}", &authority[at..]),
+                None => base.to_string(),
+            }
+        }
+        None => base.to_string(),
+    };
+    if let Some(query) = query {
+        let pairs: Vec<String> = query
+            .split('&')
+            .map(|pair| match pair.split_once('=') {
+                Some((key, _)) if secret_name(key) => format!("{key}=***"),
+                _ => pair.to_string(),
+            })
+            .collect();
+        out.push('?');
+        out.push_str(&pairs.join("&"));
+    }
+    if let Some(fragment) = fragment {
+        out.push('#');
+        out.push_str(fragment);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,6 +190,40 @@ mod tests {
         assert_eq!(read_only(&stdio("/opt/tools/my.application/bin/x")), None);
         let http = Server { name: "x".into(), transport: Transport::Http { url: "https://a.app/mcp".into(), headers: BTreeMap::new(), sse: false } };
         assert_eq!(read_only(&http), None);
+    }
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn masked_args_hide_values_of_secret_flags() {
+        let masked = masked_args(&strings(&["-y", "figma-developer-mcp", "--figma-api-key=fake", "-Password=fake", "--port=3000", "--stdio"]));
+        assert_eq!(masked, ["-y", "figma-developer-mcp", "--figma-api-key=***", "-Password=***", "--port=3000", "--stdio"]);
+    }
+
+    #[test]
+    fn masked_args_hide_the_arg_after_a_secret_flag() {
+        let masked = masked_args(&strings(&["--token", "fake", "--port", "3000", "--AUTH_HEADER", "Bearer fake", "--bearer"]));
+        assert_eq!(masked, ["--token", "***", "--port", "3000", "--AUTH_HEADER", "***", "--bearer"]);
+    }
+
+    #[test]
+    fn masked_args_hide_opaque_tokens_and_keep_names_paths_and_urls() {
+        let keep = ["@modelcontextprotocol/server-filesystem", "/Users/someone/Library/Application Support", "https://mcp.example.com/mcp", "mcp-server-sequential-thinking", "short_tok3n"];
+        assert_eq!(masked_args(&strings(&keep)), keep);
+        assert_eq!(masked_args(&strings(&["ghp_fake0123456789abcdefABCDEF", "0123456789abcdef0123456789"])), ["***", "***"]);
+        assert_eq!(masked_args(&strings(&["--url=https://u:fake@h.example.com/x", "https://h.example.com/?token=fake"])), ["--url=https://***@h.example.com/x", "https://h.example.com/?token=***"]);
+    }
+
+    #[test]
+    fn masked_url_hides_userinfo_and_secret_query_values() {
+        assert_eq!(masked_url("https://user:fake@host.example.com/x"), "https://***@host.example.com/x");
+        assert_eq!(masked_url("https://h.example.com/x?api_key=fake&page=2&Auth=fake#frag"), "https://h.example.com/x?api_key=***&page=2&Auth=***#frag");
+        assert_eq!(masked_url("https://h.example.com/a@b?q=1"), "https://h.example.com/a@b?q=1", "an @ in the path is no userinfo");
+        for plain in ["https://mcp.context7.com/mcp", "npx", "/work/app", "http://127.0.0.1:3845/sse"] {
+            assert_eq!(masked_url(plain), plain);
+        }
     }
 
     #[test]
