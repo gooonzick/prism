@@ -695,12 +695,21 @@ fn read_only_server_has_no_actions() {
 }
 
 #[test]
-fn inherited_server_offers_switch_but_not_remove() {
+fn inherited_row_offers_edit_and_switch_only() {
     let mut h = mcp_home();
     h.click("tab-mcp");
     h.click("mcp-row-plata");
     assert!(h.rt.find("mcp-enable").is_some(), "Claude Code skips plata here");
-    assert!(h.rt.find("mcp-remove").is_none(), "a global server isn't removed from a project");
+    assert!(h.rt.find("mcp-edit").is_some(), "editing an inherited row edits the global server");
+    for key in ["mcp-copy", "mcp-remove"] {
+        assert!(h.rt.find(key).is_none(), "a global server offers no {key} in a project");
+    }
+    h.click("mcp-edit");
+    h.fill_form(|f| f.env.retain(|p| p.key.text != "PLATA_HOST"));
+    h.click("mcp-add-save");
+    let d = h.rt.state.mcp_dialog.as_ref().expect("the edit plan is open");
+    assert!(d.plan.clone().unwrap().unwrap().warnings.iter().any(|w| w == "edits the global server"));
+    h.click("mcp-cancel");
     h.click("mcp-enable");
     h.click("mcp-apply");
     let claude = json(&h.root.join(".claude.json"));
@@ -712,8 +721,17 @@ fn inherited_server_offers_switch_but_not_remove() {
 #[test]
 fn apply_refused_when_files_changed_replans() {
     let mut h = mcp_home();
-    let cursor = h.root.join(".cursor/mcp.json");
+    let (claude, cursor) = (h.root.join(".claude.json"), h.root.join(".cursor/mcp.json"));
+    let original = read(&claude);
     h.mcp_global();
+    // A first change, to undo at the end: its backups must survive the refused apply.
+    h.click("mcp-add");
+    h.fill_form(|f| {
+        f.name = rune::TextEdit::new("first");
+        f.command = rune::TextEdit::new("first-mcp");
+    });
+    h.click("mcp-add-save");
+    assert_eq!(h.rt.state.last_change.as_ref().unwrap().label, "add first");
     h.click("mcp-row-plata");
     h.click("mcp-remove");
     let first = h.rt.state.mcp_dialog.as_ref().and_then(|d| d.plan.clone()).unwrap().unwrap().id();
@@ -728,7 +746,13 @@ fn apply_refused_when_files_changed_replans() {
     assert_ne!(d.plan.clone().unwrap().unwrap().id(), first);
     assert!(h.texts().contains("The files changed; here is the new plan"));
     assert!(json(&cursor)["mcpServers"]["plata"].is_object(), "nothing was written");
-    assert!(h.rt.state.last_change.is_none());
+    assert_eq!(h.rt.state.last_change.as_ref().unwrap().label, "add first", "the refused apply is no change");
+    h.click("mcp-cancel");
+    key(&mut h, rune::Key::Command('z'), rune::Mods { cmd: true, ..rune::Mods::default() });
+    assert_eq!(read(&claude), original, "the first change still undoes");
+
+    h.click("mcp-row-plata");
+    h.click("mcp-remove");
 
     h.click("mcp-apply");
     assert!(h.rt.state.mcp_dialog.is_none());
@@ -754,9 +778,33 @@ fn add_validation_messages() {
     h.click("mcp-add-save");
     assert_eq!(error(&h), "Give the command to run");
     assert!(h.texts().contains("Give the command to run"), "the message is drawn");
+    h.fill_form(|f| f.command = rune::TextEdit::new("fresh-mcp"));
+    h.click("mcp-add-env-add");
+    h.click("mcp-add-env-add");
+    h.fill_form(|f| {
+        f.env[0].key = rune::TextEdit::new("TOKEN");
+        f.env[1].key = rune::TextEdit::new("TOKEN");
+        f.env[1].value = rune::TextEdit::new("fake-dup-secret").secure();
+    });
+    h.click("mcp-add-save");
+    assert_eq!(error(&h), "Two variables are named TOKEN");
+    assert!(!h.texts().contains("fake-dup-secret"));
     h.click("mcp-add-kind-http");
     h.click("mcp-add-save");
     assert_eq!(error(&h), "Give the server's URL");
+    h.fill_form(|f| {
+        f.url = rune::TextEdit::new("https://fresh.example.com/mcp");
+        f.headers = Vec::new();
+    });
+    h.click("mcp-add-header-add");
+    h.click("mcp-add-header-add");
+    h.fill_form(|f| {
+        f.headers[0].key = rune::TextEdit::new("Authorization");
+        f.headers[1].key = rune::TextEdit::new("authorization");
+    });
+    h.click("mcp-add-save");
+    assert_eq!(error(&h), "Two headers are named authorization", "header names match without case");
+    h.click("mcp-add-header-1-remove");
     h.fill_form(|f| f.url = rune::TextEdit::new("https://fresh.example.com/mcp"));
     h.click("mcp-add-agent-claude");
     h.click("mcp-add-save");
@@ -775,6 +823,16 @@ fn cmd_n_opens_add_on_mcp_page() {
     key(&mut h, rune::Key::Command('n'), cmd);
     assert!(h.rt.state.mcp_form.is_some() && h.rt.state.new_skill.is_none());
     assert!(h.rt.find("mcp-add-name").is_some());
+
+    // An open form or plan keeps what it has.
+    h.fill_form(|f| f.name = rune::TextEdit::new("typed"));
+    key(&mut h, rune::Key::Command('n'), cmd);
+    assert_eq!(h.rt.state.mcp_form.as_ref().unwrap().name.text, "typed");
+    h.click("mcp-add-cancel");
+    h.click("mcp-row-plata");
+    h.click("mcp-enable");
+    key(&mut h, rune::Key::Command('n'), cmd);
+    assert!(h.rt.state.mcp_form.is_none() && h.rt.state.mcp_dialog.is_some());
 }
 
 #[test]
@@ -848,4 +906,42 @@ fn return_in_the_name_field_adds_the_server() {
     key(&mut h, rune::Key::Enter, rune::Mods::default());
     assert!(h.rt.state.mcp_form.is_none());
     assert!(h.rt.state.mcp.get("fresh").is_some());
+}
+
+#[test]
+fn refused_add_keeps_the_last_change_undoable() {
+    let mut h = mcp_home();
+    fs::create_dir_all(h.root.join(".gemini")).unwrap();
+    let (claude, cursor, gemini) = (h.root.join(".claude.json"), h.root.join(".cursor/mcp.json"), h.root.join(".gemini/settings.json"));
+    let before = (read(&claude), read(&cursor));
+    h.mcp_global();
+    h.click("mcp-row-plata");
+    h.click("mcp-remove");
+    h.click("mcp-apply");
+    assert_eq!(h.rt.state.last_change.as_ref().unwrap().label, "remove plata");
+
+    // An Add planned for Gemini, whose file then changes before it is written.
+    h.click("mcp-add");
+    h.fill_form(|f| {
+        f.name = rune::TextEdit::new("fresh");
+        f.command = rune::TextEdit::new("fresh-mcp");
+    });
+    let g = gemini.clone();
+    h.rt.update(move |s, _| {
+        let server = crate::mcp::model::Server { name: "fresh".into(), transport: s.mcp_form.as_ref().unwrap().transport().unwrap() };
+        let to = vec![crate::mcp::agents::index_of("gemini").unwrap()];
+        let request = crate::mcp::plan::Request::Add { server, to, claude_scope: Default::default() };
+        let plan = crate::mcp::plan::plan(&s.mcp, &request, &s.paths).unwrap();
+        fs::write(&g, r#"{"theme":"dark"}"#).unwrap();
+        s.write_mcp_add("fresh", plan);
+    });
+    h.settle();
+    let form = h.rt.state.mcp_form.as_ref().expect("the form stays open");
+    assert_eq!(form.error.as_deref(), Some("The files changed; try again"));
+    assert_eq!(read(&gemini), r#"{"theme":"dark"}"#, "nothing was written");
+    assert_eq!(h.rt.state.last_change.as_ref().unwrap().label, "remove plata");
+
+    h.click("mcp-add-cancel");
+    key(&mut h, rune::Key::Command('z'), rune::Mods { cmd: true, ..rune::Mods::default() });
+    assert_eq!((read(&claude), read(&cursor)), before, "the remove still undoes byte for byte");
 }

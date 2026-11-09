@@ -292,10 +292,12 @@ fn drive(ctx: &Ctx, plan: McpPlan, label: String, a: Apply, immediate: bool, out
         out.emit(plan_text(&plan, &lines, &id), plan_json(&plan, &lines, &id, false));
         return if immediate { Exit::Failed } else { Exit::Ok };
     }
-    // Backups of the last change go only now that there is a change to make.
-    store::begin_change(&ctx.paths);
+    // Backups of the last change go only once the plan still matches the files.
     let mut journal = Journal::default();
-    let result = plan::apply(&plan, &ctx.paths, &mut journal);
+    let result = plan::verify(&plan).map_err(|e| (0, e)).and_then(|()| {
+        store::begin_change(&ctx.paths);
+        plan::apply(&plan, &ctx.paths, &mut journal)
+    });
     if !journal.is_empty() {
         store::save_last_change(&ctx.paths, Some(&LastChange { label, journal }));
     }

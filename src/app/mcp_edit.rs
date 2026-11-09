@@ -31,6 +31,8 @@ pub struct McpForm {
     /// The command and its args, split on spaces; double quotes keep a space in an arg.
     pub command: TextEdit,
     pub url: TextEdit,
+    /// The command line as prefilled for an edit: text left as it was changes nothing.
+    pub line_before: String,
     /// The prefilled command line or URL holds a likely secret, so it is masked until shown.
     pub line_secret: bool,
     pub line_shown: bool,
@@ -75,12 +77,17 @@ impl McpForm {
 
     /// The rows as typed, keyed; a row with a value but no key is an error.
     fn typed(&self) -> Result<Vec<(String, String)>, String> {
-        let mut out = Vec::new();
+        let mut out: Vec<(String, String)> = Vec::new();
+        // Header names match without case, as the agents read them.
+        let same = |a: &str, b: &str| if self.http { a.eq_ignore_ascii_case(b) } else { a == b };
         for p in self.pairs(self.http) {
             let key = p.key.text.trim();
             match (key.is_empty(), p.value.text.is_empty()) {
                 (true, true) => continue,
                 (true, false) => return Err("Name each value, or remove its row".into()),
+                _ if out.iter().any(|(k, _)| same(k, key)) => {
+                    return Err(format!("Two {} are named {key}", if self.http { "headers" } else { "variables" }));
+                }
                 _ => out.push((key.to_string(), p.value.text.clone())),
             }
         }
@@ -99,7 +106,7 @@ impl McpForm {
     }
 
     /// The transport the fields describe.
-    fn transport(&self) -> Result<Transport, String> {
+    pub fn transport(&self) -> Result<Transport, String> {
         let values = |pairs: Vec<(String, String)>| pairs.into_iter().map(|(k, v)| (k, EnvValue::parse(&v))).collect::<BTreeMap<_, _>>();
         if self.http {
             let url = self.url_text()?;
@@ -128,13 +135,16 @@ impl McpForm {
         let mut changes = Vec::new();
         match old {
             Transport::Stdio { command, args, env, .. } => {
-                let mut parts = self.command_line()?;
-                let new_command = parts.remove(0);
-                if new_command != *command {
-                    changes.push(EditChange::Command(new_command));
-                }
-                if parts != *args {
-                    changes.push(EditChange::Args(parts));
+                // A line left as prefilled is no change, whatever the split would make of it.
+                if self.command.text != self.line_before {
+                    let mut parts = self.command_line()?;
+                    let new_command = parts.remove(0);
+                    if new_command != *command {
+                        changes.push(EditChange::Command(new_command));
+                    }
+                    if parts != *args {
+                        changes.push(EditChange::Args(parts));
+                    }
                 }
                 changes.extend(diff(env, EditChange::SetEnv, EditChange::UnsetEnv));
             }
@@ -150,11 +160,17 @@ impl McpForm {
     }
 }
 
-/// Words split on whitespace; double quotes keep whitespace inside one word.
+/// Words split on whitespace; double quotes keep whitespace inside one word, and `\"` and
+/// `\\` stand for a quote and a backslash. Any other backslash is itself (`C:\dir`).
 pub fn split_command(line: &str) -> Vec<String> {
     let (mut out, mut word, mut quoted, mut any) = (Vec::new(), String::new(), false, false);
-    for c in line.chars() {
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
         match c {
+            '\\' if matches!(chars.peek(), Some('"' | '\\')) => {
+                word.extend(chars.next());
+                any = true;
+            }
             '"' => {
                 quoted = !quoted;
                 any = true;
@@ -179,8 +195,22 @@ pub fn split_command(line: &str) -> Vec<String> {
 
 /// The command line as [`split_command`] reads it back.
 fn join_command(command: &str, args: &[String]) -> String {
-    let quote = |w: &str| if w.is_empty() || w.contains(char::is_whitespace) { format!("\"{w}\"") } else { w.to_string() };
-    std::iter::once(command).chain(args.iter().map(String::as_str)).map(quote).collect::<Vec<_>>().join(" ")
+    std::iter::once(command).chain(args.iter().map(String::as_str)).map(quote_word).collect::<Vec<_>>().join(" ")
+}
+
+/// One word for [`split_command`]: quotes escaped, a backslash escaped only where it would
+/// otherwise read as an escape, and the whole in quotes when empty or holding whitespace.
+fn quote_word(w: &str) -> String {
+    let chars: Vec<char> = w.chars().collect();
+    let mut out = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' if matches!(chars.get(i + 1), None | Some('"' | '\\')) => out.push_str("\\\\"),
+            c => out.push(c),
+        }
+    }
+    if w.is_empty() || w.contains(char::is_whitespace) { format!("\"{out}\"") } else { out }
 }
 
 impl McpChange {
@@ -269,6 +299,7 @@ impl App {
             http: false,
             command: TextEdit::new(""),
             url: TextEdit::new(""),
+            line_before: String::new(),
             line_secret: false,
             line_shown: false,
             env: Vec::new(),
@@ -293,12 +324,14 @@ impl App {
             Transport::Http { url, headers, .. } => (true, String::new(), url.clone(), masked_url(url) != *url, Vec::new(), pairs(headers)),
         };
         let line = |text: String| if line_secret { TextEdit::new(text).secure() } else { TextEdit::new(text) };
+        let line_before = command.clone();
         self.mcp_form = Some(McpForm {
             editing: Some((name.to_string(), t)),
             name: TextEdit::new(name),
             http,
             command: line(command),
             url: line(url),
+            line_before,
             line_secret,
             line_shown: false,
             env,
@@ -375,6 +408,9 @@ impl App {
             }
             return;
         }
+        // Checked and planned against the configs as they are now.
+        self.rescan_mcp();
+        let Some(form) = &mut self.mcp_form else { return };
         let name = form.name.text.trim().to_string();
         let checked = if name.is_empty() {
             Err("Name the server".to_string())
@@ -404,6 +440,18 @@ impl App {
             self.notify(format!("Couldn't add {name}"), notes(&plan), true);
             return;
         }
+        self.write_mcp_add(&name, plan);
+    }
+
+    /// Writes a planned Add and reports it. A file that changed since the plan keeps the form
+    /// open, before the last change's backups go.
+    pub fn write_mcp_add(&mut self, name: &str, plan: McpPlan) {
+        if plan::verify(&plan).is_err() {
+            if let Some(f) = &mut self.mcp_form {
+                f.error = Some("The files changed; try again".into());
+            }
+            return;
+        }
         self.mcp_form = None;
         let mut j = self.new_journal();
         let n = plan.files.len();
@@ -412,8 +460,8 @@ impl App {
         if let Some(n) = self.notice.as_mut().filter(|n| !n.error) {
             n.detail = notes(&plan);
         }
-        if self.mcp.get(&name).is_some() {
-            self.select_mcp(&name);
+        if self.mcp.get(name).is_some() {
+            self.select_mcp(name);
         }
     }
 
@@ -495,40 +543,27 @@ impl App {
         }
     }
 
-    /// Writes the dialog's plan. A plan made from files that changed since is shown again, made
-    /// anew, before anything is written: the last change's backups go only for a real change.
+    /// Writes the dialog's plan. A plan whose files changed since is planned again and shown
+    /// with a notice, before the last change's backups go.
     pub fn apply_mcp_plan(&mut self) {
-        let Some(McpDialog { plan: Some(Ok(shown)), .. }) = &self.mcp_dialog else { return };
-        if shown.is_empty() {
+        let Some(McpDialog { plan: Some(Ok(plan)), .. }) = &self.mcp_dialog else { return };
+        if plan.is_empty() {
             return;
         }
-        let shown = shown.id();
-        self.rescan_mcp();
-        self.replan_mcp();
-        let Some(d) = &mut self.mcp_dialog else { return };
-        let fresh = match &d.plan {
-            Some(Ok(p)) if p.id() == shown => p.clone(),
-            _ => {
+        if plan::verify(plan).is_err() {
+            self.rescan_mcp();
+            self.replan_mcp();
+            if let Some(d) = &mut self.mcp_dialog {
                 d.notice = Some(FILES_CHANGED.into());
-                return;
             }
-        };
-        let Some(d) = self.mcp_dialog.take() else { return };
+            return;
+        }
+        let Some(McpDialog { change, plan: Some(Ok(plan)), .. }) = self.mcp_dialog.take() else { return };
         let mut j = self.new_journal();
-        let n = fresh.files.len();
-        let result = match plan::apply(&fresh, &self.paths, &mut j) {
-            Ok(_) => Ok(d.change.done()),
-            // Written to between the check and the write: nothing was, so plan again.
-            Err((_, e)) if j.is_empty() && e.ends_with("changed since the plan") => {
-                self.mcp_dialog = Some(McpDialog { notice: Some(FILES_CHANGED.into()), ..d });
-                self.rescan_mcp();
-                self.replan_mcp();
-                return;
-            }
-            Err((done, e)) => Err(format!("Stopped after {done} of {n} files: {e}")),
-        };
-        self.changed(d.change.label(), j, result);
-        if let McpChange::Merge { into, .. } = &d.change
+        let n = plan.files.len();
+        let result = plan::apply(&plan, &self.paths, &mut j).map(|_| change.done()).map_err(|(done, e)| format!("Stopped after {done} of {n} files: {e}"));
+        self.changed(change.label(), j, result);
+        if let McpChange::Merge { into, .. } = &change
             && self.mcp.get(into.text.trim()).is_some()
         {
             self.mcp_selected = Some(into.text.trim().to_string());
@@ -567,6 +602,7 @@ mod tests {
             http,
             command: TextEdit::new(""),
             url: TextEdit::new("https://h.example.com/mcp"),
+            line_before: String::new(),
             line_secret: false,
             line_shown: false,
             env,
@@ -580,8 +616,23 @@ mod tests {
     #[test]
     fn split_command_keeps_quoted_spaces_and_round_trips() {
         assert_eq!(split_command(r#"  npx -y "a b" "" c"#), ["npx", "-y", "a b", "", "c"]);
-        let args = vec!["-y".to_string(), "a b".into(), String::new()];
-        assert_eq!(split_command(&join_command("npx", &args)), ["npx", "-y", "a b", ""]);
+        assert_eq!(split_command(r#"x say\"hi\" {\"a\":1} C:\dir"#), ["x", r#"say"hi""#, r#"{"a":1}"#, r"C:\dir"]);
+        let args: Vec<String> = ["-y", "a b", "", r#"say "hi""#, r#"{"a":1}"#, r"C:\dir", r"ends\", r"two\\"].iter().map(|a| a.to_string()).collect();
+        let mut back = split_command(&join_command("npx", &args));
+        assert_eq!(back.remove(0), "npx");
+        assert_eq!(back, args);
+    }
+
+    #[test]
+    fn an_untouched_command_line_is_no_change() {
+        let args: Vec<String> = ["--json", r#"{"a":1}"#, r#"say "hi""#].iter().map(|a| a.to_string()).collect();
+        let old = Transport::Stdio { command: "npx".into(), args: args.clone(), env: BTreeMap::new(), cwd: None };
+        let mut f = form(false, &[]);
+        f.line_before = join_command("npx", &args);
+        f.command = TextEdit::new(f.line_before.clone());
+        assert!(f.changes(&old).unwrap().is_empty());
+        f.command = TextEdit::new(f.line_before.replacen("npx", "bunx", 1));
+        assert_eq!(f.changes(&old).unwrap(), [EditChange::Command("bunx".into())], "the args read back as they were");
     }
 
     #[test]

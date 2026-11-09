@@ -323,18 +323,19 @@ fn inspector(s: &App, k: &Kit) -> El {
 }
 
 /// Copy, edit and the project switch on the left; Remove apart on the right. An app's server
-/// has none; a global server seen from a project can't be removed there.
+/// has none; a global server seen from a project offers only Edit and the switch.
 fn actions(s: &App, server: &McpServer, k: &Kit) -> Option<El> {
     if server.status == Status::ReadOnly {
         return None;
     }
     let small = |label: &str| Button::new(label).variant(ButtonVariant::Outline).control_size(ControlSize::Small);
     let (copy, edit, switch, remove) = (server.name.clone(), server.name.clone(), server.name.clone(), server.name.clone());
-    let mut left = row()
-        .gap(6.0)
-        .center_y()
-        .child(small("Copy to…").help("Write it to more agents").on_press(move |s: &mut App| s.open_mcp_copy(&copy)).build(k).key("mcp-copy"))
-        .child(
+    let mut left = row().gap(6.0).center_y();
+    // A global server seen from a project is copied from the global scope.
+    if !server.inherited {
+        left = left.child(small("Copy to…").help("Write it to more agents").on_press(move |s: &mut App| s.open_mcp_copy(&copy)).build(k).key("mcp-copy"));
+    }
+    left = left.child(
             small("Edit…")
                 .help(if server.inherited { "Edits the global server" } else { "Change its command, URL or values in every copy" })
                 .on_press(move |s: &mut App| s.open_mcp_edit(&edit))

@@ -228,20 +228,10 @@ pub fn plan(inv: &McpInventory, req: &Request, paths: &Paths) -> Result<McpPlan,
 /// its planned hash, edited in memory by all of its actions and written once through `j`.
 /// Returns the files written; on failure, how many were written before it (undo takes them back).
 pub fn apply(plan: &McpPlan, paths: &Paths, j: &mut Journal) -> Result<usize, (usize, String)> {
-    let mut files: Vec<&Path> = Vec::new();
-    for action in &plan.actions {
-        if !files.contains(&action.file()) {
-            files.push(action.file());
-        }
-    }
     // Nothing is written while any file differs from the plan; each is checked again right
     // before its write, in case it changes meanwhile.
-    for &file in &files {
-        let planned = plan.files.iter().find(|(p, _)| p == file).map(|(_, h)| *h);
-        if planned != Some(planid::file_hash(file)) {
-            return Err((0, format!("{} changed since the plan", file.display())));
-        }
-    }
+    verify(plan).map_err(|e| (0, e))?;
+    let files = written_files(plan);
     let mut written = 0;
     for file in files {
         // The bytes checked are the bytes edited, so nothing slips in between.
@@ -266,6 +256,29 @@ pub fn apply(plan: &McpPlan, paths: &Paths, j: &mut Journal) -> Result<usize, (u
         written += 1;
     }
     Ok(written)
+}
+
+/// Refuses a plan whose files changed since it was made, writing nothing. Callers check first,
+/// before they drop the last change's backups for a change that may not happen.
+pub fn verify(plan: &McpPlan) -> Result<(), String> {
+    for file in written_files(plan) {
+        let planned = plan.files.iter().find(|(p, _)| p == file).map(|(_, h)| *h);
+        if planned != Some(planid::file_hash(file)) {
+            return Err(format!("{} changed since the plan", file.display()));
+        }
+    }
+    Ok(())
+}
+
+/// The files the plan's actions write, once each, in plan order.
+fn written_files(plan: &McpPlan) -> Vec<&Path> {
+    let mut files: Vec<&Path> = Vec::new();
+    for action in &plan.actions {
+        if !files.contains(&action.file()) {
+            files.push(action.file());
+        }
+    }
+    files
 }
 
 fn cant_read(file: &Path, why: &str) -> String {

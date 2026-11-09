@@ -266,7 +266,10 @@ pub fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
         return true;
     }
     if ev.is_command('n') && s.page == Page::Mcp {
-        s.open_mcp_add();
+        // An open form or plan keeps what the user has typed or picked.
+        if s.mcp_form.is_none() && s.mcp_dialog.is_none() {
+            s.open_mcp_add();
+        }
         return true;
     }
     let in_list = s.page == Page::Installed && !s.filter.focused && s.sync_plan.is_none() && s.confirm_remove.is_none();
