@@ -3,11 +3,11 @@
 //! shows one field.
 
 use rune::{Color, El, ScrollSpec, Tx, col, icon, row, text};
-use rune_kit::{Button, ButtonVariant, Checkbox, ControlSize, Dialog, IconButton, IconButtonVariant, Kit, RadioItem, Spinner, TextInput, glyphs};
+use rune_kit::{Button, ButtonVariant, Checkbox, ControlSize, Dialog, IconButton, IconButtonVariant, Kit, Placement, RadioItem, Select, Spinner, TextInput, glyphs};
 
 use super::{heading, row_gap};
 use crate::agents::tilde;
-use crate::app::{App, McpChange, McpForm};
+use crate::app::{App, McpChange, McpDialog, McpForm, Planned, Target};
 use crate::mcp::agents::{Flavor, MCP_AGENTS};
 use crate::mcp::plan::ClaudeScope;
 use crate::plan_view::PlanView;
@@ -284,9 +284,81 @@ pub fn form(s: &App, k: &Kit, layer: &mut Vec<El>) {
         .build(k, layer);
 }
 
+/// The machine a copy goes to: this one, or another environment. Its menu goes in `menus`,
+/// drawn over the dialog.
+fn machine_select(s: &App, across: Option<&Target>, k: &Kit, menus: &mut Vec<El>) -> El {
+    let here = s.env_label();
+    let mut labels = vec![here.clone()];
+    labels.extend(s.across.machines.iter().map(|m| m.label.clone()));
+    let current = across.map_or(here, |t| t.machine.clone());
+    let select = Select::new("mcp-copy-machine", &labels)
+        .current(Some(&current))
+        .label("Machine")
+        .width(240.0)
+        .placement(Placement::BottomStart)
+        .disabled(across.is_some_and(|t| t.applying))
+        .open(s.across.machine_menu)
+        .on_toggle(|s: &mut App| s.across.machine_menu = !s.across.machine_menu)
+        .on_close(|s: &mut App| s.across.machine_menu = false)
+        .on_choose(|s: &mut App, v: &str, _: &mut Tx| s.set_mcp_copy_machine(v))
+        .build(k, menus);
+    block("Machine", select, k)
+}
+
+/// On another machine: where there (Global or one of its projects) and its installed agents.
+fn across_picks(s: &App, t: &Target, k: &Kit, menus: &mut Vec<El>) -> El {
+    let mut c = col().w_full().gap(12.0);
+    let view = match s.machine(&t.machine).and_then(|m| m.view.as_ref()) {
+        None => {
+            let asking = format!("Asking {} for its agents…", t.machine);
+            return c.child(row_gap().child(Spinner::new().build(k)).child(text(asking).font(k.ty.small).color(k.c.text_muted)));
+        }
+        Some(Err(e)) => return c.child(flagged(cross(k.c.danger.icon), e.clone(), k)),
+        Some(Ok(view)) => view,
+    };
+    if !view.projects.is_empty() {
+        let scopes: Vec<(String, crate::agents::Scope)> = view.scopes().into_iter().map(|sc| (view.label(&sc), sc)).collect();
+        let labels: Vec<String> = scopes.iter().map(|(l, _)| l.clone()).collect();
+        let select = Select::new("mcp-copy-scope", &labels)
+            .current(Some(&view.label(&t.dest)))
+            .label("Scope")
+            .width(240.0)
+            .placement(Placement::BottomStart)
+            .disabled(t.applying)
+            .open(s.across.scope_menu)
+            .on_toggle(|s: &mut App| s.across.scope_menu = !s.across.scope_menu)
+            .on_close(|s: &mut App| s.across.scope_menu = false)
+            .on_choose(move |s: &mut App, v: &str, _: &mut Tx| {
+                if let Some((_, scope)) = scopes.iter().find(|(l, _)| l == v) {
+                    s.set_mcp_copy_scope(scope.clone());
+                }
+            })
+            .build(k, menus);
+        c = c.child(block("Scope", select, k));
+    }
+    let agents = view.agents();
+    let mut boxes = col().gap(6.0);
+    if agents.is_empty() {
+        boxes = boxes.child(note(format!("No agent that takes MCP servers is installed on {}.", t.machine), k));
+    }
+    for a in agents {
+        let ticked = t.agents.as_ref().is_some_and(|on| on.contains(&a));
+        boxes = boxes.child(
+            Checkbox::new(ticked)
+                .label(MCP_AGENTS[a].name)
+                .disabled(t.applying)
+                .on_toggle(move |s: &mut App| s.toggle_mcp_copy_to(a))
+                .build(k)
+                .key(format!("mcp-copy-to-{}", MCP_AGENTS[a].id)),
+        );
+    }
+    c.child(block("Agents", boxes, k))
+}
+
 /// What the user picks before the plan: a copy's source and targets, what to remove from,
 /// the merged name. `None` for edit and disable/enable.
-fn picks(s: &App, change: &McpChange, k: &Kit) -> Option<El> {
+fn picks(s: &App, d: &McpDialog, k: &Kit, menus: &mut Vec<El>) -> Option<El> {
+    let change = &d.change;
     let server = s.mcp.get(change.name())?;
     let mut c = col().key("mcp-picks").w_full().gap(12.0);
     match change {
@@ -311,6 +383,13 @@ fn picks(s: &App, change: &McpChange, k: &Kit) -> Option<El> {
                 }
                 c = c.child(heading("Copy from", k)).child(note(if server.inherited { "The copies differ; new copies get the one you pick." } else { "The copies differ; the one you pick also overwrites the others." }, k)).child(sources);
             }
+            c = c.child(heading("Copy to", k));
+            if !s.across.machines.is_empty() {
+                c = c.child(machine_select(s, d.across.as_ref(), k, menus));
+            }
+            if let Some(t) = &d.across {
+                return Some(c.child(across_picks(s, t, k, menus)));
+            }
             let mut targets = col().gap(6.0);
             let free: Vec<usize> = (0..MCP_AGENTS.len()).filter(|&a| s.mcp_detected(a) && s.mcp_can_hold(a) && !server.copies.iter().any(|x| x.agent == a)).collect();
             if free.is_empty() {
@@ -325,7 +404,7 @@ fn picks(s: &App, change: &McpChange, k: &Kit) -> Option<El> {
                         .key(format!("mcp-copy-to-{}", MCP_AGENTS[a].id)),
                 );
             }
-            c = c.child(heading("Copy to", k)).child(targets);
+            c = c.child(targets);
         }
         McpChange::Remove { from, .. } => {
             let mut boxes = col().gap(6.0);
@@ -364,6 +443,18 @@ fn plan_view(s: &App, k: &Kit) -> (El, usize) {
     let d = s.mcp_dialog.as_ref().expect("the plan dialog is open");
     let c = col().key("mcp-plan").w_full().gap(8.0);
     let failed = |c: El, e: &String| (c.child(heading("Changes", k)).child(flagged(cross(k.c.danger.icon), e.clone(), k)), 0);
+    if let Some(t) = &d.across {
+        return match &t.plan {
+            Planned::Asking => {
+                let asking = format!("Asking {} for the plan…", t.machine);
+                (c.child(heading("Changes", k)).child(row_gap().child(Spinner::new().build(k)).child(text(asking).font(k.ty.small).color(k.c.text_muted))), 0)
+            }
+            Planned::Waiting(why) => (c.child(heading("Changes", k)).child(note(why.clone(), k)), 0),
+            Planned::Done(Err(e)) => failed(c, e),
+            // The machine's lines join agents, as a host's do.
+            Planned::Done(Ok(view)) => (lines(c, view.clone(), view.lines.len(), k), view.lines.len()),
+        };
+    }
     let (view, n) = match (&d.plan, &d.host_plan) {
         (_, Some(host)) => match &host.view {
             None => {
@@ -406,8 +497,9 @@ fn lines(mut c: El, view: PlanView, n: usize, k: &Kit) -> El {
     c
 }
 
-fn plan_title(change: &McpChange) -> String {
-    match change {
+fn plan_title(d: &McpDialog) -> String {
+    match &d.change {
+        McpChange::Copy { name, .. } if d.across.is_some() => format!("Copy {name} to {}", d.across.as_ref().map_or("", |t| t.machine.as_str())),
         McpChange::Copy { name, .. } => format!("Copy {name} to more agents"),
         McpChange::Edit { name, .. } => format!("Edit {name}"),
         McpChange::Remove { name, .. } => format!("Remove {name}"),
@@ -423,15 +515,17 @@ pub fn plan(s: &App, k: &Kit, layer: &mut Vec<El>) {
     let (changes, n) = plan_view(s, k);
     let changes = col().w_full().h(240.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(changes);
     let mut b = body();
-    if let Some(notice) = &d.notice {
+    if let Some(notice) = d.across.as_ref().and_then(|t| t.notice.as_ref()).or(d.notice.as_ref()) {
         b = b.child(flagged(spot(k.c.warning.icon), notice.clone(), k).key("mcp-plan-notice"));
     }
-    b = b.child(match picks(s, &d.change, k) {
+    let mut menus = Vec::new();
+    b = b.child(match picks(s, d, k, &mut menus) {
         Some(p) => row().w_full().gap(20.0).items_start().child(col().w(240.0).child(p)).child(col().grow(1.0).min_w(0.0).child(changes)),
         None => changes,
     });
     let danger = matches!(d.change, McpChange::Remove { .. });
-    let apply = if d.host_plan.as_ref().is_some_and(|p| p.applying) {
+    let applying = d.host_plan.as_ref().is_some_and(|p| p.applying) || d.across.as_ref().is_some_and(|t| t.applying);
+    let apply = if applying {
         Button::new("Applying…").variant(ButtonVariant::Loading).disabled(true)
     } else {
         Button::new(if n == 0 { "Nothing to do".to_string() } else { format!("Apply {n} change{}", if n == 1 { "" } else { "s" }) })
@@ -444,13 +538,15 @@ pub fn plan(s: &App, k: &Kit, layer: &mut Vec<El>) {
         .justify_end()
         .child(Button::new("Cancel").variant(ButtonVariant::Ghost).on_press(|s: &mut App| s.close_mcp_dialog()).build(k).key("mcp-cancel"))
         .child(apply.on_press(|s: &mut App| s.apply_mcp_plan()).build(k).key("mcp-apply"));
-    Dialog::new("mcp-plan", plan_title(&d.change))
+    Dialog::new("mcp-plan", plan_title(d))
         .width(if picks_shown(&d.change) { 760.0 } else { 560.0 })
         .fit()
         .open(true)
         .on_close(|s: &mut App| s.close_mcp_dialog())
         .child(b.child(buttons))
         .build(k, layer);
+    // A menu opened in the picks goes over the dialog.
+    layer.extend(menus);
 }
 
 fn picks_shown(change: &McpChange) -> bool {

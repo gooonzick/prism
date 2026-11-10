@@ -80,5 +80,7 @@ body = body.child(heading("SKILL.md", k)).child(Markdown::new(md).build(k));
 - Nothing selected or nothing found: `empty(title, detail, k)`, where the detail says what to do
   ("Click a server to see its values and where each agent keeps it.").
 - Loading: `Spinner` plus a muted line, in place of the content that is loading.
-- After an action: one `Toast` from `App::notice` (`Notice { title, detail, error, undo }`),
+- After an action: one `Toast` from `App::notice` (`Notice { title, detail, error, undo, machine }`),
   closable, offering Undo when the change can be undone. Never a dialog to report success.
+  A change on another machine ends its title with "on <machine>" and sets `machine`: the
+  toast's Undo acts there (`App::undo_toast`), while ⌘Z acts on the machine in view.

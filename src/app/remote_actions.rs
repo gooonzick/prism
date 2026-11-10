@@ -238,7 +238,7 @@ fn work(r: &dyn Runner, host: &str, work: Work) -> Outcome {
 }
 
 /// The skipped agents (or skills) and the heads-ups, one per line, for a toast.
-fn notes(view: &PlanView) -> String {
+pub(super) fn notes(view: &PlanView) -> String {
     let skipped = view.skipped.iter().map(|(who, why)| format!("Skipped {who}: {why}"));
     skipped.chain(view.warnings.iter().map(|w| format!("Heads-up: {w}"))).collect::<Vec<_>>().join("\n")
 }
@@ -325,16 +325,20 @@ impl App {
     /// A finished change's toast: Undo takes it back on the host.
     fn host_done(&mut self, title: String, detail: String) {
         self.notify(self.on_host(&title), detail, false);
+        let machine = self.env_label();
         if let Some(n) = &mut self.notice {
             n.undo = true;
+            n.machine = Some(machine);
         }
     }
 
     fn host_failed(&mut self, why: String, undoable: bool) {
         let why = if undoable { format!("{why}\nUndo takes back what was done.") } else { why };
         self.notify(self.on_host("Couldn't finish that"), why, true);
+        let machine = self.env_label();
         if let Some(n) = &mut self.notice {
             n.undo = undoable;
+            n.machine = undoable.then_some(machine);
         }
     }
 

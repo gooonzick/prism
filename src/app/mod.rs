@@ -1,6 +1,7 @@
 //! The app's state and what its controls do. The view (`ui`) only reads this; each
 //! submodule owns one capability's state changes.
 
+mod across;
 mod discover;
 mod env;
 mod installed;
@@ -28,6 +29,7 @@ use crate::scan::{self, Inventory, ScopeStats};
 use crate::store::{self, LastChange, Settings};
 use crate::sync::Plan;
 
+pub use across::{Across, Planned, Target};
 pub use env::{AddHost, Env, PreviewAnswer, RemoteAnswer, RemoteState, Stash};
 pub use installed::{open_path, reveal_path};
 pub use mcp::McpFilter;
@@ -64,6 +66,9 @@ pub struct Notice {
     pub error: bool,
     /// Offers to undo the change it reports.
     pub undo: bool,
+    /// The machine that change was made on: "This Mac" or a host's name. The toast's Undo acts
+    /// there, whichever machine is in view; `None` means the one in view.
+    pub machine: Option<String>,
 }
 
 pub struct Install {
@@ -168,6 +173,8 @@ pub struct App {
     pub host_values: HashMap<String, McpServer>,
     /// Add project… on a host: the typed path.
     pub host_project: Option<HostProject>,
+    /// Copies to another machine.
+    pub across: Across,
 
     // Watching the scope's folders.
     waker: Option<Waker>,
@@ -260,6 +267,7 @@ impl App {
             host_last_change: None,
             host_values: HashMap::new(),
             host_project: None,
+            across: Across::default(),
             waker: None,
             watcher: None,
             dirty: Arc::new(AtomicBool::new(false)),
@@ -302,6 +310,7 @@ impl App {
         for w in [&self.search as &dyn SetWaker, &self.remote_fetch, &self.install, &self.update_check, &self.update_run, &self.discover, &self.repo_fetch, &self.cli_tool, &self.remote_load, &self.remote_preview, &self.host_act] {
             w.set(waker.clone());
         }
+        self.across.set_waker(waker.clone());
         self.waker = Some(waker);
         self.watch();
         self.check_updates_once();
@@ -370,6 +379,7 @@ impl App {
             self.land_host(answer);
             changed = true;
         }
+        changed |= self.poll_across();
         changed
     }
 
@@ -533,7 +543,7 @@ impl App {
     // Notices and undo.
 
     pub fn notify(&mut self, title: String, detail: String, error: bool) {
-        self.notice = Some(Notice { title, detail, error, undo: false });
+        self.notice = Some(Notice { title, detail, error, undo: false, machine: None });
         self.notice_at = None;
     }
 
@@ -552,19 +562,15 @@ impl App {
             self.save_last_change();
         }
         match result {
-            Ok(title) => {
-                self.notify(title, String::new(), false);
-                if let Some(n) = &mut self.notice {
-                    n.undo = undoable;
-                }
-            }
+            Ok(title) => self.notify(title, String::new(), false),
             Err(e) => {
                 let e = if undoable { format!("{e}\nUndo takes back what was done.") } else { e };
                 self.notify("Couldn't finish that".into(), e, true);
-                if let Some(n) = &mut self.notice {
-                    n.undo = undoable;
-                }
             }
+        }
+        if let Some(n) = &mut self.notice {
+            n.undo = undoable;
+            n.machine = undoable.then(|| crate::hosts::copy::this_machine().to_string());
         }
         self.rescan();
     }

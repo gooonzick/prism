@@ -171,6 +171,13 @@ static SCENES: &[Scene] = &[
         let names: Vec<String> = s.inv.skills.iter().take(2).map(|x| x.name.clone()).collect();
         s.open_copy(names);
     }),
+    ("copy-to-host", |s| {
+        let names: Vec<String> = s.inv.skills.iter().take(2).map(|x| x.name.clone()).collect();
+        let state = wire::state(&agents::Scope::Global, &s.paths, &s.settings);
+        let laptop = hosts::Host { name: "laptop".into(), ssh: "me@laptop.lan".into() };
+        let why = "Can't reach laptop: ssh: connect to host laptop.lan port 22: Connection refused".to_string();
+        s.show_copy_to_host(names, vec![(devbox(), Ok(Box::new(state))), (laptop, Err(why))]);
+    }),
     ("repo", |s| {
         s.open_browse();
         s.source = rune::TextEdit::new("vercel-labs/agent-skills");

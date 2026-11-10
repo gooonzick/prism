@@ -228,12 +228,12 @@ fn bulk_bar(s: &App, n: usize, k: &Kit) -> El {
                 .key("bulk-update"),
         );
     }
-    if !s.other_scopes().is_empty() {
+    if s.can_copy() {
         bar = bar.child(
             Button::new("Copy to…")
                 .variant(ButtonVariant::Outline)
                 .control_size(ControlSize::Small)
-                .help("Copy the selected skills into another scope")
+                .help("Copy the selected skills into another scope or machine")
                 .on_press(|s: &mut App| s.open_copy(s.checked.clone()))
                 .build(k)
                 .key("bulk-copy"),

@@ -94,7 +94,7 @@ fn why(out: &crate::hosts::runner::Output, what: &str) -> String {
 }
 
 /// Checks the host's prism (installing this version first when asked), then reads its state.
-fn load(r: &dyn Runner, host: &Host, scope: &Scope, install_first: bool) -> (Result<Box<WireState>, RemoteState>, Option<String>) {
+pub(super) fn load(r: &dyn Runner, host: &Host, scope: &Scope, install_first: bool) -> (Result<Box<WireState>, RemoteState>, Option<String>) {
     let mut install_error = None;
     if install_first {
         match install::check(r) {
@@ -256,6 +256,8 @@ impl App {
         self.env_menu = false;
         self.add_host = None;
         self.host_project = None;
+        // Copies in flight still land: their toasts name the machine.
+        self.across.close();
         // Changes asked of the last machine: those not started stay undone.
         self.drop_host_work();
         // A toast about the last machine would read as one about this one.
@@ -442,7 +444,7 @@ impl App {
 }
 
 /// A host no scene reaches.
-struct Unreached(String);
+pub(super) struct Unreached(pub(super) String);
 
 impl Runner for Unreached {
     fn prism(&self, _: &[String], _: Option<Vec<u8>>) -> Result<crate::hosts::runner::Output, String> {

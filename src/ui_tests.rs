@@ -1087,7 +1087,7 @@ impl Harness {
     /// the state read after it.
     fn land_remote(&mut self) {
         let start = std::time::Instant::now();
-        let pending = |s: &App| s.remote_load.is_pending() || s.remote_preview.is_pending() || s.host_act.is_pending();
+        let pending = |s: &App| s.remote_load.is_pending() || s.remote_preview.is_pending() || s.host_act.is_pending() || s.across_pending();
         loop {
             while pending(&self.rt.state) {
                 assert!(start.elapsed().as_secs() < 10, "the host never answered");
@@ -1691,4 +1691,150 @@ fn remote_actions_in_a_host_project_name_it() {
     assert!(fs::symlink_metadata(remote.path().join(".claude/skills/page")).is_err(), "not globally");
     let project = format!("--project={}", site.display());
     assert!(log.lock().unwrap().iter().any(|(argv, _)| argv.first().is_some_and(|w| w == "skills") && argv.contains(&project)), "the command names the project");
+}
+
+// Copying to another machine.
+
+impl Harness {
+    /// Saves host `laptop` (in memory) at `home`; "this" is this window's home.
+    fn with_laptop(&mut self, home: &Path) {
+        let runners = crate::hosts::runner::local_runners(&[("this", &self.root.clone()), ("laptop", home)]);
+        self.rt.update(move |s, _| {
+            s.settings.hosts.push(crate::hosts::Host { name: "laptop".into(), ssh: "me@laptop".into() });
+            s.make_runner = runners;
+        });
+        self.settle();
+    }
+
+    /// Copies the selected `review` to laptop's Global through the dialog: pick, plan, apply.
+    fn copy_review_to_laptop(&mut self) {
+        self.click("skill-review");
+        self.click("copy");
+        self.land_remote();
+        self.click("copy-to-laptop-0");
+        self.land_remote();
+        self.click("copy-apply");
+        self.land_remote();
+    }
+}
+
+#[test]
+fn copy_skill_to_host_from_window() {
+    let mut h = Harness::project();
+    let laptop = host_home(crate::hosts::install::VERSION);
+    h.with_laptop(laptop.path());
+    h.click("skill-review");
+    h.click("copy");
+    h.land_remote();
+    assert!(h.rt.find("copy-to-0").is_some(), "this machine's other scopes come first");
+    assert!(h.rt.find("copy-to-laptop-0").is_some(), "the host's Global is listed");
+
+    h.click("copy-to-laptop-0");
+    h.land_remote();
+    let this = crate::hosts::copy::this_machine();
+    let line = format!("Copy review from {this} to Global (~) (link into Claude Code) on laptop");
+    assert!(h.texts().contains(&line), "the host's plan: {}", h.texts());
+    let got = laptop.path().join(".agents/skills/review");
+    assert!(!got.exists(), "a plan changes nothing");
+
+    h.click("copy-apply");
+    h.land_remote();
+    assert!(got.join("SKILL.md").is_file(), "laptop has it");
+    assert!(fs::symlink_metadata(laptop.path().join(".claude/skills/review")).is_ok_and(|m| m.file_type().is_symlink()), "linked there");
+    assert!(h.rt.state.copy_dialog.is_none(), "the dialog closed");
+    let notice = h.rt.state.notice.as_ref().expect("a toast");
+    assert_eq!(notice.title, "Copied review to Global (~) on laptop");
+    assert!(notice.undo && !notice.error);
+    assert!(!h.root.join(".agents/skills/review").exists(), "nothing changed here");
+}
+
+#[test]
+fn toast_undo_targets_named_machine() {
+    let mut h = Harness::project();
+    // A change on this machine first.
+    h.click("skill-review");
+    h.click("link-codex");
+    let here = Paths::isolated(&h.root);
+    let mine = crate::store::load_last_change(&here).expect("this machine's last change").label;
+    let laptop = host_home(crate::hosts::install::VERSION);
+    h.with_laptop(laptop.path());
+    h.copy_review_to_laptop();
+    let got = laptop.path().join(".agents/skills/review");
+    assert!(got.is_dir());
+
+    h.click_button("Undo");
+    h.land_remote();
+    assert!(!got.exists() && fs::symlink_metadata(laptop.path().join(".claude/skills/review")).is_err(), "the copy is taken back on laptop");
+    let notice = h.rt.state.notice.as_ref().expect("a toast");
+    assert!(notice.title.starts_with("Undid: ") && notice.title.ends_with(" on laptop"), "{}", notice.title);
+    assert_eq!(crate::store::load_last_change(&here).map(|c| c.label), Some(mine), "this machine's last change stays");
+    let codex = h.project_dir().join(".codex/skills/review");
+    assert!(fs::symlink_metadata(&codex).is_ok(), "and so does its link");
+
+    // ⌘Z still means the machine in view.
+    key(&mut h, rune::Key::Command('z'), rune::Mods { cmd: true, ..rune::Mods::default() });
+    assert!(fs::symlink_metadata(&codex).is_err(), "this machine's change is undone");
+}
+
+#[test]
+fn mcp_copy_to_host_shows_warnings() {
+    let mut h = mcp_home();
+    let (claude, cursor) = (h.root.join(".claude.json"), h.root.join(".cursor/mcp.json"));
+    let before = (read(&claude), read(&cursor));
+    let laptop = host_home(crate::hosts::install::VERSION);
+    h.with_laptop(laptop.path());
+    h.mcp_global();
+    h.click("mcp-row-plata");
+    h.click("mcp-copy");
+    h.land_remote();
+    assert!(h.rt.find("mcp-copy-machine-trigger").is_some(), "a Machine select");
+
+    h.rt.update(|s, _| s.set_mcp_copy_machine("laptop"));
+    h.settle();
+    h.land_remote();
+    assert!(h.rt.find("mcp-copy-to-claude").is_some(), "laptop's agents");
+    assert!(h.rt.find("mcp-copy-to-cursor").is_none(), "Cursor isn't on laptop");
+    let texts = h.texts();
+    assert!(texts.contains("Add plata to Claude Code on laptop"), "{texts}");
+    assert!(texts.contains("Heads-up") && texts.contains("env.PLATA_HOST needs ${PLATA_HOST} set on laptop"), "{texts}");
+    assert!(!texts.contains("fake-env-secret"), "values stay masked");
+
+    h.click("mcp-apply");
+    h.land_remote();
+    assert!(h.rt.state.mcp_dialog.is_none(), "the dialog closed");
+    let written = json(&laptop.path().join(".claude.json"));
+    assert_eq!(written["mcpServers"]["plata"]["env"]["PLATA_TOKEN"], "fake-env-secret", "the value as written travels");
+    let notice = h.rt.state.notice.as_ref().expect("a toast");
+    assert_eq!(notice.title, "Copied plata to Global (~) on laptop");
+    assert!(notice.undo);
+    assert_eq!((read(&claude), read(&cursor)), before, "nothing changed here");
+}
+
+#[test]
+fn copy_from_a_host_to_this_machine() {
+    let mut h = Harness::project();
+    let remote = host_home(crate::hosts::install::VERSION);
+    skill(&remote.path().join(".agents/skills"), "far");
+    let root = h.root.clone();
+    h.with_host(crate::hosts::runner::local_runners(&[("box", remote.path()), ("this", &root)]));
+    h.rt.update(|s, _| s.switch_env(Some("box")));
+    h.land_remote();
+    h.click("skill-far");
+    h.click("copy");
+    h.land_remote();
+    assert!(h.rt.find("copy-to-this-1").is_some(), "this machine's project, from what the window keeps of it");
+    h.click("copy-to-this-0");
+    h.land_remote();
+    h.click("copy-apply");
+    h.land_remote();
+    assert!(h.root.join(".agents/skills/far/SKILL.md").is_file(), "this machine has it");
+    let notice = h.rt.state.notice.as_ref().expect("a toast");
+    let this = crate::hosts::copy::this_machine();
+    assert_eq!(notice.title, format!("Copied far to Global (~) on {this}"));
+    assert!(h.rt.state.is_remote(), "box stays in view");
+
+    h.click_button("Undo");
+    h.land_remote();
+    assert!(!h.root.join(".agents/skills/far").exists(), "the toast's Undo acted here, not on box");
+    assert!(remote.path().join(".agents/skills/far").is_dir());
 }

@@ -92,10 +92,10 @@ fn actions(s: &App, skill: &Skill, k: &Kit) -> El {
                 .build(k)
                 .key("reveal"),
         );
-    if !s.other_scopes().is_empty() {
+    if s.can_copy() {
         left = left.child(
             small("Copy to…")
-                .help("Copy this skill into another scope")
+                .help("Copy this skill into another scope or machine")
                 .on_press(move |s: &mut App| s.open_copy(vec![copy.clone()]))
                 .build(k)
                 .key("copy"),

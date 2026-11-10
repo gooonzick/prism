@@ -337,6 +337,8 @@ impl App {
 
     pub fn open_copy(&mut self, names: Vec<String>) {
         if !names.is_empty() {
+            // Other machines are listed too: their scopes are asked for now.
+            self.look_at_machines();
             self.copy_dialog = Some(names);
         }
     }

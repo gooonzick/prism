@@ -77,7 +77,8 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
             toast = toast.description(n.detail.clone());
         }
         if n.undo {
-            toast = toast.action(&k, "Undo", false, |s: &mut App, _: &mut Tx| s.undo());
+            // On the machine the toast names; ⌘Z means the one in view.
+            toast = toast.action(&k, "Undo", false, |s: &mut App, _: &mut Tx| s.undo_toast());
         }
         toast = toast.icon(&k, if n.error { &glyphs::CIRCLE_X } else { &glyphs::CHECK });
         layer.push(ToastRegion::new().toast(toast.build(&k)).build(&k));

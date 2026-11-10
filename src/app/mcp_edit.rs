@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use rune::TextEdit;
 
-use super::{App, HostPlan};
+use super::{App, HostPlan, Target};
 use crate::agents::AGENTS;
 use crate::mcp::agents::{Flavor, MCP_AGENTS, index_of};
 use crate::mcp::model::{EnvValue, Place, Server, Transport, masked_args, masked_url};
@@ -264,6 +264,8 @@ pub struct McpDialog {
     pub plan: Option<Result<McpPlan, String>>,
     /// The plan on a host: made there, `None` while the plan waits for a pick.
     pub host_plan: Option<HostPlan>,
+    /// A copy to another machine: where there, and that machine's plan.
+    pub across: Option<Target>,
     /// Why the plan shown is not the one first shown.
     pub notice: Option<String>,
 }
@@ -499,6 +501,8 @@ impl App {
     pub fn open_mcp_copy(&mut self, name: &str) {
         let Some(s) = self.mcp.get(name) else { return };
         let to = self.mcp_defaults().into_iter().filter(|a| !s.copies.iter().any(|c| c.agent == *a)).collect();
+        // Another machine can take it too: its scopes and agents are asked for now.
+        self.look_at_machines();
         self.open_mcp_plan(McpChange::Copy { name: name.into(), to, from: None });
     }
 
@@ -526,15 +530,19 @@ impl App {
     }
 
     fn open_mcp_plan(&mut self, change: McpChange) {
-        self.mcp_dialog = Some(McpDialog { change, plan: None, host_plan: None, notice: None });
+        self.mcp_dialog = Some(McpDialog { change, plan: None, host_plan: None, across: None, notice: None });
         self.replan_mcp();
     }
 
     pub fn close_mcp_dialog(&mut self) {
         self.mcp_dialog = None;
+        self.across.close();
     }
 
     pub fn toggle_mcp_copy_to(&mut self, agent: usize) {
+        if self.toggle_across_agent(agent) {
+            return;
+        }
         if let Some(McpDialog { change: McpChange::Copy { to, .. }, .. }) = &mut self.mcp_dialog {
             toggle(to, agent);
             self.replan_mcp();
@@ -557,6 +565,10 @@ impl App {
 
     /// Plans the open dialog's change again, against the configs as they are now.
     pub fn replan_mcp(&mut self) {
+        // A copy to another machine is planned there, whichever machine is in view.
+        if self.mcp_dialog.as_ref().is_some_and(|d| d.across.is_some()) {
+            return self.replan_mcp_across();
+        }
         if self.is_remote() {
             return self.host_replan_mcp();
         }
@@ -577,6 +589,9 @@ impl App {
     /// Writes the dialog's plan. A plan whose files changed since is planned again and shown
     /// with a notice, before the last change's backups go.
     pub fn apply_mcp_plan(&mut self) {
+        if self.mcp_dialog.as_ref().is_some_and(|d| d.across.is_some()) {
+            return self.apply_mcp_across();
+        }
         if self.is_remote() {
             return self.host_apply_mcp_plan();
         }
