@@ -38,6 +38,10 @@ impl App {
     }
 
     pub fn rescan_mcp(&mut self) {
+        // A host's servers come with its state; ⌘R reloads it through `rescan`.
+        if self.is_remote() {
+            return;
+        }
         self.mcp = scan::scan(&self.scope, &self.paths);
         if self.mcp_selected.as_deref().is_some_and(|n| self.mcp.get(n).is_none()) {
             self.mcp_selected = None;

@@ -336,8 +336,8 @@ impl App {
             self.notify(title, detail, failed);
             changed = true;
         }
-        if let Some((host, result, install_error)) = self.remote_load.take() {
-            self.land_remote(&host, result, install_error);
+        if let Some(answer) = self.remote_load.take() {
+            self.land_remote(answer);
             changed = true;
         }
         if let Some((name, body)) = self.remote_preview.take() {
@@ -374,7 +374,7 @@ impl App {
         }
         if self.is_remote() {
             // The scope changes when the host's state for it lands.
-            self.load_remote(scope, false);
+            self.connect_remote(scope);
             return;
         }
         if scope != self.scope {

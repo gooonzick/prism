@@ -1158,6 +1158,11 @@ fn unreachable_host_shows_retry() {
     assert_eq!(h.remote_state(), Some(crate::app::RemoteState::Connecting));
     h.land_remote();
     assert!(h.rt.find("env-retry").is_some());
+
+    // Another scope on a host that isn't in yet connects again too.
+    h.click("scope-global");
+    assert_eq!(h.remote_state(), Some(crate::app::RemoteState::Connecting));
+    h.land_remote();
 }
 
 #[test]
@@ -1213,4 +1218,56 @@ fn browse_on_a_host_installs_here() {
     let here = if cfg!(target_os = "macos") { "this Mac" } else { "this computer" };
     assert!(h.texts().contains(&format!("skills.sh installs go to {here}; copy them to box afterwards")), "{}", h.texts());
     assert_eq!(h.rt.state.local_scope(), &Scope::Project(h.project_dir()), "installs go to this machine's scope");
+}
+
+#[test]
+fn the_mcp_tab_keeps_the_hosts_servers() {
+    let mut h = Harness::project();
+    let remote = host_home(crate::hosts::install::VERSION);
+    fs::write(remote.path().join(".claude.json"), r#"{"mcpServers":{"far-mcp":{"command":"far"}}}"#).unwrap();
+    h.with_host(crate::hosts::runner::local_runners(&[("box", remote.path())]));
+    h.rt.update(|s, _| s.switch_env(Some("box")));
+    h.land_remote();
+    assert!(h.rt.state.mcp.get("far-mcp").is_some());
+    // The host's files aren't on this machine: a scan here with its paths would find nothing.
+    fs::remove_file(remote.path().join(".claude.json")).unwrap();
+
+    h.click("tab-mcp");
+    assert!(h.rt.state.mcp.get("far-mcp").is_some(), "this machine's disk wasn't scanned with the host's paths");
+    assert!(h.rt.find("mcp-row-far-mcp").is_some());
+}
+
+#[test]
+fn an_install_on_one_host_never_reports_on_another() {
+    let mut h = Harness::project();
+    let b = host_home(crate::hosts::install::VERSION);
+    let b_home = b.path().to_path_buf();
+    h.rt.update(move |s, _| {
+        s.settings.hosts.push(crate::hosts::Host { name: "a".into(), ssh: "me@a".into() });
+        s.settings.hosts.push(crate::hosts::Host { name: "b".into(), ssh: "me@b".into() });
+        let local = crate::hosts::runner::local_runners(&[("b", &b_home)]);
+        s.make_runner = std::sync::Arc::new(move |host: &crate::hosts::Host| {
+            if host.name == "a" { Box::new(Down) as Box<dyn crate::hosts::runner::Runner> } else { local(host) }
+        });
+    });
+    h.rt.update(|s, _| s.switch_env(Some("a")));
+    h.land_remote();
+    h.rt.update(|s, _| s.install_prism());
+    assert!(h.rt.state.installing_prism);
+
+    h.rt.update(|s, _| s.switch_env(Some("b")));
+    h.settle();
+    assert!(!h.rt.state.installing_prism);
+    assert!(!h.texts().contains("Installing prism"), "b isn't being installed");
+    h.land_remote();
+    assert_eq!(h.remote_state(), Some(crate::app::RemoteState::Ready));
+    assert!(h.rt.state.notice.is_none(), "no toast for b");
+
+    // An answer from a, landing late, is not b's.
+    h.rt.update(|s, _| {
+        let result = Ok(Box::new(crate::wire::state(&Scope::Global, &s.paths, &s.settings)));
+        s.land_remote(crate::app::RemoteAnswer { host: "a".into(), result, installed: true, install_error: None });
+    });
+    assert!(h.rt.state.notice.is_none());
+    assert_eq!(h.rt.state.host().map(|x| x.name.as_str()), Some("b"));
 }

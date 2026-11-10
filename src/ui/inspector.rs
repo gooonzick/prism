@@ -62,7 +62,8 @@ fn actions(s: &App, skill: &Skill, k: &Kit) -> El {
     // A host's files aren't on this machine, and changes on a host come later.
     let remote = s.is_remote();
     let small = |label: &str| Button::new(label).variant(ButtonVariant::Outline).control_size(ControlSize::Small);
-    let manifest = skill.source.as_deref().and_then(manifest_path);
+    // Looking for the file reads the disk: a host's folder isn't on this machine.
+    let manifest = if remote { None } else { skill.source.as_deref().and_then(manifest_path) };
     let folder = skill.source.clone();
     let (copy, remove) = (skill.name.clone(), skill.name.clone());
     let mut left = row()

@@ -55,8 +55,17 @@ pub struct AddHost {
     pub error: Option<String>,
 }
 
-/// A host's answer: its name, its state or why there is none, and why an install failed.
-pub type RemoteAnswer = (String, Result<Box<WireState>, RemoteState>, Option<String>);
+/// A host's answer to a load.
+pub struct RemoteAnswer {
+    /// The host it came from.
+    pub host: String,
+    /// Its state, or why there is none.
+    pub result: Result<Box<WireState>, RemoteState>,
+    /// The load installed prism first.
+    pub installed: bool,
+    /// Why that install failed.
+    pub install_error: Option<String>,
+}
 
 /// A skill's SKILL.md body on a host: the skill's name and the body.
 pub type PreviewAnswer = (String, Option<String>);
@@ -196,6 +205,8 @@ impl App {
         self.settings = Settings::default();
         self.scope = Scope::Global;
         self.remote_detected = None;
+        // An install in flight was for the host in view before; its answer never lands here.
+        self.installing_prism = false;
         self.env = Env::Remote { host, state: RemoteState::Connecting };
         self.close_everything();
         // The watcher watches this machine's folders; nothing here changes the host's view.
@@ -242,6 +253,10 @@ impl App {
         self.mcp_form = None;
         self.mcp_dialog = None;
         self.env_menu = false;
+        self.add_host = None;
+        // A toast about the last machine would read as one about this one.
+        self.notice = None;
+        self.notice_at = None;
     }
 
     /// Asks the host in view for `scope`'s state, off the UI thread.
@@ -250,17 +265,25 @@ impl App {
         let (host, make) = (host.clone(), self.make_runner.clone());
         self.remote_load.request((host, scope, install_first), move |(host, scope, install_first)| {
             let runner = make(&host);
-            let (state, install_error) = load(runner.as_ref(), &host, &scope, install_first);
-            (host.name, state, install_error)
+            let (result, install_error) = load(runner.as_ref(), &host, &scope, install_first);
+            RemoteAnswer { host: host.name, result, installed: install_first, install_error }
         });
     }
 
     /// Reconnects to the host in view, as from the start.
     pub fn retry_remote(&mut self) {
-        if let Env::Remote { state, .. } = &mut self.env {
+        self.connect_remote(self.scope.clone());
+    }
+
+    /// Asks the host in view for `scope`. A host whose state isn't in shows Connecting
+    /// meanwhile; one in view keeps showing its state until the answer lands.
+    pub(super) fn connect_remote(&mut self, scope: Scope) {
+        if let Env::Remote { state, .. } = &mut self.env
+            && *state != RemoteState::Ready
+        {
             *state = RemoteState::Connecting;
-            self.load_remote(self.scope.clone(), false);
         }
+        self.load_remote(scope, false);
     }
 
     /// Puts this version of prism on the host in view, then connects.
@@ -276,13 +299,16 @@ impl App {
     }
 
     /// Lands a host's answer, when it is the host in view.
-    pub fn land_remote(&mut self, name: &str, result: Result<Box<WireState>, RemoteState>, install_error: Option<String>) {
+    pub fn land_remote(&mut self, answer: RemoteAnswer) {
+        let RemoteAnswer { host: name, result, installed, install_error } = answer;
         let Env::Remote { host, state } = &mut self.env else { return };
         if host.name != name {
             return;
         }
         let host = host.name.clone();
-        let installed = std::mem::take(&mut self.installing_prism);
+        if installed {
+            self.installing_prism = false;
+        }
         match result {
             Ok(w) => {
                 *state = RemoteState::Ready;
@@ -309,8 +335,10 @@ impl App {
                     self.mcp_selected = None;
                 }
                 self.load_preview();
-                if installed {
-                    self.notify(format!("Installed prism {VERSION} on {host}"), String::new(), false);
+                match install_error {
+                    Some(e) => self.notify(format!("Couldn't install prism on {host}"), e, true),
+                    None if installed => self.notify(format!("Installed prism {VERSION} on {host}"), String::new(), false),
+                    None => {}
                 }
             }
             Err(s) => {
@@ -397,7 +425,7 @@ impl App {
         self.make_runner = std::sync::Arc::new(|h: &Host| Box::new(Unreached(h.name.clone())) as Box<dyn Runner>);
         self.switch_env(Some(&name));
         self.remote_load.cancel();
-        self.land_remote(&name, answer, None);
+        self.land_remote(RemoteAnswer { host: name, result: answer, installed: false, install_error: None });
     }
 }
 
