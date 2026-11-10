@@ -6,6 +6,7 @@ use rune_kit::{Button, ButtonVariant, Checkbox, Dialog, Kit, TextArea, TextInput
 use super::heading;
 use crate::agents::{AGENTS, CANONICAL};
 use crate::app::App;
+use crate::plan_view::PlanView;
 use crate::sync::Action;
 
 /// The plan's actions per skill, in order, each as a short phrase; links to several agents
@@ -66,9 +67,10 @@ pub fn sync(s: &App, k: &Kit, layer: &mut Vec<El>) {
     }
 
     let linkable = targets.iter().filter(|&&t| !s.inv.shares_canonical[t]).count();
+    let view = PlanView::from((plan, &s.paths));
     let groups = group_actions(&plan.actions, linkable);
     let mut changes = col().key("sync-changes").gap(10.0).w_full();
-    if plan.is_empty() {
+    if view.lines.is_empty() && view.skipped.is_empty() {
         changes = changes.child(text("Everything is in sync.").font(k.ty.small).color(k.c.text_muted));
     }
     for (skill, parts) in &groups {
@@ -80,9 +82,9 @@ pub fn sync(s: &App, k: &Kit, layer: &mut Vec<El>) {
                 .child(text(parts.join(" · ")).font(k.ty.small).color(k.c.text_muted).wrap()),
         );
     }
-    if !plan.conflicts.is_empty() {
-        changes = changes.child(heading(&format!("Skipped ({})", plan.conflicts.len()), k));
-        for c in &plan.conflicts {
+    if !view.skipped.is_empty() {
+        changes = changes.child(heading(&format!("Skipped ({})", view.skipped.len()), k));
+        for (skill, reason) in &view.skipped {
             changes = changes.child(
                 row()
                     .w_full()
@@ -94,14 +96,14 @@ pub fn sync(s: &App, k: &Kit, layer: &mut Vec<El>) {
                             .grow(1.0)
                             .min_w(0.0)
                             .gap(2.0)
-                            .child(text(c.skill.clone()).font(k.ty.small_medium).color(k.c.text_base))
-                            .child(text(c.reason.clone()).font(k.ty.small).color(k.c.text_muted).wrap()),
+                            .child(text(skill.clone()).font(k.ty.small_medium).color(k.c.text_base))
+                            .child(text(reason.clone()).font(k.ty.small).color(k.c.text_muted).wrap()),
                     ),
             );
         }
     }
 
-    let n = plan.actions.len();
+    let n = view.lines.len();
     let buttons = row()
         .w_full()
         .gap(8.0)
@@ -124,7 +126,7 @@ pub fn sync(s: &App, k: &Kit, layer: &mut Vec<El>) {
                 .grow(1.0)
                 .min_w(0.0)
                 .gap(6.0)
-                .child(heading(&changes_heading(plan.actions.len(), groups.len()), k))
+                .child(heading(&changes_heading(view.lines.len(), groups.len()), k))
                 .child(col().w_full().h(260.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(changes)),
         );
     let title = match s.sync_only.as_deref() {

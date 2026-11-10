@@ -14,6 +14,7 @@ mod cli;
 mod fsops;
 mod hosts;
 mod mcp;
+mod plan_view;
 mod planid;
 mod projects;
 mod remote;

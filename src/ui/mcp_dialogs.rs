@@ -10,6 +10,7 @@ use crate::agents::tilde;
 use crate::app::{App, McpChange, McpForm};
 use crate::mcp::agents::{Flavor, MCP_AGENTS};
 use crate::mcp::plan::ClaudeScope;
+use crate::plan_view::PlanView;
 use crate::mcp::scan::Status;
 
 fn form_mut(s: &mut App) -> &mut McpForm {
@@ -366,25 +367,27 @@ fn plan_view(s: &App, k: &Kit) -> (El, usize) {
         Some(Err(e)) => return (c.child(heading("Changes", k)).child(flagged(cross(k.c.danger.icon), e.clone(), k)), 0),
         Some(Ok(plan)) => plan,
     };
+    let view = PlanView::from((plan, &s.paths));
+    // Lines for several agents share one, so the count is the plan's actions, not the lines.
     let n = plan.actions.len();
     c = c.child(heading(&if n == 0 { "Changes".to_string() } else { format!("{n} change{}", if n == 1 { "" } else { "s" }) }, k));
-    let lines = plan.lines(&s.paths);
+    let lines = view.lines;
     if lines.is_empty() {
         c = c.child(note("Nothing to do.", k));
     }
     for (i, line) in lines.into_iter().enumerate() {
         c = c.child(text(line).key(format!("mcp-plan-{i}")).font(k.ty.ui).color(k.c.text_base).wrap());
     }
-    if !plan.skipped.is_empty() {
-        c = c.child(col().pt(6.0).child(heading(&format!("Skipped ({})", plan.skipped.len()), k)));
-        for (a, why) in &plan.skipped {
-            c = c.child(flagged(cross(k.c.warning.icon), format!("{}: {why}", MCP_AGENTS[*a].name), k));
+    if !view.skipped.is_empty() {
+        c = c.child(col().pt(6.0).child(heading(&format!("Skipped ({})", view.skipped.len()), k)));
+        for (who, why) in &view.skipped {
+            c = c.child(flagged(cross(k.c.warning.icon), format!("{who}: {why}"), k));
         }
     }
-    if !plan.warnings.is_empty() {
+    if !view.warnings.is_empty() {
         c = c.child(col().pt(6.0).child(heading("Heads-up", k)));
-        for w in &plan.warnings {
-            c = c.child(flagged(spot(k.c.info.icon), w.clone(), k));
+        for w in view.warnings {
+            c = c.child(flagged(spot(k.c.info.icon), w, k));
         }
     }
     (c, n)

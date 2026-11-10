@@ -105,6 +105,7 @@ pub struct Plan {
     pub conflicts: Vec<Conflict>,
 }
 
+#[cfg(test)]
 impl Plan {
     pub fn is_empty(&self) -> bool {
         self.actions.is_empty() && self.conflicts.is_empty()
