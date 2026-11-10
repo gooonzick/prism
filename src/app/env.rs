@@ -107,7 +107,10 @@ pub(super) fn load(r: &dyn Runner, host: &Host, scope: &Scope, install_first: bo
         Ok((Health::Ready, _)) => match r.prism(&scoped(vec!["wire".into(), "state".into()], scope), None) {
             Err(e) => Err(RemoteState::Unreachable(e)),
             Ok(out) if out.code != 0 => Err(RemoteState::Unreachable(why(&out, "prism wire state"))),
-            Ok(out) => serde_json::from_slice::<WireState>(&out.stdout)
+            // Past anything the host's shell startup files printed first.
+            Ok(out) => hosts::copy::parse(&out.stdout)
+                .ok_or_else(|| "no JSON in its answer".to_string())
+                .and_then(|v| serde_json::from_value::<WireState>(v).map_err(|e| e.to_string()))
                 .map(Box::new)
                 .map_err(|e| RemoteState::Unreachable(format!("{} sent a state this window can't read: {e}", host.name))),
         },
@@ -376,7 +379,7 @@ impl App {
                 .prism(&args, None)
                 .ok()
                 .filter(|out| out.code == 0)
-                .and_then(|out| serde_json::from_slice::<serde_json::Value>(&out.stdout).ok())
+                .and_then(|out| hosts::copy::parse(&out.stdout))
                 .and_then(|v| v["body"].as_str().map(String::from));
             (name, body)
         });

@@ -1145,6 +1145,40 @@ fn switching_to_host_shows_its_skills() {
     assert!(h.rt.find("skill-review").is_some());
 }
 
+/// A host whose shell startup files print a line before every command's own output.
+struct Chatty(Box<dyn crate::hosts::runner::Runner>);
+
+impl crate::hosts::runner::Runner for Chatty {
+    fn prism(&self, args: &[String], stdin: Option<Vec<u8>>) -> Result<crate::hosts::runner::Output, String> {
+        let mut out = self.0.prism(args, stdin)?;
+        out.stdout.splice(0..0, b"Welcome to box!\n".iter().copied());
+        Ok(out)
+    }
+    fn shell(&self, script: &str, stdin: Option<Vec<u8>>) -> Result<crate::hosts::runner::Output, String> {
+        let mut out = self.0.shell(script, stdin)?;
+        out.stdout.splice(0..0, b"Welcome to box!\n".iter().copied());
+        Ok(out)
+    }
+}
+
+#[test]
+fn a_chatty_host_still_loads_and_previews() {
+    let mut h = Harness::project();
+    let remote = host_home(crate::hosts::install::VERSION);
+    skill(&remote.path().join(".agents/skills"), "far");
+    let home = remote.path().to_path_buf();
+    h.with_host(std::sync::Arc::new(move |host: &crate::hosts::Host| {
+        Box::new(Chatty(crate::hosts::runner::local_runners(&[("box", &home)])(host))) as Box<dyn crate::hosts::runner::Runner>
+    }));
+    h.rt.update(|s, _| s.switch_env(Some("box")));
+    h.land_remote();
+    assert_eq!(h.remote_state(), Some(crate::app::RemoteState::Ready));
+    assert!(h.rt.state.inv.get("far").is_some());
+    h.click("skill-far");
+    h.land_remote();
+    assert!(h.rt.state.preview.as_deref().is_some_and(|md| md.contains("# far")), "{:?}", h.rt.state.preview);
+}
+
 #[test]
 fn unreachable_host_shows_retry() {
     let mut h = Harness::project();
