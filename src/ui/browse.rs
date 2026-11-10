@@ -2,9 +2,9 @@
 
 use rune::{El, Tx, col, row, text};
 use rune_kit::shell::Toolbar;
-use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, Checkbox, ControlSize, Divider, Kit, Markdown, Select, Spinner, TextInput, glyphs};
+use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, Checkbox, ControlSize, Divider, Kit, Select, Spinner, TextInput, glyphs};
 
-use super::{empty, field, heading, inspector_body, mono, row_gap, scroll_pane};
+use super::{code_box, empty, heading, inspector_body, inspector_title, mono, prop, row_gap, scroll_pane, section, skill_md};
 use crate::agents::Scope;
 use crate::app::{App, RepoListing};
 use crate::remote::RemoteSkill;
@@ -169,7 +169,7 @@ fn details(s: &App, k: &Kit) -> El {
             Ok(o) => ("Install log", o),
             Err(e) => ("Install failed", e),
         };
-        body = body.child(field(title, mono(out.trim().to_string(), k), k).key("install-log"));
+        body = body.child(prop(title, code_box(mono(out.trim().to_string(), k).color(k.c.text_base), k), k).key("install-log"));
     }
     if let Some(repo) = &s.repo {
         return body.child(repo_listing(s, repo, k));
@@ -183,9 +183,9 @@ fn details(s: &App, k: &Kit) -> El {
     let installed = s.installed_in(&r.name);
     let url = r.url();
     body = body
-        .child(text(r.name.clone()).font(k.ty.body_medium).color(k.c.text_base).wrap())
-        .child(field("Source", mono(r.source.clone(), k), k))
-        .child(field("Popularity", text(installs(r.installs)).font(k.ty.ui).color(k.c.text_base), k))
+        .child(inspector_title(r.name.clone(), k))
+        .child(prop("Source", mono(r.source.clone(), k).color(k.c.text_base), k))
+        .child(prop("Popularity", text(installs(r.installs)).font(k.ty.ui).color(k.c.text_base), k))
         .child(
             row_gap()
                 .child(
@@ -213,20 +213,15 @@ fn details(s: &App, k: &Kit) -> El {
                 "Installs into {} and links it into your sync targets.",
                 crate::agents::tilde(&crate::agents::AGENTS[crate::agents::CANONICAL].dir(&s.scope, &s.paths), &s.paths)
             ))
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(k.c.text_faint)
                 .wrap(),
         );
-    body = body.child(Divider::horizontal().build(k)).child(heading("SKILL.md", k));
+    body = body.child(Divider::horizontal().build(k)).child(section("SKILL.md", None, k));
     body.child(match &s.remote_md {
         None => row().py(16.0).child(Spinner::new().build(k)),
         Some(Err(e)) => text(e.clone()).font(k.ty.small).color(k.c.text_faint).wrap(),
-        Some(Ok(md)) => Markdown::new(crate::skill::parse(md).body)
-            .on_link_tx(|_: &mut App, url: &str, tx: &mut Tx| {
-                let _ = tx.open_url(url);
-            })
-            .build(k)
-            .key("remote-md"),
+        Some(Ok(md)) => skill_md(crate::skill::parse(md).body, k).key("remote-md"),
     })
 }
 
@@ -237,7 +232,7 @@ fn repo_listing(s: &App, repo: &RepoListing, k: &Kit) -> El {
         .key("repo")
         .w_full()
         .gap(12.0)
-        .child(text(repo.source.clone()).font(k.ty.body_medium).color(k.c.text_base).wrap());
+        .child(inspector_title(repo.source.clone(), k));
     let skills = match &repo.skills {
         None => return body.child(row_gap().child(Spinner::new().build(k)).child(text("Reading the repository…").font(k.ty.small).color(k.c.text_muted))),
         Some(Err(e)) => return body.child(text(e.clone()).font(k.ty.small).color(k.c.text_muted).wrap()),

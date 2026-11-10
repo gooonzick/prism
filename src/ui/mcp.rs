@@ -3,10 +3,10 @@
 
 use rune::{Color, El, Tx, col, row, text};
 use rune_kit::shell::Toolbar;
-use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, SegmentedControl, glyphs};
+use rune_kit::{Button, ButtonVariant, ControlSize, Divider, IconButton, IconButtonVariant, Kit, SegmentedControl, glyphs};
 
 use super::installed::tag;
-use super::{PLUS, REFRESH, dot, empty, field, heading, inspector_body, mono, page_tabs, scope_title, scroll_pane};
+use super::{PLUS, REFRESH, code_box, dot, empty, inspector_body, inspector_title, mono, prop, section, words, page_tabs, scope_title, scroll_pane};
 use crate::agents::{self, Scope, tilde};
 use crate::app::{App, McpFilter};
 use crate::mcp::agents::MCP_AGENTS;
@@ -247,7 +247,7 @@ fn inspector(s: &App, k: &Kit) -> El {
     let mut about = vec![match server.status {
         Status::InSync if server.copies.len() > 1 => "Every copy has the same transport and values".to_string(),
         Status::InSync => "One copy".to_string(),
-        Status::Differs => "The copies differ; the differences are below".to_string(),
+        Status::Differs => differ_line(server),
         Status::ReadOnly => format!("{why}; Prism leaves it alone"),
     }];
     if server.inherited {
@@ -261,38 +261,56 @@ fn inspector(s: &App, k: &Kit) -> El {
         .w_full()
         .gap(8.0)
         .center_y()
-        .child(text(server.name.clone()).font(k.ty.body_medium).color(k.c.text_base).grow(1.0).min_w(0.0).wrap())
+        .child(inspector_title(server.name.clone(), k).grow(1.0).min_w(0.0))
         .child(row().gap(6.0).center_y().child(dot(color)).child(text(word).font(k.ty.small).color(k.c.text_muted)));
-    let mut body = inspector_body(k).child(title).child(text(about.join(". ")).font(k.ty.small).color(k.c.text_muted).wrap());
+    let head = col().w_full().gap(4.0).child(title).child(text(about.join(". ")).font(k.ty.caption()).color(k.c.text_muted).wrap());
+    let mut body = inspector_body(k).child(head);
     if let Some(actions) = actions(s, server, k) {
         body = body.child(actions);
     }
+    body = body.child(Divider::horizontal().build(k)).child(values(server, revealed, k));
+    body = body.child(Divider::horizontal().build(k)).child(copies(s, server, k));
+    if !server.diffs.is_empty() {
+        body = body.child(Divider::horizontal().build(k)).child(diffs(server, revealed, k));
+    }
+    body
+}
 
+/// "Copies differ in command and args", naming up to two fields.
+fn differ_line(server: &McpServer) -> String {
+    let fields: Vec<&str> = server.diffs.iter().map(|d| d.field.as_str()).collect();
+    match fields.as_slice() {
+        [] => "The copies differ".into(),
+        [one] => format!("Copies differ in {one}"),
+        [a, b] => format!("Copies differ in {a} and {b}"),
+        more => format!("Copies differ in {} fields", more.len()),
+    }
+}
+
+/// The transport and its values, as the first copy has them.
+fn values(server: &McpServer, revealed: bool, k: &Kit) -> El {
     let first = &server.copies[0];
     let t = &first.server.transport;
-    let mut values = col().key("mcp-values").w_full().gap(12.0);
-    let reveal_label = if revealed { "Hide values" } else { "Show values" };
     let name = server.name.clone();
-    let reveal = Button::new(reveal_label)
+    let reveal = Button::new(if revealed { "Hide values" } else { "Show values" })
         .icon(if revealed { &glyphs::EYE_OFF } else { &glyphs::EYE })
-        .variant(ButtonVariant::Outline)
+        .variant(ButtonVariant::Ghost)
         .control_size(ControlSize::Small)
         .help("Env and header values, args and the URL may hold secrets")
         .on_press(move |s: &mut App| s.toggle_reveal(&name))
         .build(k)
         .key("mcp-reveal");
-    let mut kind = text(match t {
+    let mut c = col().key("mcp-values").w_full().gap(12.0).child(section("Configuration", Some(reveal), k));
+    if server.status == Status::Differs {
+        c = c.child(text(format!("As {} has it", MCP_AGENTS[first.agent].name)).font(k.ty.caption()).color(k.c.text_faint));
+    }
+    let kind = match t {
         Transport::Stdio { .. } => "stdio",
         Transport::Http { sse: true, .. } => "SSE",
         Transport::Http { .. } => "HTTP",
-    }
-    .to_string())
-    .font(k.ty.ui)
-    .color(k.c.text_base);
-    if server.status == Status::Differs {
-        kind = kind.help(format!("As {} has it; the differences are below", MCP_AGENTS[first.agent].name));
-    }
-    values = values.child(row().w_full().gap(8.0).center_y().child(field("Transport", kind, k).grow(1.0)).child(reveal));
+    };
+    c = c.child(prop("Transport", text(kind.to_string()).font(k.ty.ui).color(k.c.text_base), k));
+    let shown = |v: &String| if revealed { v.clone() } else { masked_url(v) };
     match t {
         Transport::Stdio { command, args, env, cwd } => {
             let line: Vec<String> = if revealed {
@@ -300,26 +318,22 @@ fn inspector(s: &App, k: &Kit) -> El {
             } else {
                 std::iter::once(masked_url(command)).chain(masked_args(args)).collect()
             };
-            values = values.child(field("Command", mono(line.join(" "), k).key("mcp-command"), k));
+            c = c.child(prop("Command", code_box(words(&line.join(" "), k), k).key("mcp-command"), k));
             if let Some(cwd) = cwd {
-                values = values.child(field("Working folder", mono(if revealed { cwd.clone() } else { masked_url(cwd) }, k), k));
+                c = c.child(prop("Working folder", code_box(words(&shown(cwd), k), k), k));
             }
             if !env.is_empty() {
-                values = values.child(field("Environment", pairs(env.iter(), revealed, k), k));
+                c = c.child(prop("Environment", code_box(pairs(env.iter(), revealed, k), k), k));
             }
         }
         Transport::Http { url, headers, .. } => {
-            values = values.child(field("URL", mono(if revealed { url.clone() } else { masked_url(url) }, k).key("mcp-url"), k));
+            c = c.child(prop("URL", code_box(words(&shown(url), k), k).key("mcp-url"), k));
             if !headers.is_empty() {
-                values = values.child(field("Headers", pairs(headers.iter(), revealed, k), k));
+                c = c.child(prop("Headers", code_box(pairs(headers.iter(), revealed, k), k), k));
             }
         }
     }
-    body = body.child(values).child(copies(s, server, k));
-    if !server.diffs.is_empty() {
-        body = body.child(diffs(server, k));
-    }
-    body
+    c
 }
 
 /// Copy, edit and the project switch on the left; Remove apart on the right. An app's server
@@ -372,10 +386,10 @@ fn pairs<'a>(items: impl Iterator<Item = (&'a String, &'a EnvValue)>, revealed: 
         c = c.child(
             row()
                 .w_full()
-                .gap(8.0)
+                .gap(7.0)
                 .child(text(key.clone()).font(k.ty.mono).color(k.c.text_base).shrink().min_w(0.0).truncate())
                 .child(text("=").font(k.ty.mono).color(k.c.text_faint))
-                .child(mono(value, k).grow(1.0).min_w(0.0)),
+                .child(mono(value, k).color(k.c.text_base).grow(1.0).min_w(0.0)),
         );
     }
     c
@@ -383,17 +397,17 @@ fn pairs<'a>(items: impl Iterator<Item = (&'a String, &'a EnvValue)>, revealed: 
 
 /// Where each agent keeps its copy.
 fn copies(s: &App, server: &McpServer, k: &Kit) -> El {
-    let mut list = col().key("mcp-copies").w_full().gap(12.0).child(heading("Agents", k));
+    let mut list = col().key("mcp-copies").w_full().gap(10.0).child(section("Agents", None, k));
     for (i, c) in server.copies.iter().enumerate() {
         let off = server.disabled_for.contains(&c.agent) || !c.enabled;
-        let mut title = row().gap(6.0).center_y().child(text(MCP_AGENTS[c.agent].name).font(k.ty.ui_medium).color(k.c.text_base));
+        let mut name = row().gap(6.0).center_y().grow(1.0).min_w(0.0).child(text(MCP_AGENTS[c.agent].name).font(k.ty.ui).color(k.c.text_base));
         if off {
-            title = title.child(dot(k.c.warning.icon));
+            name = name.child(dot(k.c.warning.icon));
         }
         if c.read_only.is_some() {
-            title = title.child(rune::icon(&glyphs::LOCK, 12.0).color(k.c.icon_muted));
+            name = name.child(rune::icon(&glyphs::LOCK, 12.0).color(k.c.icon_muted));
         }
-        let mut detail = format!("{} · {}", place_label(&c.place), tilde(&c.file, &s.paths));
+        let mut detail = tilde(&c.file, &s.paths);
         if let Some(app) = &c.read_only {
             detail.push_str(&format!(" · managed by {app}"));
         }
@@ -404,27 +418,32 @@ fn copies(s: &App, server: &McpServer, k: &Kit) -> El {
             col()
                 .key(format!("copy-{i}"))
                 .w_full()
-                .gap(2.0)
-                .child(title)
-                .child(text(detail).font(k.ty.small).color(k.c.text_faint).wrap_anywhere()),
+                .gap(1.0)
+                .child(row().w_full().gap(8.0).center_y().child(name).child(text(place_label(&c.place)).font(k.ty.small).color(k.c.text_muted)))
+                .child(text(detail).font(k.ty.caption()).color(k.c.text_faint).wrap_anywhere()),
         );
     }
     list
 }
 
-/// Field by field, what each copy has where they disagree (values come masked).
-fn diffs(server: &McpServer, k: &Kit) -> El {
-    let mut table = col().key("mcp-diffs").w_full().gap(10.0).child(heading("Differences", k));
+/// Field by field, what each copy has where they disagree: masked, or as written once revealed.
+fn diffs(server: &McpServer, revealed: bool, k: &Kit) -> El {
+    let mut table = col().key("mcp-diffs").w_full().gap(10.0).child(section("Differences", None, k));
     for d in &server.diffs {
-        let mut group = col().w_full().gap(3.0).child(text(d.field.clone()).font(k.ty.small_medium).color(k.c.text_base));
-        for (agent, value) in &d.values {
+        let mut rows = col().w_full().gap(6.0).child(text(d.field.clone()).font(k.ty.mono).color(k.c.text_base).wrap_anywhere());
+        for (agent, value) in d.shown(revealed) {
             let shown = match value {
-                Some(v) => mono(v.clone(), k).grow(1.0).min_w(0.0),
-                None => text("missing").font(k.ty.small).color(k.c.text_faint),
+                Some(v) => words(v, k).grow(1.0).min_w(0.0),
+                None => text("missing").font(k.ty.caption()).color(k.c.text_faint),
             };
-            group = group.child(row().w_full().gap(8.0).center_y().child(text(short(*agent)).font(k.ty.small).color(k.c.text_muted).w(72.0)).child(shown));
+            rows = rows.child(
+                row().w_full().gap(10.0).items_start().child(text(short(agent)).font(k.ty.caption()).color(k.c.text_muted).w(56.0).pt(1.0)).child(shown),
+            );
         }
-        table = table.child(group);
+        if d.hidden_only() && !revealed {
+            rows = rows.child(text("Only hidden values differ; Show values compares them").font(k.ty.caption()).color(k.c.text_faint).wrap());
+        }
+        table = table.child(col().w_full().px(10.0).py(9.0).radius(k.radius.md).border(1.0, k.c.border_muted).child(rows));
     }
     table
 }

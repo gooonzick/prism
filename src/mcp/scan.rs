@@ -25,6 +25,20 @@ pub struct FieldDiff {
     pub field: String,
     /// One entry per copy, in copy order: the agent and the value, masked; `None` where the copy lacks it.
     pub values: Vec<(usize, Option<String>)>,
+    /// The same values as written, unmasked, in the same order. Shown only on request.
+    pub written: Vec<Option<String>>,
+}
+
+impl FieldDiff {
+    /// Every copy that has the field shows the same masked value: only hidden text differs.
+    pub fn hidden_only(&self) -> bool {
+        self.values.iter().all(|(_, v)| v.is_some()) && self.values.windows(2).all(|w| w[0].1 == w[1].1)
+    }
+
+    /// Agent and value per copy: masked, or as written when `secrets`.
+    pub fn shown(&self, secrets: bool) -> impl Iterator<Item = (usize, Option<&str>)> {
+        self.values.iter().zip(&self.written).map(move |((a, v), w)| (*a, if secrets { w.as_deref() } else { v.as_deref() }))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -213,6 +227,14 @@ impl Field<'_> {
             Field::Value(v) => v.masked(),
         }
     }
+
+    fn written(&self) -> String {
+        match self {
+            Field::Text(t) => t.clone(),
+            Field::Args(args) => args.join(" "),
+            Field::Value(v) => v.written(),
+        }
+    }
 }
 
 /// Field order in a diff; `env.*` and `headers.*` follow, by key.
@@ -259,8 +281,9 @@ fn diffs(copies: &[McpCopy]) -> Vec<FieldDiff> {
         // Shown as the first copy that has it spells it.
         let Some((name, _)) = values.iter().flatten().next() else { continue };
         let field = name.clone();
+        let written = values.iter().map(|v| v.map(|(_, f)| f.written())).collect();
         let values = copies.iter().zip(values).map(|(c, v)| (c.agent, v.map(|(_, f)| f.shown()))).collect();
-        out.push(FieldDiff { field, values });
+        out.push(FieldDiff { field, values, written });
     }
     out
 }
@@ -433,7 +456,8 @@ mod tests {
         let gitlab = scan(&Scope::Global, &paths).get("gitlab").cloned().unwrap();
         assert_eq!(gitlab.status, Status::Differs);
         let masked = Some("***".to_string());
-        assert_eq!(gitlab.diffs, [FieldDiff { field: "env.TOKEN".into(), values: vec![(agent("claude"), masked.clone()), (agent("cursor"), masked)] }]);
+        assert_eq!(gitlab.diffs, [FieldDiff { field: "env.TOKEN".into(), values: vec![(agent("claude"), masked.clone()), (agent("cursor"), masked)], written: vec![Some("fake-a".into()), Some("fake-b".into())] }]);
+        assert!(gitlab.diffs[0].hidden_only());
     }
 
     #[test]
@@ -446,7 +470,8 @@ mod tests {
         let ctx7 = scan(&Scope::Global, &paths).get("context7").cloned().unwrap();
         assert_eq!(ctx7.status, Status::Differs);
         let values = vec![(agent("claude"), Some("${CTX7}".to_string())), (agent("cursor"), None)];
-        assert_eq!(ctx7.diffs, [FieldDiff { field: "headers.CONTEXT7_API_KEY".into(), values }]);
+        assert_eq!(ctx7.diffs, [FieldDiff { field: "headers.CONTEXT7_API_KEY".into(), values, written: vec![Some("${CTX7}".into()), None] }]);
+        assert!(!ctx7.diffs[0].hidden_only());
     }
 
     #[test]
@@ -496,13 +521,17 @@ mod tests {
         let inv = scan(&Scope::Global, &paths);
         let figma = inv.get("figma").unwrap();
         let shown = Some("-y figma-developer-mcp --figma-api-key=***".to_string());
-        assert_eq!(figma.diffs, [FieldDiff { field: "args".into(), values: vec![(agent("claude"), shown.clone()), (agent("cursor"), shown)] }]);
+        assert_eq!(figma.diffs, [FieldDiff { field: "args".into(), values: vec![(agent("claude"), shown.clone()), (agent("cursor"), shown)], written: vec![Some("-y figma-developer-mcp --figma-api-key=fake-a".into()), Some("-y figma-developer-mcp --figma-api-key=fake-b".into())] }]);
+        assert!(figma.diffs[0].hidden_only());
+        let revealed: Vec<_> = figma.diffs[0].shown(true).map(|(_, v)| v.unwrap()).collect();
+        assert_eq!(revealed, ["-y figma-developer-mcp --figma-api-key=fake-a", "-y figma-developer-mcp --figma-api-key=fake-b"]);
         let remote = inv.get("remote").unwrap();
         let values = vec![
             (agent("claude"), Some("https://***@mcp.example.com/mcp?api_key=***&team=1".to_string())),
             (agent("cursor"), Some("https://mcp.example.com/mcp?api_key=***&team=1".to_string())),
         ];
-        assert_eq!(remote.diffs, [FieldDiff { field: "url".into(), values }]);
+        assert_eq!(remote.diffs, [FieldDiff { field: "url".into(), values, written: vec![Some("https://u:fake@mcp.example.com/mcp?api_key=fake-a&team=1".into()), Some("https://mcp.example.com/mcp?api_key=fake-b&team=1".into())] }]);
+        assert!(!remote.diffs[0].hidden_only());
     }
 
     #[test]
@@ -708,7 +737,7 @@ mod tests {
         let Transport::Http { headers, .. } = &same.copies[1].server.transport else { panic!("same is http") };
         assert!(headers.contains_key("authorization"), "the model keeps the case as written");
         let values = vec![(agent("claude"), Some("${A}".to_string())), (agent("cursor"), Some("${B}".to_string()))];
-        assert_eq!(inv.get("other").unwrap().diffs, [FieldDiff { field: "headers.X-Key".into(), values }]);
+        assert_eq!(inv.get("other").unwrap().diffs, [FieldDiff { field: "headers.X-Key".into(), values, written: vec![Some("${A}".into()), Some("${B}".into())] }]);
     }
 
     #[test]

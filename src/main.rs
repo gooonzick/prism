@@ -173,6 +173,8 @@ fn main() {
         on_key: Some(ui::on_key),
         min_size: Some((820.0, 520.0)),
         scenes: SCENES,
+        // Commands, paths and keys read as code: the system monospace (SF Mono on macOS).
+        families: ("Inter", "ui-monospace"),
         ..AppSpec::new("Prism", (1180.0, 760.0), init, ui::view)
     };
     let app = rune::App::new(spec).chrome(ui::chrome());

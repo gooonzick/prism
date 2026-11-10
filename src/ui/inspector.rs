@@ -1,10 +1,10 @@
 //! The inspector for an installed skill: what it is, its actions, and where each agent has it.
 
-use rune::{El, Tx, col, row, text};
-use rune_kit::{Button, ButtonVariant, ControlSize, Divider, IconButton, IconButtonVariant, Kit, Markdown, Switch, glyphs};
+use rune::{El, col, row, text};
+use rune_kit::{Button, ButtonVariant, ControlSize, Divider, IconButton, IconButtonVariant, Kit, Switch, glyphs};
 
 use super::installed::placement_color;
-use super::{UPDATE, dot, empty, field, heading, inspector_body, mono};
+use super::{UPDATE, dot, empty, inspector_body, inspector_title, mono, prop, section, skill_md};
 use crate::agents::{AGENTS, CANONICAL, tilde};
 use crate::app::{App, open_path, reveal_path};
 use crate::scan::{Placement, Skill};
@@ -14,26 +14,20 @@ pub fn installed(s: &App, k: &Kit) -> El {
     let Some(skill) = s.selected.as_deref().and_then(|n| s.inv.get(n)) else {
         return inspector_body(k).child(empty("No skill selected", "Click a skill, or move through the list with ↑ and ↓.", k));
     };
-    let mut body = inspector_body(k).child(text(skill.name.clone()).font(k.ty.body_medium).color(k.c.text_base).wrap());
+    let mut head = col().w_full().gap(4.0).child(inspector_title(skill.name.clone(), k));
     if !skill.description.is_empty() {
-        body = body.child(text(skill.description.clone()).font(k.ty.small).color(k.c.text_muted).wrap());
+        head = head.child(text(skill.description.clone()).font(k.ty.caption()).color(k.c.text_muted).wrap());
     }
+    let mut body = inspector_body(k).child(head);
     if s.has_update(&skill.name) {
         body = body.child(update_banner(s, &skill.name, k));
     }
     if let Some(src) = &skill.source {
-        body = body.child(field("Folder", mono(tilde(src, &s.paths), k), k));
+        body = body.child(prop("Folder", mono(tilde(src, &s.paths), k).color(k.c.text_base), k));
     }
-    body = body.child(actions(s, skill, k)).child(agents(s, skill, k));
+    body = body.child(actions(s, skill, k)).child(Divider::horizontal().build(k)).child(agents(s, skill, k));
     if let Some(md) = &s.preview {
-        body = body.child(Divider::horizontal().build(k)).child(heading("SKILL.md", k)).child(
-            Markdown::new(md.clone())
-                .on_link_tx(|_: &mut App, url: &str, tx: &mut Tx| {
-                    let _ = tx.open_url(url);
-                })
-                .build(k)
-                .key("skill-md"),
-        );
+        body = body.child(Divider::horizontal().build(k)).child(section("SKILL.md", None, k)).child(skill_md(md.clone(), k).key("skill-md"));
     }
     body
 }
@@ -119,7 +113,7 @@ fn agents(s: &App, skill: &Skill, k: &Kit) -> El {
     let targets = s.targets();
     let (shown, hidden): (Vec<usize>, Vec<usize>) =
         (0..AGENTS.len()).partition(|&a| a == CANONICAL || targets.contains(&a) || skill.placements[a] != Placement::Missing);
-    let mut agents = col().key("placements").w_full().gap(12.0).child(heading("Agents", k));
+    let mut agents = col().key("placements").w_full().gap(10.0).child(section("Agents", None, k));
     for &a in &shown {
         agents = agents.child(placement_row(s, skill, a, k));
     }
@@ -155,16 +149,16 @@ fn placement_row(s: &App, skill: &Skill, a: usize, k: &Kit) -> El {
         (true, Placement::Missing) => "not here yet",
         _ => p.label(),
     };
-    let mut title = row().gap(6.0).center_y().child(text(agent.name).font(k.ty.ui_medium).color(k.c.text_base));
+    let mut title = row().gap(6.0).center_y().child(text(agent.name).font(k.ty.ui).color(k.c.text_base));
     if let Some(c) = placement_color(p, k) {
         title = title.child(dot(c));
     }
     let label = col()
-        .gap(2.0)
+        .gap(1.0)
         .grow(1.0)
         .min_w(0.0)
         .child(title)
-        .child(text(format!("{} · {status}", agent.dir_label(&s.inv.scope, &s.paths))).font(k.ty.small).color(k.c.text_faint).truncate());
+        .child(text(format!("{} · {status}", agent.dir_label(&s.inv.scope, &s.paths))).font(k.ty.caption()).color(k.c.text_faint).truncate());
 
     let name = skill.name.clone();
     let control: El = if a == CANONICAL {

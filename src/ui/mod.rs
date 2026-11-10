@@ -8,9 +8,9 @@ mod installed;
 mod mcp;
 mod mcp_dialogs;
 
-use rune::{Chrome, Color, Cx, El, Icon, KeyEvent, ScrollSpec, Spring, Tx, col, el, row, text};
+use rune::{Chrome, Color, Cx, El, Icon, KeyEvent, ScrollSpec, Spring, TextStyle, Tx, col, el, row, text};
 use rune_kit::shell::{self, PaneMotion, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView};
-use rune_kit::{ControlSize, Kit, Toast, ToastRegion, glyphs};
+use rune_kit::{ControlSize, Kit, Markdown, MarkdownStyle, Toast, ToastRegion, glyphs};
 
 use crate::agents::{Scope, tilde};
 use crate::app::{App, Page};
@@ -314,8 +314,58 @@ pub fn pick_hint() -> &'static str {
     if cfg!(target_os = "macos") { "⌘- or ⇧-click" } else { "Ctrl- or Shift-click" }
 }
 
-pub fn field(label: &str, value: El, k: &Kit) -> El {
-    col().gap(3.0).w_full().child(heading(label, k)).child(value)
+// The inspector's type ladder: title (15 semibold), section title (13 semibold), value (13 or
+// 12 mono, text colour), label (11, muted), path and note (11, faint).
+
+/// An inspector's title: a step above its section titles.
+pub fn inspector_title(t: impl Into<String>, k: &Kit) -> El {
+    text(t.into()).font(TextStyle::new(15.0, 600.0).lh(20.0)).color(k.c.text_base).wrap()
+}
+
+/// A section's title row in an inspector, with an optional control on the right.
+pub fn section(title: &str, trailing: Option<El>, k: &Kit) -> El {
+    let mut head = row().w_full().gap(8.0).center_y().child(text(title.to_string()).font(TextStyle::new(13.0, 600.0).lh(20.0)).color(k.c.text_base).grow(1.0).min_w(0.0));
+    if let Some(t) = trailing {
+        head = head.child(t);
+    }
+    head
+}
+
+/// A labelled value: the label quiet, the value in the text colour.
+pub fn prop(label: &str, value: El, k: &Kit) -> El {
+    col().w_full().gap(4.0).child(text(label.to_string()).font(k.ty.caption()).color(k.c.text_muted)).child(value)
+}
+
+/// A boxed block of monospace text.
+pub fn code_box(inner: El, k: &Kit) -> El {
+    col().w_full().px(10.0).py(7.0).radius(k.radius.md).fill(k.c.layer_01).border(1.0, k.c.border_muted).child(inner)
+}
+
+/// Monospace words that wrap only between words, so `--stdio` never splits; a word longer than
+/// the line still breaks.
+pub fn words(line: &str, k: &Kit) -> El {
+    let mut flow = row().w_full().flex_wrap().gaps(0.0, 7.0);
+    for w in line.split(' ').filter(|w| !w.is_empty()) {
+        flow = flow.child(text(w.to_string()).font(k.ty.mono).color(k.c.text_base).wrap_anywhere().shrink().min_w(0.0).selectable(true).selection_color(k.selection()));
+    }
+    flow
+}
+
+/// A SKILL.md body in an inspector: body text at UI size and headings below the inspector's
+/// own titles, so the file never outranks the pane around it.
+pub fn skill_md(md: String, k: &Kit) -> El {
+    let style = MarkdownStyle::from_kit(k)
+        .body_font(k.ty.ui)
+        .heading_font(1, TextStyle::new(13.0, 600.0).lh(20.0))
+        .heading_font(2, TextStyle::new(13.0, 600.0).lh(20.0))
+        .heading_font(3, TextStyle::new(13.0, 500.0).lh(20.0))
+        .code_block_font(k.ty.mono);
+    Markdown::new(md)
+        .style(style)
+        .on_link_tx(|_: &mut App, url: &str, tx: &mut Tx| {
+            let _ = tx.open_url(url);
+        })
+        .build(k)
 }
 
 pub fn mono(t: impl Into<String>, k: &Kit) -> El {

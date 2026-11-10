@@ -757,6 +757,24 @@ fn mcp_show_secrets_reveals_values() {
 }
 
 #[test]
+fn mcp_show_says_when_only_hidden_values_differ() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+    std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+    std::fs::write(home.path().join(".cursor/mcp.json"), r#"{"mcpServers":{"f":{"command":"npx","args":["f-mcp","--api-key=FIXTURE_A1"]}}}"#).unwrap();
+    std::fs::write(home.path().join(".codex/config.toml"), "[mcp_servers.f]\ncommand = \"npx\"\nargs = [\"f-mcp\", \"--api-key=FIXTURE_B2\"]\n").unwrap();
+    let (code, out, _) = go(&["mcp", "show", "f"], &mut ctx(home.path()));
+    assert_eq!(code, 0);
+    assert!(out.contains("only hidden values differ") && !out.contains("FIXTURE_"), "{out}");
+    let (_, out, _) = go(&["mcp", "show", "f", "--json"], &mut ctx(home.path()));
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["diffs"][0]["hidden_only"], true);
+    let (_, out, _) = go(&["mcp", "show", "f", "--show-secrets"], &mut ctx(home.path()));
+    assert!(out.contains("f-mcp --api-key=FIXTURE_A1") && out.contains("f-mcp --api-key=FIXTURE_B2"), "{out}");
+    assert!(!out.contains("only hidden values differ"));
+}
+
+#[test]
 fn mcp_show_unknown_is_exit_1() {
     let home = mcp_home();
     let (code, out, err) = go(&["mcp", "show", "nope"], &mut ctx(home.path()));

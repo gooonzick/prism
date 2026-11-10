@@ -406,7 +406,7 @@ fn show(ctx: &Ctx, scope: &Scope, name: &str, secrets: bool, out: &mut Out, err:
         return Exit::Failed;
     };
     let copies: Vec<Value> = server.copies.iter().map(|c| copy_json(c, &ctx.paths, secrets)).collect();
-    let diffs: Vec<Value> = server.diffs.iter().map(diff_json).collect();
+    let diffs: Vec<Value> = server.diffs.iter().map(|d| diff_json(d, secrets)).collect();
     let json = json!({ "name": server.name, "copies": copies, "diffs": diffs });
     out.emit(human_show(server, &ctx.paths, secrets), json);
     Exit::Ok
@@ -456,9 +456,9 @@ fn copy_json(c: &McpCopy, paths: &Paths, secrets: bool) -> Value {
     })
 }
 
-fn diff_json(d: &FieldDiff) -> Value {
-    let values: Vec<Value> = d.values.iter().map(|(a, v)| json!({ "agent": MCP_AGENTS[*a].id, "value": v })).collect();
-    json!({ "field": d.field, "values": values })
+fn diff_json(d: &FieldDiff, secrets: bool) -> Value {
+    let values: Vec<Value> = d.shown(secrets).map(|(a, v)| json!({ "agent": MCP_AGENTS[a].id, "value": v })).collect();
+    json!({ "field": d.field, "values": values, "hidden_only": d.hidden_only() })
 }
 
 fn human_show(s: &McpServer, paths: &Paths, secrets: bool) -> String {
@@ -499,8 +499,11 @@ fn human_show(s: &McpServer, paths: &Paths, secrets: bool) -> String {
         lines.push("Differences:".into());
         for d in &s.diffs {
             lines.push(format!("  {}", d.field));
-            for (a, v) in &d.values {
-                lines.push(format!("    {:<16} {}", MCP_AGENTS[*a].id, v.as_deref().unwrap_or("(none)")));
+            for (a, v) in d.shown(secrets) {
+                lines.push(format!("    {:<16} {}", MCP_AGENTS[a].id, v.unwrap_or("(none)")));
+            }
+            if d.hidden_only() && !secrets {
+                lines.push("    (only hidden values differ; --show-secrets shows them)".into());
             }
         }
     }
