@@ -7,13 +7,15 @@ use rune_kit::{Kit, glyphs};
 
 use super::{Place, color, icon_button, motion, radius, size, space, text};
 
-/// Which of the two widths a dialog has.
+/// Which of the three widths a dialog has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DialogKind {
     /// A question before an action: 440.
     Confirm,
     /// A form: 560.
     Form,
+    /// Picks on the left that change a plan on the right: 760.
+    Wide,
 }
 
 impl DialogKind {
@@ -21,6 +23,7 @@ impl DialogKind {
         match self {
             DialogKind::Confirm => size::DIALOG_CONFIRM,
             DialogKind::Form => size::DIALOG_FORM,
+            DialogKind::Wide => size::DIALOG_WIDE,
         }
     }
 }
@@ -34,7 +37,8 @@ pub struct DialogFrame {
     kind: DialogKind,
     body: Vec<El>,
     error: Option<String>,
-    footer: Option<(El, El)>,
+    /// Cancel and, unless the footer is cancel-only, the primary action.
+    footer: Option<(El, Option<El>)>,
     menus: Vec<El>,
 }
 
@@ -57,7 +61,14 @@ impl DialogFrame {
 
     /// Cancel and the primary action, right-aligned. Build them with `Place::Bar`.
     pub fn footer(mut self, cancel: El, primary: El) -> Self {
-        self.footer = Some((cancel, primary));
+        self.footer = Some((cancel, Some(primary)));
+        self
+    }
+
+    /// Cancel alone, right-aligned, for a dialog whose body is the action (picking a scope):
+    /// there is nothing to confirm. Build it with `Place::Bar`.
+    pub fn footer_cancel(mut self, cancel: El) -> Self {
+        self.footer = Some((cancel, None));
         self
     }
 
@@ -115,7 +126,11 @@ impl DialogFrame {
         }
         match self.footer {
             Some((cancel, primary)) => {
-                panel = panel.child(row().w_full().padding(space::S4).gap(space::S2).justify_end().child(cancel).child(primary));
+                let mut footer = row().w_full().padding(space::S4).gap(space::S2).justify_end().child(cancel);
+                if let Some(p) = primary {
+                    footer = footer.child(p);
+                }
+                panel = panel.child(footer);
             }
             None => panel = panel.child(el().h(space::S4)),
         }

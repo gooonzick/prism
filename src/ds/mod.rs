@@ -4,9 +4,11 @@
 mod card;
 mod controls;
 mod dialog;
+mod doc;
 mod gallery;
 mod inspector;
 mod page;
+mod plan;
 mod status;
 pub mod text;
 mod tokens;
@@ -16,9 +18,11 @@ mod tests;
 pub use card::*;
 pub use controls::*;
 pub use dialog::*;
+pub use doc::*;
 pub use gallery::*;
 pub use inspector::*;
 pub use page::*;
+pub use plan::*;
 pub use status::*;
 pub use tokens::*;
 

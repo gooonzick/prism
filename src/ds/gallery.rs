@@ -5,9 +5,9 @@ use rune::{El, TextEdit, Tx, col, row};
 use rune_kit::{Kit, glyphs};
 
 use super::{
-    Card, Inspector, ListRow, MenuAction, Notice, Page, Place, Selection, Tone, button, color, copy_button, danger, dot, empty, empty_action,
-    field, field_pair, filter, icon_button, item_row, loading, overflow, pair_row, plain_row, pressable, primary, quiet, segments, size,
-    space, stacked_row, status, tag, text,
+    Card, Inspector, ListRow, MenuAction, Notice, Page, Place, Plan, Selection, Tone, button, color, copy_button, danger, dot, empty,
+    empty_action, field, field_pair, filter, icon_button, item_row, loading, markdown, overflow, pair_row, plain_row, pressable, primary,
+    quiet, reveal, secret_input, segments, size, space, stacked_row, status, switch, tag, text,
 };
 
 const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGq0e6m3cX9y5Vb8nqE2Yt7kU1dJw4LrP0sZf9hQ3xTa work@laptop";
@@ -55,8 +55,54 @@ pub fn gallery<S: 'static>(k: &Kit, layer: &mut Vec<El>) -> El {
                 .border(1.0, color::hairline(k))
                 .child(inspector::<S>(k, layer))
                 .child(col().w_full().grow(1.0).min_h(0.0).child(picking::<S>(k))),
+        ).child(
+            col()
+                .w(320.0)
+                .h_full()
+                .min_h(0.0)
+                .padding(size::PANE_EDGE)
+                .gap(space::S4)
+                .child(section(k, "Plan", col().w_full().gap(space::S4).children(plan(k))))
+                .child(section(k, "Command", text::command(k, "npx -y figma-developer-mcp --stdio --figma-api-key=${FIGMA_KEY}")))
+                .child(section(k, "Markdown", markdown::<S>(k, MARKDOWN)))
+                .child(section(k, "Inspector controls", inspector_controls::<S>(k))),
         ),
     )
+}
+
+const MARKDOWN: &str = "# find-skills\n\nFinds a skill on **skills.sh**:\n\n- ask for one by task\n\n```\nnpx skills add owner/repo\n```";
+
+/// A plan as a dialog shows it: grouped changes, what is skipped, a heads-up.
+fn plan(k: &Kit) -> Vec<El> {
+    Plan::new("gallery-plan")
+        .heading("3 changes to 2 hosts")
+        .group("work", vec!["add IdentityFile".into(), "set Port 2222".into()])
+        .group("github", vec!["remove ForwardAgent".into()])
+        .skipped(vec!["pi: the file is read-only".into()])
+        .heads_up(vec!["work is open in another window".into()])
+        .build(k)
+}
+
+/// A switch off and on, the reveal button in both states, a secret field hidden and shown.
+fn inspector_controls<S: 'static>(k: &Kit) -> El {
+    // The gallery is not editable: an edit goes to a throwaway field.
+    let secret = |shown: bool| {
+        let edit = TextEdit::new("hunter2-fake-token").secure();
+        secret_input(&edit, |_: &mut S| Box::leak(Box::new(TextEdit::new(""))), shown, nothing::<S>()).label("Value").build(k)
+    };
+    col()
+        .w_full()
+        .gap(space::S2)
+        .child(
+            row()
+                .gap(space::S3)
+                .center_y()
+                .child(switch(k, false).label("Off").hide_label().build(k))
+                .child(switch(k, true).label("On").hide_label().build(k)),
+        )
+        .child(row().gap(space::S2).center_y().child(reveal(false, Place::Inspector).build(k)).child(reveal(true, Place::Inspector).build(k)))
+        .child(secret(false))
+        .child(secret(true))
 }
 
 fn type_ladder(k: &Kit) -> El {

@@ -32,11 +32,17 @@ pub mod size {
     pub const ICON: f32 = 16.0;
     pub const DIALOG_CONFIRM: f32 = 440.0;
     pub const DIALOG_FORM: f32 = 560.0;
+    /// A dialog whose picks on the left change a plan on the right (`DialogKind::Wide`). Fits
+    /// the 860 minimum window with `S4` either side.
+    pub const DIALOG_WIDE: f32 = 760.0;
     pub const DIALOG_TOP: f32 = 96.0;
     /// The inspector's narrowest width: the Keys action row ("Remove from agent", "…", "Move to
     /// Trash…") fits at 352, not at the 320 first planned.
     pub const INSPECTOR_MIN: f32 = 352.0;
     pub const INSPECTOR_MAX: f32 = 400.0;
+    /// The widest an inspector that shows a document (SKILL.md) may be dragged, so the user can
+    /// widen it to read; `INSPECTOR_MIN` still applies.
+    pub const INSPECTOR_READ_MAX: f32 = 640.0;
     /// The list's room in the inspector rule: below sidebar + this + `INSPECTOR_MIN` the
     /// inspector hides. 276 = the 860 minimum window − the 232 default sidebar − `INSPECTOR_MIN`,
     /// so the minimum window shows all three panes. The inspector shrinks (to `INSPECTOR_MIN` at

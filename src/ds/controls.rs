@@ -4,9 +4,9 @@
 use std::rc::Rc;
 
 use rune::{El, Icon, TextEdit, Tx, text};
-use rune_kit::{Button, ButtonVariant, IconButton, IconButtonVariant, Kit, Menu, MenuItem, SegmentedControl, TextInput, glyphs};
+use rune_kit::{Button, ButtonVariant, IconButton, IconButtonVariant, Kit, Menu, MenuItem, SegmentedControl, Switch, TextInput, glyphs};
 
-use super::Place;
+use super::{Place, space};
 
 /// Three dots: rune-kit's glyph set has no "more".
 static MORE: Icon = Icon {
@@ -54,6 +54,86 @@ pub fn copy_button(label: impl Into<String>, place: Place, copied: bool) -> Butt
 pub fn icon_button(icon: &'static Icon, label: impl Into<String>, place: Place) -> IconButton {
     let label = label.into();
     IconButton::new(icon).variant(IconButtonVariant::GhostMuted).control_size(place.control()).label(label.clone()).help(label)
+}
+
+/// A `quiet` button with an eye that shows or hides a card's masked values: "Show values" while
+/// they are hidden, "Hide values" while `shown`. The caller adds `help`, `on_press` and a key.
+pub fn reveal(shown: bool, place: Place) -> Button {
+    let (label, icon) = if shown { ("Hide values", &glyphs::EYE_OFF) } else { ("Show values", &glyphs::EYE) };
+    quiet(label, place).icon(icon)
+}
+
+/// A switch at the inspector's control height. The light theme gets the kit's standard switch:
+/// off, the compact one disappears on a light pane (and the standard one on a dark pane). The
+/// caller adds `label`, `hide_label`, `on_toggle`, then builds and keys it.
+pub fn switch(k: &Kit, on: bool) -> Switch {
+    let s = Switch::new(on).control_size(Place::Inspector.control());
+    if k.dark { s } else { s.standard() }
+}
+
+/// A text field whose text is masked until its eye is pressed, the eye after the field
+/// ("Show value" / "Hide value"). Build it with `secret_input`; `key` keys the field, `eye_key`
+/// the eye.
+pub struct SecretInput {
+    input: TextInput,
+    eye: IconButton,
+    key: Option<String>,
+    eye_key: Option<String>,
+}
+
+/// A `SecretInput` over `edit`, shown when `shown`; `on_toggle` flips `shown`. The field takes
+/// the width left beside the eye.
+pub fn secret_input<S: 'static>(edit: &TextEdit, on_edit: impl Fn(&mut S) -> &mut TextEdit + 'static, shown: bool, on_toggle: impl Fn(&mut S) + 'static) -> SecretInput {
+    let input = TextInput::new(edit).width(None).secure().revealed(shown).on_edit(on_edit);
+    let (label, icon) = if shown { ("Hide value", &glyphs::EYE_OFF) } else { ("Show value", &glyphs::EYE) };
+    SecretInput { input, eye: icon_button(icon, label, Place::Inspector).on_press(on_toggle), key: None, eye_key: None }
+}
+
+impl SecretInput {
+    /// The field's accessible name.
+    pub fn label(mut self, l: impl Into<String>) -> Self {
+        self.input = self.input.label(l);
+        self
+    }
+
+    pub fn placeholder(mut self, p: impl Into<String>) -> Self {
+        self.input = self.input.placeholder(p);
+        self
+    }
+
+    pub fn invalid(mut self, on: bool) -> Self {
+        self.input = self.input.invalid(on);
+        self
+    }
+
+    pub fn on_submit<S: 'static>(mut self, f: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
+        self.input = self.input.on_submit(f);
+        self
+    }
+
+    /// Keys the field.
+    pub fn key(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(key.into());
+        self
+    }
+
+    /// Keys the eye.
+    pub fn eye_key(mut self, key: impl Into<String>) -> Self {
+        self.eye_key = Some(key.into());
+        self
+    }
+
+    pub fn build(self, k: &Kit) -> El {
+        let mut input = self.input.build(k);
+        if let Some(key) = self.key {
+            input = input.key(key);
+        }
+        let mut eye = self.eye.build(k);
+        if let Some(key) = self.eye_key {
+            eye = eye.key(key);
+        }
+        rune::row().w_full().gap(space::S1).center_y().child(input.grow(1.0).min_w(0.0)).child(eye)
+    }
 }
 
 /// The list filter: a search field at full width with a clear button once there is text. The

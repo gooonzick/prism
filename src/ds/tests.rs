@@ -443,6 +443,41 @@ mod dialog {
         assert_eq!(rt.state.closed, 1);
     }
 
+    #[test]
+    fn wide_dialog_is_760_and_fits_860() {
+        assert_eq!(size::DIALOG_WIDE, 760.0);
+        let rt = run(|_, _| frame(DialogKind::Wide, 2000.0), (860.0, 520.0));
+        let p = panel(&rt);
+        assert_eq!(p[2], 760.0);
+        assert!(p[1] + p[3] <= 520.0 - 16.0, "panel ends at {}", p[1] + p[3]);
+        assert!(rt.find("ok").is_some(), "no footer button");
+        let ok = rt.presented("ok").unwrap().0;
+        assert!(ok[1] >= 0.0 && ok[1] + ok[3] <= 520.0, "footer button at y {} h {}", ok[1], ok[3]);
+        let body = rt.presented("d-body").unwrap().0;
+        assert!(body[3] < 2000.0, "body is {} high, it does not scroll", body[3]);
+    }
+
+    fn cancel_only(_: &Shown, _: &mut Cx<Shown>) -> El {
+        let k = Kit::neutral(false);
+        let mut layer = Vec::new();
+        DialogFrame::new("d", "Copy to…", DialogKind::Confirm)
+            .body(el().key("block").w_full().h(40.0))
+            .footer_cancel(button("Cancel", Place::Bar).build(&k).key("cancel"))
+            .build(&k, |s: &mut Shown| s.closed += 1, &mut layer);
+        rune_kit::root(col().w_full().h_full(), layer)
+    }
+
+    #[test]
+    fn cancel_only_footer() {
+        let rt = run(cancel_only, (1200.0, 760.0));
+        assert!(rt.find("close").is_some(), "no close button");
+        assert!(rt.find("cancel").is_some(), "no cancel button");
+        let buttons: Vec<_> = rt.elements().into_iter().filter(|e| e.role == "button" && !e.exiting).map(|e| e.key).collect();
+        assert_eq!(buttons.len(), 2, "buttons: {buttons:?}");
+        let (body, cancel) = (rt.presented("d-body").unwrap().0, rt.presented("cancel").unwrap().0);
+        assert!(cancel[1] >= body[1] + body[3], "cancel is not under the body");
+    }
+
     fn with_menu(_: &Shown, _: &mut Cx<Shown>) -> El {
         let k = Kit::neutral(false);
         let mut layer = Vec::new();
@@ -797,5 +832,177 @@ mod page_additions {
         assert_eq!(rt.state.cleared, 1, "pressing the words did not clear");
         let clear = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("bulk-clear")).expect("no bulk-clear");
         assert_eq!((clear.role, clear.label.as_deref(), clear.help.as_deref(), clear.focusable), ("button", Some("Clear selection"), Some("Clear selection (Esc)"), true));
+    }
+}
+
+mod inspector_additions {
+    use super::*;
+    use rune::{Cx, El, Env, Runtime, TextEdit, col, row};
+
+    fn run<S: 'static>(state: S, view: fn(&S, &mut Cx<S>) -> El, size: (f32, f32)) -> Runtime<S> {
+        let mut rt = Runtime::new(state, view, size, Env { system_dark: false, scale: 1.0 });
+        rt.frame(0.0);
+        rt.frame(1.0);
+        rt
+    }
+
+    fn rect<S: 'static>(rt: &Runtime<S>, key: &str) -> [f32; 4] {
+        rt.presented(key).unwrap_or_else(|| panic!("no {key}")).0
+    }
+
+    fn inside(inner: [f32; 4], outer: [f32; 4]) -> bool {
+        inner[0] >= outer[0] - 0.5 && inner[1] >= outer[1] - 0.5 && inner[0] + inner[2] <= outer[0] + outer[2] + 0.5 && inner[1] + inner[3] <= outer[1] + outer[3] + 0.5
+    }
+
+    const CMD: &str = "npx -y figma-developer-mcp --stdio";
+
+    fn command_view(_: &(), _: &mut Cx<()>) -> El {
+        let k = Kit::neutral(false);
+        col()
+            .w_full()
+            .child(col().w(120.0).child(text::command(&k, CMD).key("cmd")))
+            .child(row().child(rune::text("--stdio").font(ty::code(&k)).key("natural")))
+    }
+
+    #[test]
+    fn command_breaks_between_words() {
+        let rt = run((), command_view, (400.0, 400.0));
+        let k = Kit::neutral(false);
+        let line = ty::code(&k).line_height;
+        let stdio = rt.elements().into_iter().find(|e| e.text.as_deref() == Some("--stdio") && e.key.is_none()).expect("no --stdio word");
+        let natural = rect(&rt, "natural");
+        assert!((stdio.rect[2] - natural[2]).abs() <= 0.5, "--stdio is {} wide, its natural width is {}", stdio.rect[2], natural[2]);
+        assert!((stdio.rect[3] - line).abs() <= 0.5, "--stdio is split: {} high", stdio.rect[3]);
+        assert!((stdio.visible[2] - stdio.rect[2]).abs() <= 0.5, "--stdio is clipped");
+        let cmd = rect(&rt, "cmd");
+        assert!(stdio.rect[0] + stdio.rect[2] <= cmd[0] + 120.0 + 0.5, "--stdio runs past the column");
+        assert!(cmd[3] > line + 0.5, "the command is one line: {} high", cmd[3]);
+    }
+
+    const HEADING: &str = "Mmmm Mmmm Mmmm Mmmm Mmmm Mmmm Mmmm Mmmm Mmmm Mmmm Mmmm Mmmm";
+
+    fn heading_view(_: &(), _: &mut Cx<()>) -> El {
+        let k = Kit::neutral(false);
+        let narrow = |e: El| col().w(200.0).child(e);
+        col()
+            .w_full()
+            .child(narrow(markdown::<()>(&k, format!("# {HEADING}\n\nBody text.")).key("md")))
+            .child(narrow(rune::text(HEADING).font(ty::name(&k)).wrap().key("as-name")))
+            .child(narrow(rune::text(HEADING).font(ty::title(&k)).wrap().key("as-title")))
+    }
+
+    #[test]
+    fn markdown_headings_are_not_titles() {
+        let rt = run((), heading_view, (400.0, 800.0));
+        let (name, title) = (rect(&rt, "as-name")[3], rect(&rt, "as-title")[3]);
+        assert_ne!(name, title, "the probe text does not tell the two styles apart");
+        let heading = rt.elements().into_iter().find(|e| e.role == "heading").expect("no heading");
+        assert!((heading.rect[3] - name).abs() <= 0.5, "the heading is {} high: as Name {name}, as Title {title}", heading.rect[3]);
+    }
+
+    fn plan_view(s: &u8, _: &mut Cx<u8>) -> El {
+        let k = Kit::neutral(false);
+        let plan = Plan::new("p").heading("3 changes to 2 skills");
+        let plan = match s {
+            0 => plan.group("find-skills", vec!["link into Claude Code".into(), "update".into()]).group("pdf", vec!["link into Cursor".into()]).skipped(vec![]).heads_up(vec![]),
+            1 => plan.line("Edit plata in Cursor").failed("prism is not installed on work"),
+            _ => plan.waiting("Asking work for the plan…"),
+        };
+        col().w_full().padding(16.0).gap(16.0).children(plan.build(&k))
+    }
+
+    #[test]
+    fn plan_states() {
+        let k = Kit::neutral(false);
+        let groups = || Plan::new("p").heading("2 changes").group("a", vec!["x".into()]).group("b", vec!["y".into()]);
+        assert_eq!(groups().build(&k).len(), 1, "groups alone are one card");
+        assert_eq!(groups().skipped(vec![]).heads_up(vec![]).build(&k).len(), 1, "empty skipped and heads-up add no card");
+        assert_eq!(groups().skipped(vec!["c: not a skill".into()]).heads_up(vec!["Restart Cursor".into()]).build(&k).len(), 3);
+        assert_eq!(groups().failed("boom").build(&k).len(), 1, "a failure replaces the cards");
+        let warn = || Notice::new(Tone::Warn, "Only skills in .agents are synced").build(&k);
+        assert_eq!(groups().notice(warn()).build(&k).len(), 2, "the notice goes on top of the cards");
+
+        let mut rt = run(0u8, plan_view, (500.0, 700.0));
+        let changes = rect(&rt, "p-changes");
+        for i in 0..2 {
+            assert!(inside(rect(&rt, &format!("p-group-{i}")), changes), "group {i} is not in the changes card");
+        }
+        assert!(rt.find("p-group-2").is_none());
+        assert!(rt.elements().iter().any(|e| e.text.as_deref() == Some("link into Claude Code · update")), "the group's lines are not one hint");
+        assert!(rt.find("p-skipped").is_none() && rt.find("p-heads-up").is_none(), "empty cards drawn");
+
+        rt.update(|s, _| *s = 1);
+        rt.frame(1.0);
+        assert!(rt.find("p-failed").is_some(), "no failure notice");
+        assert!(rt.find("p-changes").is_none(), "a failed plan still shows the changes card");
+        assert_eq!(rt.elements().iter().filter(|e| !e.exiting && e.key.as_deref().is_some_and(|k| k.ends_with("-failed"))).count(), 1);
+
+        rt.update(|s, _| *s = 2);
+        rt.frame(1.0);
+        let changes = rect(&rt, "p-changes");
+        let spinner = rt.elements().into_iter().find(|e| e.role == "progressbar" && !e.exiting).expect("no spinner");
+        assert!(inside(spinner.rect, changes), "the spinner is not in the changes card");
+    }
+
+    fn reveal_view(s: &bool, _: &mut Cx<bool>) -> El {
+        let k = Kit::neutral(false);
+        col().w_full().child(reveal(*s, Place::Inspector).build(&k).key("reveal"))
+    }
+
+    #[test]
+    fn reveal_labels() {
+        let mut rt = run(false, reveal_view, (400.0, 200.0));
+        let label = |rt: &Runtime<bool>| rt.elements().into_iter().filter(|e| !e.exiting).find_map(|e| e.text.filter(|t| t.ends_with("values")));
+        assert_eq!(label(&rt).as_deref(), Some("Show values"));
+        rt.update(|s, _| *s = true);
+        rt.frame(1.0);
+        assert_eq!(label(&rt).as_deref(), Some("Hide values"));
+    }
+
+    struct Secret {
+        edit: TextEdit,
+        shown: bool,
+    }
+
+    fn secret_view(s: &Secret, _: &mut Cx<Secret>) -> El {
+        let k = Kit::neutral(false);
+        col().w_full().padding(16.0).child(
+            secret_input(&s.edit, |s: &mut Secret| &mut s.edit, s.shown, |s: &mut Secret| s.shown = !s.shown).label("Value").key("value").eye_key("value-show").build(&k),
+        )
+    }
+
+    #[test]
+    fn secret_input_eye_toggles() {
+        let mut rt = run(Secret { edit: TextEdit::new("fake-secret").secure(), shown: false }, secret_view, (400.0, 200.0));
+        // The runtime never reports a secure field's text, so the eye's name tells the state.
+        let eye_label = |rt: &Runtime<Secret>| rt.elements().into_iter().find(|e| e.key.as_deref() == Some("value-show")).and_then(|e| e.label);
+        assert_eq!(eye_label(&rt).as_deref(), Some("Show value"));
+        let (field, eye) = (rect(&rt, "value"), rect(&rt, "value-show"));
+        assert!(eye[0] >= field[0] + field[2], "the eye is not after the field");
+        assert!(field[2] > 200.0, "the field does not take the width: {}", field[2]);
+        let (x, y) = rt.find("value-show").unwrap();
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0);
+        assert!(rt.state.shown, "the eye did not toggle");
+        assert_eq!(eye_label(&rt).as_deref(), Some("Hide value"));
+    }
+
+    fn switch_view(_: &(), cx: &mut Cx<()>) -> El {
+        let k = Kit::neutral(cx.system_dark());
+        col().w_full().child(row().child(switch(&k, false).label("Link").hide_label().build(&k).key("sw")))
+    }
+
+    #[test]
+    fn switch_is_standard_in_light_only() {
+        let w = |dark: bool| {
+            let mut rt = Runtime::new((), switch_view, (400.0, 200.0), Env { system_dark: dark, scale: 1.0 });
+            rt.frame(0.0);
+            rect(&rt, "sw")
+        };
+        let (light, dark) = (w(false), w(true));
+        assert_eq!(dark[3], 24.0, "the dark switch is not at Place::Inspector height");
+        assert_ne!(light[2], dark[2], "the light theme does not use the standard switch");
     }
 }
