@@ -1,5 +1,7 @@
 //! Saved remote hosts: a name Prism shows and the ssh target it connects to.
 
+pub mod runner;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
