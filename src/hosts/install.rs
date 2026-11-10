@@ -66,9 +66,17 @@ pub fn platform(uname: &str) -> Option<Platform> {
 pub fn check(r: &dyn Runner) -> Result<(Health, Platform), String> {
     let out = r.shell("uname -sm; PATH=\"$HOME/.local/bin:$PATH\" prism --version 2>/dev/null", None)?;
     let text = String::from_utf8_lossy(&out.stdout);
-    let mut lines = text.lines().map(str::trim);
-    let uname = lines.next().unwrap_or_default().to_string();
-    let version = lines.next().and_then(|l| l.strip_prefix("prism ")).map(|v| v.trim().to_string());
+    // A remote shell's startup files may print before our commands do: find the lines by what
+    // they say, not by where they are. A system that is neither Linux nor Darwin is reported
+    // as the first line.
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let uname = lines
+        .iter()
+        .find(|l| matches!(l.split_whitespace().next(), Some("Linux" | "Darwin")))
+        .or(lines.first())
+        .map(|l| l.to_string())
+        .unwrap_or_default();
+    let version = lines.iter().find_map(|l| l.strip_prefix("prism ")).map(|v| v.trim().to_string());
     let known = platform(&uname);
     // A host that runs this very version is ready, whatever it is (a binary uploaded by hand).
     let health = match (&version, &known) {
@@ -96,7 +104,7 @@ pub fn install(r: &dyn Runner, version: &str, p: &Platform, binary: Option<&Path
     let out = match binary {
         Some(path) => {
             let bytes = std::fs::read(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
-            r.shell(UPLOAD_SCRIPT, Some(bytes))?
+            r.shell(&upload_script(version), Some(bytes))?
         }
         None => {
             if !released(p) {
@@ -117,14 +125,24 @@ fn released(p: &Platform) -> bool {
     [("linux", "x86_64"), ("linux", "arm64"), ("macos", "arm64")].contains(&(p.os.as_str(), p.arch.as_str()))
 }
 
-/// Reads the binary from stdin.
-const UPLOAD_SCRIPT: &str = r#"set -e
+/// Reads the binary from stdin; it replaces the old one only if it runs and reports `version`.
+fn upload_script(version: &str) -> String {
+    let want = quote(&format!("prism {version}"));
+    format!(
+        r#"set -e
 dir="$HOME/.local/bin"
 mkdir -p "$dir"
 cat > "$dir/prism.new"
 chmod 755 "$dir/prism.new"
+[ "$("$dir/prism.new" --version 2>/dev/null | head -n 1)" = {want} ] || {{
+  rm -f "$dir/prism.new"
+  echo "the uploaded file is not prism {version}" >&2
+  exit 1
+}}
 mv -f "$dir/prism.new" "$dir/prism"
-"#;
+"#
+    )
+}
 
 fn download_script(version: &str, p: &Platform) -> String {
     let archive = cli_archive(version, p);
@@ -173,6 +191,7 @@ mod tests {
     struct Fake {
         uname: &'static str,
         version: Option<String>,
+        junk: usize,
     }
 
     impl Runner for Fake {
@@ -180,7 +199,8 @@ mod tests {
             panic!("check runs no prism command")
         }
         fn shell(&self, _: &str, _: Option<Vec<u8>>) -> Result<Output, String> {
-            let mut stdout = format!("{}\n", self.uname);
+            let mut stdout = "Welcome to the box\n".repeat(self.junk);
+            stdout.push_str(&format!("{}\n", self.uname));
             if let Some(v) = &self.version {
                 stdout.push_str(&format!("prism {v}\n"));
             }
@@ -195,18 +215,28 @@ mod tests {
         assert_eq!(platform("Linux aarch64"), p("linux", "arm64"));
         assert_eq!(platform("Darwin arm64"), p("macos", "arm64"));
         assert_eq!(platform("Darwin x86_64"), None);
-        let (health, platform) = check(&Fake { uname: "FreeBSD amd64", version: None }).unwrap();
+        let (health, platform) = check(&Fake { uname: "FreeBSD amd64", version: None, junk: 0 }).unwrap();
         assert_eq!(health, Health::Unsupported("FreeBSD amd64".into()));
         assert_eq!(platform, Platform { os: "freebsd".into(), arch: "amd64".into() });
     }
 
     #[test]
     fn check_reads_the_version() {
-        let check = |version: Option<&str>| check(&Fake { uname: "Linux aarch64", version: version.map(String::from) }).unwrap();
+        let check = |version: Option<&str>| check(&Fake { uname: "Linux aarch64", version: version.map(String::from), junk: 0 }).unwrap();
         let arm = Platform { os: "linux".into(), arch: "arm64".into() };
         assert_eq!(check(Some(VERSION)), (Health::Ready, arm.clone()));
         assert_eq!(check(Some("0.0.0-other")), (Health::OtherVersion("0.0.0-other".into()), arm.clone()));
         assert_eq!(check(None), (Health::Missing, arm));
+    }
+
+    #[test]
+    fn check_finds_its_lines_after_shell_noise() {
+        let noisy = Fake { uname: "Darwin arm64", version: Some(VERSION.into()), junk: 2 };
+        let (health, platform) = check(&noisy).unwrap();
+        assert_eq!(health, Health::Ready);
+        assert_eq!(platform, Platform { os: "macos".into(), arch: "arm64".into() });
+        let missing = Fake { uname: "Linux x86_64", version: None, junk: 2 };
+        assert_eq!(check(&missing).unwrap().0, Health::Missing);
     }
 
     #[test]
@@ -218,7 +248,7 @@ mod tests {
     #[test]
     fn install_script_never_uses_sudo() {
         let script = download_script("0.2.0", &Platform { os: "linux".into(), arch: "x86_64".into() });
-        for s in [script.as_str(), UPLOAD_SCRIPT] {
+        for s in [script.as_str(), upload_script("0.2.0").as_str()] {
             assert!(!s.contains("sudo"), "{s}");
         }
         assert!(script.contains("https://github.com/gooonzick/prism/releases/download/v0.2.0/"), "{script}");
@@ -316,19 +346,36 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let local = Local { name: "box".into(), home: home.path().into() };
         let binary = home.path().join("built-prism");
-        std::fs::write(&binary, "uploaded").unwrap();
+        std::fs::write(&binary, format!("#!/bin/sh\necho \"prism {VERSION}\"\n")).unwrap();
         // No release platform needed for an upload.
         let p = Platform { os: "freebsd".into(), arch: "amd64".into() };
         install(&local, VERSION, &p, Some(&binary)).unwrap();
         let installed = home.path().join(".local/bin/prism");
-        assert_eq!(std::fs::read_to_string(&installed).unwrap(), "uploaded");
+        assert!(std::fs::read_to_string(&installed).unwrap().contains(VERSION));
         assert_eq!(std::fs::metadata(&installed).unwrap().permissions().mode() & 0o777, 0o755);
+        assert!(!installed.with_file_name("prism.new").exists());
+    }
+
+    #[test]
+    fn an_upload_reporting_another_version_keeps_the_old_binary() {
+        let home = tempfile::tempdir().unwrap();
+        let local = Local { name: "box".into(), home: home.path().into() };
+        let installed = home.path().join(".local/bin/prism");
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        std::fs::write(&installed, "old prism").unwrap();
+        let binary = home.path().join("built-prism");
+        std::fs::write(&binary, "#!/bin/sh\necho \"prism 0.0.0-other\"\n").unwrap();
+        let p = Platform { os: "freebsd".into(), arch: "amd64".into() };
+        let err = install(&local, VERSION, &p, Some(&binary)).unwrap_err();
+        assert!(err.contains("not prism"), "{err}");
+        assert_eq!(std::fs::read_to_string(&installed).unwrap(), "old prism");
+        assert!(!installed.with_file_name("prism.new").exists());
     }
 
     #[test]
     fn install_without_a_release_needs_a_binary() {
         let p = Platform { os: "freebsd".into(), arch: "amd64".into() };
-        let err = install(&Fake { uname: "FreeBSD amd64", version: None }, VERSION, &p, None).unwrap_err();
+        let err = install(&Fake { uname: "FreeBSD amd64", version: None, junk: 0 }, VERSION, &p, None).unwrap_err();
         assert!(err.contains("--binary"), "{err}");
     }
 }

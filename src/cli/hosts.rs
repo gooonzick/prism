@@ -141,7 +141,8 @@ pub fn forward(name: &str, args: &[&str], ctx: &mut Ctx, out: &mut Out, err: &mu
     }
     let rest = without_host(args);
     // Secrets (`K=-`) travel over stdin; nothing else needs it, and reading it would block.
-    let stdin = if rest.iter().any(|a| a == "-" || a.ends_with("=-")) {
+    // What follows `--` belongs to a command line the remote stores, not to us.
+    let stdin = if rest.iter().take_while(|a| *a != "--").any(|a| a == "-" || a.ends_with("=-")) {
         let mut reader = ctx.stdin.take().unwrap_or_else(|| Box::new(std::io::stdin()));
         let mut data = Vec::new();
         if let Err(e) = reader.read_to_end(&mut data) {

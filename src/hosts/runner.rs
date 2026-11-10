@@ -25,9 +25,9 @@ pub trait Runner: Send + Sync {
 /// How the CLI and the window get a runner for a host; tests hand out `Local` ones.
 pub type MakeRunner = Arc<dyn Fn(&Host) -> Box<dyn Runner> + Send + Sync>;
 
-/// The runner for a host: ssh, or this machine for the reserved name "this".
+/// The runner for a host: ssh, or this machine for the reserved names "this" and "local".
 pub fn runner_for(host: &Host) -> Box<dyn Runner> {
-    if host.name == "this" {
+    if matches!(host.name.as_str(), "this" | "local") {
         return Box::new(Here);
     }
     Box::new(Ssh { name: host.name.clone(), target: host.ssh.clone() })
@@ -317,6 +317,16 @@ mod tests {
         let link = tmp.path().join("sockets");
         std::os::unix::fs::symlink(&real, &link).unwrap();
         assert!(ensure_private_dir(&link).unwrap_err().contains("not a private directory"));
+    }
+
+    #[test]
+    fn reserved_names_run_here() {
+        // Here answers a shell script with this machine's own `sh`; Ssh to "nobody@nowhere" could not.
+        for name in ["this", "local"] {
+            let runner = runner_for(&Host { name: name.into(), ssh: "nobody@nowhere".into() });
+            let out = runner.shell("printf here", None).unwrap();
+            assert_eq!(out.stdout, b"here", "{name}");
+        }
     }
 
     #[test]

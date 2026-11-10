@@ -1599,6 +1599,28 @@ fn host_flag_forwards_stdin_only_for_dash_values() {
 }
 
 #[test]
+fn host_flag_does_not_read_stdin_for_a_dash_after_double_dash() {
+    let home = tempfile::tempdir().unwrap();
+    let (mut c, log) = fake_hosts(home.path(), Some(VERSION));
+    c.stdin = Some(Box::new(std::io::Cursor::new("unused")));
+    let (code, _, err) = go(&["--host", "x", "mcp", "add", "--command", "cmd", "--to", "claude", "--", "-"], &mut c);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(log.lock().unwrap().last().unwrap(), "prism mcp add --command cmd --to claude -- - stdin=false");
+    assert!(c.stdin.is_some(), "stdin was not touched");
+}
+
+#[test]
+fn reserved_host_names_run_here_in_process() {
+    let home = tempfile::tempdir().unwrap();
+    let (_, plain, _) = go(&["agents", "--json"], &mut ctx(home.path()));
+    for name in ["local", "this"] {
+        // `ctx` hands out no runner: asking for one (a remote check) would panic.
+        let (code, out, err) = go(&["--host", name, "agents", "--json"], &mut ctx(home.path()));
+        assert_eq!((code, out.as_str(), err.as_str()), (0, plain.as_str(), ""), "{name}");
+    }
+}
+
+#[test]
 fn host_flag_takes_an_unsaved_ssh_target() {
     let home = tempfile::tempdir().unwrap();
     let (mut c, log) = fake_hosts(home.path(), Some(VERSION));
@@ -1666,9 +1688,10 @@ fn hosts_install_uploads_a_binary() {
     assert_eq!(json(&out), serde_json::json!({ "name": "x", "installed": true, "version": VERSION }));
     assert!(remote.path().join(".local/bin/prism").exists());
 
-    // An upload that doesn't run as this version is reported.
+    // An upload that doesn't report this version is refused before it replaces anything.
     std::fs::write(&binary, "#!/bin/sh\necho \"prism 0.0.0-other\"\n").unwrap();
     let (code, _, err) = go(&["hosts", "install", "x", "--binary", binary.to_str().unwrap()], &mut c);
     assert_eq!(code, 1);
-    assert!(err.contains("version 0.0.0-other"), "{err}");
+    assert!(err.contains("not prism"), "{err}");
+    assert!(std::fs::read_to_string(remote.path().join(".local/bin/prism")).unwrap().contains(VERSION));
 }

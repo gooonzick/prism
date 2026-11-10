@@ -207,7 +207,8 @@ fn parse(args: &[&str], out: &mut dyn Write, err: &mut dyn Write) -> Result<Cli,
 /// Runs the parsed `cli`; `args` is the line it came from, which `--host` sends on as it is.
 fn execute(cli: Cli, args: &[&str], ctx: &mut Ctx, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     let mut out = Out { json: cli.global.json, out };
-    if let Some(name) = &cli.global.host {
+    // "this" and "local" name this machine: run here, with no remote to check.
+    if let Some(name) = cli.global.host.as_ref().filter(|n| !matches!(n.as_str(), "this" | "local")) {
         return hosts::forward(name, args, ctx, &mut out, err);
     }
     let exit = match cli.command {
