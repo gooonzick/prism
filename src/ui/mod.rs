@@ -127,21 +127,8 @@ fn sidebar(s: &App, k: &Kit) -> El {
             .build(k)
             .key(format!("project-{i}"))
     });
-    let add = SidebarRow::new("Add project…")
+    let add = SidebarRow::new(if s.discovering { "Looking for projects…" } else { "Add project…" })
         .icon(&PLUS)
-        .height(32.0)
-        .on_select(|_: &mut App, tx: &mut Tx| {
-            let options = rune::FileDialogOptions { title: "Choose a project folder".into(), ..Default::default() };
-            tx.open_folder(options, |s: &mut App, result, _| match result {
-                Ok(Some(dir)) => s.add_project(dir),
-                Ok(None) => {}
-                Err(e) => s.notify("Couldn't open the folder picker".into(), e.to_string(), true),
-            });
-        })
-        .build(k)
-        .key("add-project");
-    let find = SidebarRow::new(if s.discovering { "Finding projects…" } else { "Find projects…" })
-        .icon(&glyphs::SEARCH)
         .height(32.0)
         .on_select(|s: &mut App, tx: &mut Tx| {
             if s.discovering {
@@ -149,18 +136,18 @@ fn sidebar(s: &App, k: &Kit) -> El {
             }
             let dev = s.paths.home.join("Development");
             let options = rune::FileDialogOptions {
-                title: "Look for projects with skills in…".into(),
+                title: "Choose a project, or a folder that holds projects".into(),
                 directory: Some(if dev.is_dir() { dev } else { s.paths.home.clone() }),
                 ..Default::default()
             };
             tx.open_folder(options, |s: &mut App, result, _| match result {
-                Ok(Some(dir)) => s.discover_in(dir),
+                Ok(Some(dir)) => s.add_folder(dir),
                 Ok(None) => {}
                 Err(e) => s.notify("Couldn't open the folder picker".into(), e.to_string(), true),
             });
         })
         .build(k)
-        .key("find-projects");
+        .key("add-project");
     Sidebar::new()
         .label("Scopes")
         .inset(0.0)
@@ -169,7 +156,7 @@ fn sidebar(s: &App, k: &Kit) -> El {
         .row_gap(2.0)
         .header(global)
         .header(browse)
-        .section(SidebarSection::new("Projects").key("projects").count(s.settings.projects.len()).rows(projects).row(add).row(find))
+        .section(SidebarSection::new("Projects").key("projects").count(s.settings.projects.len()).rows(projects).row(add))
         .build(k)
 }
 

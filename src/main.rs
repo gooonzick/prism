@@ -103,6 +103,12 @@ static SCENES: &[Scene] = &[
         s.inspector.toggle();
     }),
     ("notice", |s| s.notify("Synced: 3 changes".into(), String::new(), false)),
+    // Add project… on a folder of projects: the ones with skills inside it.
+    ("found", |s| {
+        let dev = s.paths.home.join("Development");
+        let projects = vec![(dev.join("acme-web"), 2, true), (dev.join("api-gateway"), 1, true), (dev.join("design-system"), 4, false)];
+        s.found = Some(app::Found { root: dev, projects });
+    }),
     ("updates", |s| {
         let names: Vec<String> = s.inv.skills.iter().take(2).map(|x| x.name.clone()).collect();
         s.updates.insert(s.scope.clone(), names.clone());

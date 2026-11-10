@@ -1,15 +1,27 @@
-//! Finding projects that already have skills, under a folder the user picks.
+//! Add project…: the folder the user picks, or the projects with skills inside it.
 
 use std::path::PathBuf;
 
 use super::{App, Found};
+use crate::agents::Scope;
 
 impl App {
-    pub fn discover_in(&mut self, root: PathBuf) {
+    /// Adds `dir` when it has skills of its own, offers the projects with skills found inside it
+    /// when it has none, and adds it as is when nothing inside has skills either. A folder already
+    /// listed just opens.
+    pub fn add_folder(&mut self, dir: PathBuf) {
+        let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+        if self.settings.projects.contains(&dir) {
+            self.open_scope(Scope::Project(dir));
+            return;
+        }
+        if self.discovering {
+            return;
+        }
         let paths = self.paths.clone();
         self.discovering = true;
         self.found = None;
-        self.discover.request(root, move |root| {
+        self.discover.request(dir, move |root| {
             let found = crate::projects::find_projects(&root, &paths);
             (root, found)
         });
@@ -17,13 +29,26 @@ impl App {
 
     pub(super) fn land_discovery(&mut self, root: PathBuf, found: Vec<(PathBuf, usize)>) {
         self.discovering = false;
-        let known = &self.settings.projects;
-        let projects: Vec<(PathBuf, usize, bool)> = found.into_iter().filter(|(p, _)| !known.contains(p)).map(|(p, n)| (p, n, true)).collect();
-        if projects.is_empty() {
-            self.notify("No new projects found".into(), format!("Nothing under {} has skills that isn't already listed", crate::agents::tilde(&root, &self.paths)), false);
+        // The folder has skills of its own: it is the project.
+        if found.iter().any(|(p, _)| *p == root) {
+            self.add_project(root);
             return;
         }
-        self.found = Some(Found { root, projects });
+        let known = &self.settings.projects;
+        let projects: Vec<(PathBuf, usize, bool)> = found.iter().filter(|(p, _)| !known.contains(p)).map(|(p, n)| (p.clone(), *n, true)).collect();
+        if !projects.is_empty() {
+            self.found = Some(Found { root, projects });
+            return;
+        }
+        let where_ = crate::agents::tilde(&root, &self.paths);
+        if !found.is_empty() {
+            self.notify("Nothing new to add".into(), format!("Every project with skills in {where_} is already listed"), false);
+        } else if root == self.paths.home {
+            // Home is the Global scope, never a project.
+            self.notify("No projects with skills found".into(), format!("Nothing in {where_} has skills; pick a project folder instead"), false);
+        } else {
+            self.add_project(root);
+        }
     }
 
     /// Lands a discovery of `a` and `b` (one skill each), as a finished search would.

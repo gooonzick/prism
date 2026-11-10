@@ -43,7 +43,7 @@ Prism keeps **one real copy** of each skill in `.agents/skills`, the same place 
 - **Install from skills.sh.** Search the index, preview `SKILL.md`, list every skill in a repository and pick the ones you want. Installs and updates run through the official `skills` CLI.
 - **Updates.** Prism checks your skills against their sources in the background and updates one, several, or all of them.
 - **MCP servers.** One list of the MCP servers in Claude Code, Claude Desktop, Codex, Cursor, OpenCode, Gemini CLI, Windsurf and Kiro, with the agents that have each one. Prism shows where copies differ, suggests merging servers that are one under two names, and adds, copies, edits or removes a server in several agents' configs at once, leaving the rest of each file as it was. Env and header values stay hidden until you reveal them.
-- **Projects.** Add project folders one by one, or let *Find projects* scan a folder for projects that already have skills. Skills move between scopes with *Copy to*.
+- **Projects.** *Add project* takes a project folder, or a folder that holds projects: then it lists the ones with skills inside so you can add several at once. Skills move between scopes with *Copy to*.
 - **Safe by default.** Nothing is deleted outright: replaced folders go to the Trash (the freedesktop trash on Linux, so your file manager can put them back). The last change (a sync, remove, cleanup or copy) can be undone with ⌘Z.
 - **Live.** Prism watches the skill folders, so changes from the terminal, an editor or git show up on their own.
 - **Fast and native.** Written in Rust on [Rune](https://github.com/anomalyco/rune), with a GPU-drawn UI in light and dark.

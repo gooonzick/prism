@@ -340,6 +340,7 @@ pub fn found(s: &App, k: &Kit, layer: &mut Vec<El>) {
         .on_close(|s: &mut App| s.found = None)
         .child(
             dialog_body()
+                .child(note("That folder has no skills of its own; pick the projects inside it to add.", k))
                 .child(col().w_full().h(320.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(list))
                 .child(buttons),
         )

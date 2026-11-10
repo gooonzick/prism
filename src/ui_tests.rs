@@ -371,6 +371,75 @@ fn found_projects_are_added_as_ticked() {
     assert_eq!(h.rt.state.settings.projects.len(), 2, "the project already listed, plus the one left ticked");
 }
 
+impl Harness {
+    /// Add project… on `dir`, waiting for the search inside it to land.
+    fn add_folder(&mut self, dir: PathBuf) {
+        self.rt.update(move |s, _| s.add_folder(dir));
+        let start = std::time::Instant::now();
+        while self.rt.state.discovering {
+            assert!(start.elapsed().as_secs() < 20, "the search timed out");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            self.rt.update(|s, _| {
+                s.poll();
+            });
+        }
+        self.settle();
+    }
+}
+
+#[test]
+fn add_project_takes_a_folder_with_skills_as_is() {
+    let mut h = Harness::project();
+    let dir = h.root.join("dev/site");
+    skill(&dir.join(".agents/skills"), "deploy");
+    h.add_folder(dir.clone());
+    assert!(h.rt.state.settings.projects.contains(&dir));
+    assert_eq!(h.rt.state.scope, Scope::Project(dir), "the new project opens");
+    assert!(h.rt.state.found.is_none());
+}
+
+#[test]
+fn add_project_on_a_folder_of_projects_offers_the_ones_inside() {
+    let mut h = Harness::project();
+    let (a, b) = (h.root.join("dev/a"), h.root.join("dev/b"));
+    skill(&a.join(".claude/skills"), "one");
+    skill(&b.join(".agents/skills"), "two");
+    h.add_folder(h.root.join("dev"));
+    assert!(h.rt.find("found-add").is_some(), "the dialog lists them; notice: {:?}", h.rt.state.notice.as_ref().map(|n| &n.title));
+    let offered: Vec<PathBuf> = h.rt.state.found.as_ref().unwrap().projects.iter().map(|p| p.0.clone()).collect();
+    assert_eq!(offered, [a, b]);
+    assert!(!h.rt.state.settings.projects.contains(&h.root.join("dev")), "the parent itself is not added");
+    h.click("found-add");
+    assert_eq!(h.rt.state.settings.projects.len(), 3);
+}
+
+#[test]
+fn add_project_adds_an_empty_folder_but_never_home() {
+    let mut h = Harness::project();
+    let empty = h.root.join("dev/new");
+    fs::create_dir_all(&empty).unwrap();
+    h.add_folder(empty.clone());
+    assert!(h.rt.state.settings.projects.contains(&empty), "nothing inside has skills: the folder itself");
+
+    let mut h2 = Harness::project();
+    fs::remove_dir_all(h2.project_dir()).unwrap();
+    h2.rt.update(|s, _| s.settings.projects.clear());
+    let home = h2.root.clone();
+    h2.add_folder(home.clone());
+    assert!(!h2.rt.state.settings.projects.contains(&home), "home is the Global scope");
+    assert!(h2.rt.state.notice.is_some());
+}
+
+#[test]
+fn add_project_on_a_listed_project_just_opens_it() {
+    let mut h = Harness::project();
+    let dir = h.project_dir();
+    h.rt.update(|s, _| s.open_scope(Scope::Global));
+    h.add_folder(dir.clone());
+    assert_eq!(h.rt.state.settings.projects, std::slice::from_ref(&dir));
+    assert_eq!(h.rt.state.scope, Scope::Project(dir));
+}
+
 #[test]
 fn updates_show_as_tags_and_a_filter() {
     let mut h = three_skills();

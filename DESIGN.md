@@ -51,7 +51,7 @@ Snapshots render the real window headless at 2x:
 cargo build && target/debug/prism --snap /tmp/p.png --size 1280x900 --scene mcp --theme dark
 ```
 
-Scenes: `detail`, `sync`, `remove`, `bulk`, `bulk-remove`, `browse`, `notice`, `updates`,
+Scenes: `detail`, `sync`, `remove`, `bulk`, `bulk-remove`, `browse`, `notice`, `found`, `updates`,
 `new-skill`, `mcp`, `mcp-add` (see `SCENES` in `src/main.rs`).
 `scripts/demo-home.sh` regenerates the README screenshots from a throwaway home; run it when a
 change is visible in them.
