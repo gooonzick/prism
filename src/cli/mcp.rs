@@ -65,9 +65,17 @@ pub enum Cmd {
         /// definition is copied.
         #[arg(long, value_name = "AGENT")]
         from: Option<String>,
-        /// Copy to these agents on this saved host (or ssh target), in its global setup.
+        /// Copy to these agents on this saved host (or ssh target), in its global setup
+        /// unless --to-project says otherwise.
         #[arg(long, value_name = "HOST")]
         to_host: Option<String>,
+        /// With --to-host: copy into this project, a folder on the host.
+        #[arg(long, value_name = "DIR", requires = "to_host")]
+        to_project: Option<PathBuf>,
+        /// With --to-project: where Claude Code keeps it, local (the host's ~/.claude.json)
+        /// or project (`.mcp.json`).
+        #[arg(long, value_name = "SCOPE", value_parser = ["local", "project"], requires = "to_project")]
+        claude_scope: Option<String>,
         #[command(flatten)]
         apply: Apply,
     },
@@ -161,7 +169,12 @@ pub fn run(cmd: Cmd, ctx: &mut Ctx, scope: &Scope, out: &mut Out, err: &mut dyn 
                 Err(e) => return usage(err, &e),
             }
         }
-        Cmd::Copy { name, to, from, to_host: Some(host), apply } => return copy_to_host(ctx, scope, &name, &to, from.as_deref(), &host, apply, out, err),
+        Cmd::Copy { name, to, from, to_host: Some(host), to_project, claude_scope, apply } => {
+            let dest = to_project.map_or(Scope::Global, Scope::Project);
+            let claude_scope = if claude_scope.as_deref() == Some("project") { ClaudeScope::Project } else { ClaudeScope::Local };
+            let there = Destination { host, dest, claude_scope };
+            return copy_to_host(ctx, scope, &name, &to, from.as_deref(), &there, apply, out, err);
+        }
         Cmd::Receive { name, to, claude_scope, from, source_home, apply } => {
             let claude_scope = if claude_scope == "project" { ClaudeScope::Project } else { ClaudeScope::Local };
             return match agent_indices(&to) {
@@ -169,7 +182,7 @@ pub fn run(cmd: Cmd, ctx: &mut Ctx, scope: &Scope, out: &mut Out, err: &mut dyn 
                 Err(e) => usage(err, &e),
             };
         }
-        Cmd::Copy { name, to, from, to_host: None, apply } => {
+        Cmd::Copy { name, to, from, to_host: None, apply, .. } => {
             let built = agent_indices(&to).and_then(|to| Ok(Request::Copy { name: name.clone(), to, from: from.as_deref().map(agent_index).transpose()? }));
             match built {
                 Ok(r) => (r, format!("copy {name}"), apply),
@@ -257,10 +270,17 @@ fn receive(ctx: &mut Ctx, scope: &Scope, r: Received, apply: Apply, out: &mut Ou
     drive(ctx, plan, format!("copy {} from {}", r.name, r.from), apply, false, out, err)
 }
 
-/// `mcp copy --to-host`: the host plans the copy into its global setup and, with the plan's
-/// id, takes the definition this machine sends. The plan id is the host's.
+/// Where `mcp copy --to-host` puts a server: a scope on the host (a project is a folder there).
+struct Destination {
+    host: String,
+    dest: Scope,
+    claude_scope: ClaudeScope,
+}
+
+/// `mcp copy --to-host`: the host plans the copy into `there.dest` and, with the plan's id,
+/// takes the definition this machine sends. The plan id is the host's.
 #[allow(clippy::too_many_arguments)]
-fn copy_to_host(ctx: &Ctx, scope: &Scope, name: &str, to: &[String], from: Option<&str>, host: &str, a: Apply, out: &mut Out, err: &mut dyn Write) -> Exit {
+fn copy_to_host(ctx: &Ctx, scope: &Scope, name: &str, to: &[String], from: Option<&str>, there: &Destination, a: Apply, out: &mut Out, err: &mut dyn Write) -> Exit {
     if a.plan_id.is_some() && !a.apply {
         return usage(err, "--plan-id only goes with --apply");
     }
@@ -268,13 +288,15 @@ fn copy_to_host(ctx: &Ctx, scope: &Scope, name: &str, to: &[String], from: Optio
         Ok(found) => found,
         Err(e) => return usage(err, &e),
     };
-    let (host, target) = match super::hosts::ready(ctx, host) {
+    let (host, target) = match super::hosts::ready(ctx, &there.host) {
         Ok(found) => found,
         Err(e) => return failed(out, err, &e),
     };
     let source = super::hosts::this(ctx);
     let label = crate::hosts::copy::this_machine();
-    let copy = |apply: Option<&str>| copy_server(source.as_ref(), label, name, from_agent, scope, target.as_ref(), &host.name, &agents, apply);
+    let copy = |apply: Option<&str>| {
+        copy_server(source.as_ref(), label, name, from_agent, scope, target.as_ref(), &host.name, &there.dest, there.claude_scope, &agents, apply)
+    };
     // --apply alone applies the plan as it is now.
     let id = match (a.apply, a.plan_id) {
         (false, _) => None,

@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use super::{Ctx, Exit, Out, failed, usage};
 use crate::agents::{self, AGENTS, CANONICAL, Scope};
 use crate::fsops::Journal;
-use crate::hosts::copy::copy_skill;
+use crate::hosts::copy::copy_skills;
 use crate::planid::{plan_id, tree_hash};
 use crate::scan::{self, Inventory, Placement};
 use crate::remote;
@@ -92,10 +92,13 @@ pub enum Cmd {
         #[command(flatten)]
         apply: Apply,
     },
-    /// Take a skill another machine sends: with --apply, its folder as a tar on stdin.
+    /// Take skills another machine sends: with --apply, their folders as one tar on stdin.
+    /// One skill as NAME --source-hash HASH (the tar holds its folder's contents), or any
+    /// number as --skill NAME=HASH (the tar holds each folder under its name).
     #[command(hide = true)]
     Receive {
-        name: String,
+        #[arg(conflicts_with = "skills", requires = "source_hash")]
+        name: Option<String>,
         /// The project folder to copy into.
         #[arg(long, value_name = "DIR", conflicts_with = "to_global")]
         to_project: Option<PathBuf>,
@@ -103,8 +106,11 @@ pub enum Cmd {
         #[arg(long)]
         to_global: bool,
         /// The sender's hash of the skill's folder (`wire skill-hash`); what arrives must match.
-        #[arg(long, value_name = "HASH")]
-        source_hash: u64,
+        #[arg(long, value_name = "HASH", requires = "name")]
+        source_hash: Option<u64>,
+        /// A skill and the sender's hash of its folder (repeat for more).
+        #[arg(long = "skill", value_name = "NAME=HASH", required_unless_present = "name")]
+        skills: Vec<String>,
         /// How plan lines name the sending machine.
         #[arg(long, value_name = "LABEL")]
         from: String,
@@ -153,8 +159,8 @@ struct Planned<'a> {
     /// Skills the plan touches, in the scope they are in: their folders and links in every
     /// agent are hashed into the plan id.
     involved: Vec<(Scope, String)>,
-    /// The sender's hash of a skill coming from another machine, also in the plan id.
-    sent_hash: Option<String>,
+    /// Skills coming from another machine with the sender's hash of each, also in the plan id.
+    sent: Vec<(String, u64)>,
     label: String,
     run: Run<'a>,
 }
@@ -168,7 +174,7 @@ impl<'a> Planned<'a> {
             actions: actions.iter().map(Action::describe).collect(),
             conflicts: plan.conflicts,
             involved,
-            sent_hash: None,
+            sent: vec![],
             label,
             run: Box::new(move |j| sync::apply(&scope, &ctx.paths, &actions, j)),
         }
@@ -203,7 +209,7 @@ fn id_of(ctx: &Ctx, p: &Planned) -> String {
         }
     }
     let mut lines = p.actions.clone();
-    lines.extend(p.sent_hash.iter().map(|h| format!("sent as {h}")));
+    lines.extend(p.sent.iter().map(|(n, h)| format!("sent {n} as {h}")));
     plan_id(&lines, &state)
 }
 
@@ -296,14 +302,23 @@ fn drive(ctx: &Ctx, mut plan: Planned, a: Apply, out: &mut Out, err: &mut dyn Wr
 pub fn run(cmd: Cmd, ctx: &mut Ctx, scope: &Scope, out: &mut Out, err: &mut dyn Write) -> Exit {
     // The skills.sh commands work on the CLI's own output, not on the inventory.
     match cmd {
-        Cmd::Receive { name, to_project, to_global, source_hash, from, apply } => {
+        Cmd::Receive { name, to_project, to_global, source_hash, skills, from, apply } => {
             let dest = match dest_scope(ctx, to_project.as_deref(), to_global) {
                 Ok(d) => d,
                 Err(e) => return usage(err, &e),
             };
+            let (sent, named) = match (name, source_hash) {
+                (Some(name), Some(hash)) => (Ok(vec![(name, hash)]), false),
+                (None, _) => (skills.iter().map(|s| sent_skill(s)).collect::<Result<Vec<_>, _>>(), true),
+                (Some(_), None) => (Err("give --source-hash with the skill's name".to_string()), false),
+            };
+            let sent = match sent {
+                Ok(s) => s,
+                Err(e) => return usage(err, &e),
+            };
             // Only an apply reads the tar; a plan must not wait on stdin.
             let tar = if apply.apply { ctx.stdin.take() } else { None };
-            receive(ctx, Received { name, dest, hash: source_hash, from, tar }, apply, out, err)
+            receive(ctx, Received { sent, named, dest, from, tar }, apply, out, err)
         }
         Cmd::Search { query } => search(&query, out, err),
         Cmd::Repo { source } => repo(&source, out, err),
@@ -378,7 +393,7 @@ fn run_local(cmd: Cmd, ctx: &Ctx, scope: &Scope, out: &mut Out, err: &mut dyn Wr
                 actions: broken.iter().map(|(s, a)| format!("Remove {}'s broken link to {s}", AGENTS[*a].name)).collect(),
                 conflicts: vec![],
                 involved: broken.iter().map(|(s, _)| (scope.clone(), s.clone())).collect(),
-                sent_hash: None,
+                sent: vec![],
                 label: label::BROKEN.into(),
                 run: Box::new(|j| sync::remove_broken(&inv, &ctx.paths, j).map_err(|e| (0, e))),
             };
@@ -405,7 +420,7 @@ fn remove(ctx: &Ctx, scope: &Scope, inv: &Inventory, names: Vec<String>, apply: 
         actions: names.iter().map(describe).collect(),
         conflicts: vec![],
         involved: names.iter().map(|n| (scope.clone(), n.clone())).collect(),
-        sent_hash: None,
+        sent: vec![],
         label: label::remove(&names),
         run: Box::new(|j| {
             for (done, n) in names.iter().enumerate() {
@@ -434,7 +449,7 @@ fn unlink(ctx: &Ctx, scope: &Scope, inv: &Inventory, name: &str, agent: &str, ap
         actions,
         conflicts,
         involved: vec![(scope.clone(), name.to_string())],
-        sent_hash: None,
+        sent: vec![],
         label: label::unlink(name, agent),
         run: Box::new(|j| sync::unlink(scope, &ctx.paths, name, agent, j).map(|_| 1).map_err(|e| (0, e))),
     };
@@ -461,7 +476,7 @@ fn copy(ctx: &Ctx, scope: &Scope, inv: &Inventory, names: Vec<String>, dest: Sco
         actions: copying.iter().map(|n| format!("Copy {n} to {to} ({linking})")).collect(),
         conflicts,
         involved,
-        sent_hash: None,
+        sent: vec![],
         label: label::copy(&to),
         run: Box::new(|j| {
             for (done, n) in copying.iter().enumerate() {
@@ -473,25 +488,21 @@ fn copy(ctx: &Ctx, scope: &Scope, inv: &Inventory, names: Vec<String>, dest: Sco
     drive(ctx, plan, apply, out, err)
 }
 
-/// `skills copy --to-host`: each skill's plan comes from the host. The plan id joins the
-/// host's ids, one per skill, so a change to any of them is a changed plan.
+/// `skills copy --to-host`: the host plans the copy of every skill at once and, with its plan
+/// id, takes them as one tar: one change there, which one `undo` there takes back.
 #[allow(clippy::too_many_arguments)]
 fn copy_to_host(ctx: &Ctx, scope: &Scope, inv: &Inventory, names: Vec<String>, host: &str, dest: &Scope, a: Apply, out: &mut Out, err: &mut dyn Write) -> Exit {
     if a.plan_id.is_some() && !a.apply {
         return usage(err, "--plan-id only goes with --apply");
     }
-    // A name twice would plan the same copy twice, and the second apply would find it done.
-    let names = names.into_iter().fold(Vec::new(), |mut seen: Vec<String>, n| {
-        if !seen.contains(&n) {
-            seen.push(n);
+    let mut skills: Vec<(String, PathBuf)> = Vec::new();
+    for n in names {
+        if skills.iter().any(|(seen, _)| *seen == n) {
+            continue;
         }
-        seen
-    });
-    let mut folders = Vec::new();
-    for n in &names {
-        let Some(s) = inv.get(n) else { return missing_skill(out, err, n, scope) };
+        let Some(s) = inv.get(&n) else { return missing_skill(out, err, &n, scope) };
         match s.source.as_deref().and_then(|p| std::fs::canonicalize(p).ok()) {
-            Some(dir) => folders.push(dir),
+            Some(dir) => skills.push((n, dir)),
             None => return failed(out, err, &format!("{n} has no folder in {}", scope.title())),
         }
     }
@@ -500,48 +511,20 @@ fn copy_to_host(ctx: &Ctx, scope: &Scope, inv: &Inventory, names: Vec<String>, h
         Err(e) => return failed(out, err, &e),
     };
     let from = super::hosts::this(ctx);
-    let label = crate::hosts::copy::this_machine();
-    let each = |name: &str, dir: &Path, apply: Option<&str>| copy_skill(from.as_ref(), label, scope, dir, name, to.as_ref(), &host.name, dest, apply);
-    let mut plans = Vec::new();
-    for (n, dir) in names.iter().zip(&folders) {
-        match each(n, dir, None) {
-            Ok(p) => plans.push(p),
+    let copy = |apply: Option<&str>| copy_skills(from.as_ref(), crate::hosts::copy::this_machine(), scope, &skills, to.as_ref(), &host.name, dest, apply);
+    // --apply alone applies the plan as it is now.
+    let id = match (a.apply, a.plan_id) {
+        (false, _) => None,
+        (true, Some(id)) => Some(id),
+        (true, None) => match copy(None) {
+            Ok(plan) => plan["plan_id"].as_str().map(String::from),
             Err(e) => return failed(out, err, &e),
-        }
+        },
+    };
+    match copy(id.as_deref()) {
+        Ok(v) => super::hosts::print_remote(out, v),
+        Err(e) => failed(out, err, &e),
     }
-    let ids: Vec<String> = plans.iter().map(|p| p["plan_id"].as_str().unwrap_or_default().to_string()).collect();
-    let mut merged = merge(&plans, &ids.join(","));
-    if !a.apply {
-        return super::hosts::print_remote(out, merged);
-    }
-    if a.plan_id.as_deref().is_some_and(|old| old != merged["plan_id"]) {
-        merged["plan_changed"] = json!(true);
-        return super::hosts::print_remote(out, merged);
-    }
-    let mut results = Vec::new();
-    for ((n, dir), id) in names.iter().zip(&folders).zip(&ids) {
-        match each(n, dir, Some(id)) {
-            Ok(r) => results.push(r),
-            Err(e) => {
-                let undo = if results.is_empty() { String::new() } else { format!("\nRun prism --host {} undo to take back the last skill copied.", host.name) };
-                return failed(out, err, &format!("Stopped after {} of {}: {e}{undo}", results.len(), names.len()));
-            }
-        }
-    }
-    super::hosts::print_remote(out, merge(&results, &ids.join(",")))
-}
-
-/// One plan or result from the host's answers for each skill.
-fn merge(parts: &[Value], id: &str) -> Value {
-    let all = |key: &str| Value::Array(parts.iter().flat_map(|p| p[key].as_array().cloned().unwrap_or_default()).collect());
-    let mut v = json!({ "applied": parts.iter().any(|p| p["applied"] == true), "plan_id": id, "actions": all("actions"), "conflicts": all("conflicts") });
-    if parts.iter().any(|p| p.get("done").is_some()) {
-        v["done"] = json!(parts.iter().filter_map(|p| p["done"].as_u64()).sum::<u64>());
-    }
-    if parts.iter().any(|p| p["plan_changed"] == true) {
-        v["plan_changed"] = json!(true);
-    }
-    v
 }
 
 /// Where `--to-project DIR` or `--to-global` says to copy.
@@ -560,40 +543,60 @@ fn linking(targets: &[usize]) -> String {
     if names.is_empty() { "no links".to_string() } else { format!("link into {}", names.join(", ")) }
 }
 
-/// A skill another machine sends, and where it goes.
+/// `NAME=HASH` from `--skill`. The hash is digits, so the last `=` splits it off.
+fn sent_skill(arg: &str) -> Result<(String, u64), String> {
+    let (name, hash) = arg.rsplit_once('=').ok_or_else(|| format!("--skill {arg}: give NAME=HASH"))?;
+    let hash = hash.parse().map_err(|_| format!("--skill {arg}: the hash is not a number"))?;
+    Ok((name.to_string(), hash))
+}
+
+/// Skills another machine sends, and where they go.
 struct Received {
-    name: String,
+    sent: Vec<(String, u64)>,
+    /// Each skill is a top-level folder of the tar (`--skill`), not the tar's contents.
+    named: bool,
     dest: Scope,
-    hash: u64,
     from: String,
-    /// The tar of its folder; `None` is the process's stdin.
+    /// The tar of their folders; `None` is the process's stdin.
     tar: Option<Box<dyn Read>>,
 }
 
 /// The receiving end of a copy from another machine: the plan names the sender, and the id
-/// covers the sender's hash of the skill, so a skill changed there since is a changed plan.
+/// covers the sender's hash of each skill, so a skill changed there since is a changed plan.
+/// All of it is one change: one `undo` takes back every skill it placed.
 fn receive(ctx: &Ctx, r: Received, apply: Apply, out: &mut Out, err: &mut dyn Write) -> Exit {
-    if let Err(e) = sync::check_folder_name(&r.name) {
-        return usage(err, &e);
+    for (i, (name, _)) in r.sent.iter().enumerate() {
+        if let Err(e) = sync::check_folder_name(name) {
+            return usage(err, &e);
+        }
+        if r.sent[..i].iter().any(|(n, _)| n == name) {
+            return usage(err, &format!("{name} is given twice"));
+        }
     }
-    let Received { name, dest, hash, from, tar } = r;
+    let Received { sent, named, dest, from, tar } = r;
     let to = label::scope(&dest, &ctx.paths);
     let targets = ctx.targets();
-    let (mut actions, mut conflicts) = (Vec::new(), Vec::new());
-    if std::fs::symlink_metadata(AGENTS[CANONICAL].dir(&dest, &ctx.paths).join(&name)).is_ok() {
-        conflicts.push(Conflict { skill: name.clone(), reason: format!("already in {to}") });
-    } else {
-        actions.push(format!("Copy {name} from {from} to {to} ({})", linking(&targets)));
+    let there = AGENTS[CANONICAL].dir(&dest, &ctx.paths);
+    let (mut actions, mut conflicts, mut placing) = (Vec::new(), Vec::new(), Vec::new());
+    for (name, _) in &sent {
+        if std::fs::symlink_metadata(there.join(name)).is_ok() {
+            conflicts.push(Conflict { skill: name.clone(), reason: format!("already in {to}") });
+        } else {
+            actions.push(format!("Copy {name} from {from} to {to} ({})", linking(&targets)));
+            placing.push(name.clone());
+        }
     }
+    let names: Vec<String> = sent.iter().map(|(n, _)| n.clone()).collect();
     let plan = Planned {
         actions,
         conflicts,
-        involved: vec![(dest.clone(), name.clone())],
-        sent_hash: Some(hash.to_string()),
-        label: label::receive(&name, &from),
+        involved: names.iter().map(|n| (dest.clone(), n.clone())).collect(),
+        sent: sent.clone(),
+        label: label::receive(&placing, &from),
         run: Box::new(move |j| {
             let mut tar = tar.unwrap_or_else(|| Box::new(std::io::stdin()));
-            sync::receive(&ctx.paths, &dest, &name, &mut tar, hash, &targets, j).map(|()| 1).map_err(|e| (0, e))
+            let incoming = sync::Incoming { sent: &sent, named, place: &placing };
+            sync::receive_many(&ctx.paths, &dest, &incoming, &mut tar, &targets, j)
         }),
     };
     drive(ctx, plan, apply, out, err)
@@ -621,7 +624,7 @@ fn trash(ctx: &Ctx, scope: &Scope, inv: &Inventory, name: &str, agent: &str, app
         actions,
         conflicts,
         involved: vec![(scope.clone(), name.to_string())],
-        sent_hash: None,
+        sent: vec![],
         label: label::trash_copy(name, agent),
         run: Box::new(|j| sync::trash_copy(scope, &ctx.paths, name, agent, j).map(|_| 1).map_err(|e| (0, e))),
     };

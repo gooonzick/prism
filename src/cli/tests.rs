@@ -2146,7 +2146,7 @@ fn skill_copy_to_host_plan_then_apply() {
 
 #[test]
 fn copy_skill_runs_between_any_two_machines() {
-    use crate::hosts::copy::copy_skill;
+    use crate::hosts::copy::copy_skills;
     use crate::hosts::runner::Local;
     let (one, two) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     std::fs::create_dir_all(two.path().join(".claude")).unwrap();
@@ -2154,10 +2154,11 @@ fn copy_skill_runs_between_any_two_machines() {
     let from = Local { name: "box".into(), home: one.path().into() };
     let to = Local { name: "laptop".into(), home: two.path().into() };
     let dir = std::fs::canonicalize(one.path().join(".agents/skills/pdf")).unwrap();
-    let plan = copy_skill(&from, "box", &Scope::Global, &dir, "pdf", &to, "laptop", &Scope::Global, None).unwrap();
+    let skills = [("pdf".to_string(), dir)];
+    let plan = copy_skills(&from, "box", &Scope::Global, &skills, &to, "laptop", &Scope::Global, None).unwrap();
     assert_eq!(plan["actions"], serde_json::json!(["Copy pdf from box to Global (~) (link into Claude Code) on laptop"]));
     let id = plan["plan_id"].as_str().unwrap();
-    let done = copy_skill(&from, "box", &Scope::Global, &dir, "pdf", &to, "laptop", &Scope::Global, Some(id)).unwrap();
+    let done = copy_skills(&from, "box", &Scope::Global, &skills, &to, "laptop", &Scope::Global, Some(id)).unwrap();
     assert_eq!(done["applied"], true);
     assert!(two.path().join(".agents/skills/pdf/SKILL.md").is_file());
 }
@@ -2245,4 +2246,139 @@ fn copy_to_unready_host_refuses() {
     }
     assert_eq!(snapshot(a), before_a);
     assert_eq!(snapshot(b), before_b);
+}
+
+#[test]
+fn several_skills_to_a_host_are_one_change_there() {
+    let (here, there) = (tempfile::tempdir().unwrap(), host_home(VERSION));
+    let (a, b) = (here.path(), there.path());
+    write_skill(&a.join(".agents/skills"), "alpha", "First");
+    // A skill linked from a folder named otherwise: it travels under its own name.
+    let sent = sent_skill(a);
+    std::fs::rename(&sent, a.join("elsewhere/pdf-src")).unwrap();
+    std::os::unix::fs::symlink(a.join("elsewhere/pdf-src"), a.join(".agents/skills/pdf")).unwrap();
+    let mut c = copying(a, b);
+
+    let args = ["skills", "copy", "alpha", "pdf", "--to-host", "laptop", "--to-global", "--json"];
+    let (code, out, err) = go(&args, &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    let plan = json(&out);
+    assert_eq!(plan["actions"].as_array().unwrap().len(), 2, "{plan}");
+    let id = plan["plan_id"].as_str().unwrap().to_string();
+    let mut apply = args.to_vec();
+    apply.extend(["--apply", "--plan-id", &id]);
+    let (code, out, err) = go(&apply, &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(json(&out)["done"], 2);
+    for name in ["alpha", "pdf"] {
+        let got = b.join(".agents/skills").join(name);
+        assert!(std::fs::symlink_metadata(&got).unwrap().is_dir(), "{name} arrives as a folder");
+        assert_eq!(crate::planid::tree_hash(&got), crate::planid::tree_hash(&std::fs::canonicalize(a.join(".agents/skills").join(name)).unwrap()), "{name}");
+        assert!(std::fs::symlink_metadata(b.join(".claude/skills").join(name)).unwrap().file_type().is_symlink());
+    }
+    assert_eq!(store::load_last_change(&Paths::isolated(b)).unwrap().label, format!("copy 2 skills from {}", crate::hosts::copy::this_machine()));
+
+    // One undo on the host takes both back.
+    let (code, out, _) = go(&["undo"], &mut ctx(b));
+    assert_eq!(code, 0, "{out}");
+    for name in ["alpha", "pdf"] {
+        assert!(std::fs::symlink_metadata(b.join(".agents/skills").join(name)).is_err(), "{name}");
+        assert!(std::fs::symlink_metadata(b.join(".claude/skills").join(name)).is_err(), "{name}");
+    }
+}
+
+/// `skills receive --skill …` on `c` with `tar` on stdin, planned then applied.
+fn receive_named(c: &mut Ctx, skills: &[String], tar: Vec<u8>) -> (i32, String, String) {
+    let mut args = vec!["skills", "receive", "--to-global", "--from", "laptop", "--json"];
+    for s in skills {
+        args.extend(["--skill", s.as_str()]);
+    }
+    let (code, out, err) = go(&args, c);
+    assert_eq!(code, 0, "{out}{err}");
+    let id = json(&out)["plan_id"].as_str().unwrap().to_string();
+    args.extend(["--apply", "--plan-id", &id]);
+    c.stdin = Some(Box::new(std::io::Cursor::new(tar)));
+    go(&args, c)
+}
+
+/// One tar of `root`'s `names`, each under its name, as the sender packs it.
+fn named_tar(root: &std::path::Path, names: &[&str]) -> Vec<u8> {
+    let mut cmd = std::process::Command::new("tar");
+    cmd.env("COPYFILE_DISABLE", "1").arg("-C").arg(root).arg("-cf").arg("-");
+    cmd.args(names.iter().map(|n| format!("./{n}")));
+    let out = cmd.output().unwrap();
+    assert!(out.status.success());
+    out.stdout
+}
+
+#[test]
+fn one_tampered_skill_of_two_places_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let src = h.join("from");
+    write_skill(&src, "alpha", "First");
+    write_skill(&src, "beta", "Second");
+    let hash = |n: &str| crate::planid::tree_hash(&src.join(n)).unwrap();
+    let skills = [format!("alpha={}", hash("alpha")), format!("beta={}", hash("beta"))];
+    std::fs::write(src.join("beta/SKILL.md"), "tampered").unwrap();
+    let mut c = receiving(h);
+    let (code, out, _) = receive_named(&mut c, &skills, named_tar(&src, &["alpha", "beta"]));
+    assert_eq!(code, 1, "{out}");
+    assert_eq!(json(&out)["error"], "beta arrived incomplete or changed; nothing was placed");
+    for name in ["alpha", "beta"] {
+        assert!(std::fs::symlink_metadata(h.join(".agents/skills").join(name)).is_err(), "{name}");
+        assert!(std::fs::symlink_metadata(h.join(".codex/skills").join(name)).is_err(), "{name}");
+    }
+    assert!(leftovers(&h.join(".agents/skills")).is_empty());
+    assert_eq!(store::load_last_change(&c.paths), None);
+}
+
+#[test]
+fn a_folder_nobody_declared_refuses_the_archive() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let src = h.join("from");
+    write_skill(&src, "alpha", "First");
+    write_skill(&src, "stowaway", "Not declared");
+    let skills = [format!("alpha={}", crate::planid::tree_hash(&src.join("alpha")).unwrap())];
+    let mut c = receiving(h);
+    let (code, out, _) = receive_named(&mut c, &skills, named_tar(&src, &["alpha", "stowaway"]));
+    assert_eq!(code, 1, "{out}");
+    assert!(json(&out)["error"].as_str().unwrap().contains("reaches outside"), "{out}");
+    assert!(std::fs::symlink_metadata(h.join(".agents/skills/alpha")).is_err());
+    assert!(std::fs::symlink_metadata(h.join(".agents/skills/stowaway")).is_err());
+    assert!(leftovers(&h.join(".agents/skills")).is_empty());
+}
+
+#[test]
+fn mcp_copy_to_a_host_project() {
+    let (here, there) = (server_home(), host_home(VERSION));
+    let (a, b) = (here.path(), there.path());
+    let project = std::fs::canonicalize(b).unwrap().join("work/app");
+    std::fs::create_dir_all(&project).unwrap();
+    let mut c = copying(a, b);
+    let dir = project.to_str().unwrap();
+    let args = ["mcp", "copy", "node-srv", "--to-host", "laptop", "--to", "claude", "--to-project", dir, "--claude-scope", "project", "--json"];
+    let (code, out, err) = go(&args, &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    let id = json(&out)["plan_id"].as_str().unwrap().to_string();
+    let mut apply = args.to_vec();
+    apply.extend(["--apply", "--plan-id", &id]);
+    let (code, out, err) = go(&apply, &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(!out.contains("FIXTURE_COPY_SECRET"), "{out}");
+    let written: serde_json::Value = json(&std::fs::read_to_string(project.join(".mcp.json")).unwrap());
+    assert_eq!(written["mcpServers"]["node-srv"]["env"]["API_KEY"], "FIXTURE_COPY_SECRET");
+    let global = std::fs::read_to_string(b.join(".claude.json")).unwrap_or_default();
+    assert!(!global.contains("node-srv"), "{global}");
+    let (_, listed, _) = go(&["mcp", "list", "--json"], &mut ctx(b));
+    assert!(agents_of_opt(&listed, "node-srv").is_none(), "{listed}");
+
+    // --to-project is a place on the host: it needs --to-host.
+    let (code, _, _) = go(&["mcp", "copy", "node-srv", "--to", "claude", "--to-project", dir], &mut c);
+    assert_eq!(code, 2);
+}
+
+fn agents_of_opt(out: &str, name: &str) -> Option<serde_json::Value> {
+    json(out)["servers"].as_array().unwrap().iter().find(|s| s["name"] == name).cloned()
 }

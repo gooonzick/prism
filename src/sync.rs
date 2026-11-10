@@ -50,8 +50,11 @@ pub mod label {
     }
 
     /// A skill copied here from another machine, `from` naming it.
-    pub fn receive(name: &str, from: &str) -> String {
-        format!("copy {name} from {from}")
+    pub fn receive(names: &[String], from: &str) -> String {
+        match names {
+            [one] => format!("copy {one} from {from}"),
+            _ => format!("copy {} from {from}", plural(names.len(), "skill", "skills")),
+        }
     }
 
     pub fn trash_copy(skill: &str, agent: usize) -> String {
@@ -324,49 +327,103 @@ pub fn check_folder_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Puts a skill that another machine sent as a tar (of the folder's contents) into `dest`'s
-/// `.agents/skills/<name>`, then links it into `targets` there like [`copy_to`]. The tar
-/// comes over the network, so it is saved and listed first: a member with an absolute path
-/// or a `..` refuses the whole archive. It unpacks into a staging folder that becomes the
-/// skill only once all of it is there and its [`tree_hash`](crate::planid::tree_hash) is
-/// `hash`, the sender's hash of the folder (a cut-off or altered stream is refused). On any
-/// failure the staging folder and the saved tar go, and nothing is in the journal.
-pub fn receive(paths: &Paths, dest: &Scope, name: &str, tar: &mut dyn Read, hash: u64, targets: &[usize], j: &mut Journal) -> Result<(), String> {
-    check_folder_name(name)?;
-    let store = AGENTS[CANONICAL].dir(dest, paths);
-    let dst = store.join(name);
-    if fs::symlink_metadata(&dst).is_ok() {
-        return Err(format!("{name} is already in {}", dst.display()));
-    }
-    fs::create_dir_all(&store).map_err(|e| format!("{}: {e}", store.display()))?;
-    // Hidden names: a scan of the store never shows them as skills.
-    let incoming = format!(".prism-incoming-{}-{name}", std::process::id());
-    let (archive, staging) = (store.join(format!("{incoming}.tar")), store.join(&incoming));
-    let unpacked = unpack(tar, &archive, &staging).and_then(|()| match crate::planid::tree_hash(&staging) {
-        Some(got) if got == hash => Ok(()),
-        _ => Err(format!("{name} arrived incomplete or changed; nothing was placed")),
-    });
-    let _ = fs::remove_file(&archive);
-    let placed = unpacked.and_then(|()| j.place(&staging, &dst).map_err(|e| format!("{}: {e}", dst.display())));
-    if let Err(e) = placed {
-        let _ = fs::remove_dir_all(&staging);
-        return Err(e);
-    }
-    link_arrived(paths, name, dest, targets, j)
+/// What another machine sends in one tar.
+pub struct Incoming<'a> {
+    /// Each skill's name and the sender's [`tree_hash`](crate::planid::tree_hash) of its folder.
+    pub sent: &'a [(String, u64)],
+    /// `true`: each skill is a top-level folder named after it (`pdf/SKILL.md`). `false`: the
+    /// tar holds the one skill's folder contents (`./SKILL.md`).
+    pub named: bool,
+    /// The skills to place: the others (already here) are checked and left out.
+    pub place: &'a [String],
 }
 
-/// Saves `tar` to `archive`, checks every member stays inside, and unpacks it into `staging`.
-fn unpack(tar: &mut dyn Read, archive: &Path, staging: &Path) -> Result<(), String> {
+/// Puts skills that another machine sent as one tar into `dest`'s `.agents/skills`, then links
+/// them into `targets` there like [`copy_to`]. The tar comes over the network, so it is saved
+/// and listed first: a member with an absolute path or a `..`, or (named) outside the sent
+/// skills' folders, refuses the whole archive. It unpacks into a staging folder, and nothing is
+/// placed unless every sent folder is there and has the sender's hash (a cut-off or altered
+/// stream is refused). The staging folder and the saved tar always go. Returns how many skills
+/// were placed; on failure, how many were before it (undo takes them back).
+pub fn receive_many(paths: &Paths, dest: &Scope, incoming: &Incoming, tar: &mut dyn Read, targets: &[usize], j: &mut Journal) -> Result<usize, (usize, String)> {
+    let names: Vec<&str> = incoming.sent.iter().map(|(n, _)| n.as_str()).collect();
+    for (i, name) in names.iter().enumerate() {
+        check_folder_name(name).map_err(|e| (0, e))?;
+        if names[..i].contains(name) {
+            return Err((0, format!("{name} is sent twice")));
+        }
+    }
+    if names.is_empty() || (!incoming.named && names.len() != 1) {
+        return Err((0, "a tar of one folder's contents holds one skill".into()));
+    }
+    let store = AGENTS[CANONICAL].dir(dest, paths);
+    for name in incoming.place {
+        if !names.contains(&name.as_str()) {
+            return Err((0, format!("{name} was not sent")));
+        }
+        if fs::symlink_metadata(store.join(name)).is_ok() {
+            return Err((0, format!("{name} is already in {}", store.join(name).display())));
+        }
+    }
+    fs::create_dir_all(&store).map_err(|e| (0, format!("{}: {e}", store.display())))?;
+    // Hidden names: a scan of the store never shows them as skills.
+    let incoming_name = format!(".prism-incoming-{}-{}", std::process::id(), names[0]);
+    let (archive, staging) = (store.join(format!("{incoming_name}.tar")), store.join(&incoming_name));
+    let top = if incoming.named { Some(names.as_slice()) } else { None };
+    let into = if incoming.named { staging.clone() } else { staging.join(names[0]) };
+    let unpacked = unpack(tar, &archive, &staging, &into, top).and_then(|()| {
+        for (name, hash) in incoming.sent {
+            let folder = staging.join(name);
+            // A link where a folder should be would place a link to anywhere.
+            let real = fs::symlink_metadata(&folder).is_ok_and(|m| m.is_dir());
+            if !real || crate::planid::tree_hash(&folder) != Some(*hash) {
+                return Err(format!("{name} arrived incomplete or changed; nothing was placed"));
+            }
+        }
+        Ok(())
+    });
+    let _ = fs::remove_file(&archive);
+    let mut placed = 0;
+    let result = unpacked.map_err(|e| (0, e)).and_then(|()| {
+        for name in incoming.place {
+            let dst = store.join(name);
+            j.place(&staging.join(name), &dst).map_err(|e| (placed, format!("{}: {e}", dst.display())))?;
+            placed += 1;
+        }
+        Ok(())
+    });
+    let _ = fs::remove_dir_all(&staging);
+    result?;
+    for (done, name) in incoming.place.iter().enumerate() {
+        link_arrived(paths, name, dest, targets, j).map_err(|e| (done, e))?;
+    }
+    Ok(placed)
+}
+
+/// Saves `tar` to `archive`, checks every member stays inside (and, given `top`, inside one of
+/// those top-level folders), and unpacks it into `into`, made inside a fresh `staging`.
+fn unpack(tar: &mut dyn Read, archive: &Path, staging: &Path, into: &Path, top: Option<&[&str]>) -> Result<(), String> {
     let saved = fs::File::create(archive).and_then(|mut f| io::copy(tar, &mut f));
     saved.map_err(|e| format!("could not save the skill's archive: {e}"))?;
     let listed = run_tar(Command::new("tar").arg("-tf").arg(archive))?;
-    let outside = |m: &&str| m.starts_with('/') || Path::new(m).components().any(|c| c == Component::ParentDir);
+    let outside = |m: &&str| {
+        let path = Path::new(m);
+        let first = path.components().find(|c| c != &Component::CurDir);
+        let stray = match (top, first) {
+            (Some(names), Some(Component::Normal(n))) => !names.iter().any(|t| n == std::ffi::OsStr::new(t)),
+            _ => false,
+        };
+        m.starts_with('/') || path.components().any(|c| c == Component::ParentDir) || stray
+    };
     if let Some(member) = String::from_utf8_lossy(&listed).lines().find(outside) {
         return Err(format!("the skill's archive reaches outside its folder ({member}); nothing was unpacked"));
     }
     let _ = fs::remove_dir_all(staging);
     fs::create_dir(staging).map_err(|e| format!("{}: {e}", staging.display()))?;
-    run_tar(Command::new("tar").arg("-xf").arg(archive).arg("-C").arg(staging).arg("--no-same-owner")).map(|_| ())
+    if into != staging {
+        fs::create_dir(into).map_err(|e| format!("{}: {e}", into.display()))?;
+    }
+    run_tar(Command::new("tar").arg("-xf").arg(archive).arg("-C").arg(into).arg("--no-same-owner")).map(|_| ())
 }
 
 /// Runs `tar` and returns what it printed, or why it failed.

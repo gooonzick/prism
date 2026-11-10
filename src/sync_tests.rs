@@ -246,6 +246,12 @@ fn raw_tar(members: &[(&str, &str)]) -> Vec<u8> {
     tar
 }
 
+/// One skill sent as a tar of its folder's contents, as `skills receive NAME` takes it.
+fn receive(paths: &Paths, dest: &Scope, name: &str, tar: &mut dyn Read, hash: u64, targets: &[usize], j: &mut Journal) -> Result<(), String> {
+    let sent = [(name.to_string(), hash)];
+    receive_many(paths, dest, &Incoming { sent: &sent, named: false, place: &[name.to_string()] }, tar, targets, j).map(|_| ()).map_err(|(_, e)| e)
+}
+
 #[test]
 fn receive_refuses_an_archive_reaching_outside_the_skill() {
     let f = Fixture::new();
