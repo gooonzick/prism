@@ -1704,7 +1704,7 @@ impl crate::hosts::runner::Runner for Late {
 }
 
 #[test]
-fn an_answer_in_flight_is_dropped_when_the_machine_changes() {
+fn a_plan_in_flight_is_dropped_when_the_machine_changes() {
     let (mut h, remote) = on_host();
     let home = remote.path().to_path_buf();
     h.rt.update(move |s, _| {
@@ -1712,17 +1712,65 @@ fn an_answer_in_flight_is_dropped_when_the_machine_changes() {
             Box::new(Late(crate::hosts::runner::local_runners(&[("box", &home)])(host))) as Box<dyn crate::hosts::runner::Runner>
         });
     });
-    h.rt.update(|s, _| s.toggle_link("far", index_of("claude").unwrap()));
+    h.click("sync");
+    assert!(h.rt.state.host_act.is_pending(), "box is planning the sync");
+    h.rt.update(|s, _| s.switch_env(None));
+    h.land_remote();
+    assert!(!h.rt.state.is_remote() && !h.rt.state.host_busy());
+    assert!(h.rt.state.notice.is_none() && h.rt.state.sync_host.is_none(), "nothing about box's plan on this machine");
+    assert!(h.rt.state.inv.get("review").is_some() && h.rt.state.inv.get("far").is_none(), "this machine's view stays");
+}
+
+#[test]
+fn a_write_in_flight_lands_after_switching_away() {
+    let (mut h, remote) = on_host();
+    let home = remote.path().to_path_buf();
+    h.rt.update(move |s, _| {
+        s.make_runner = std::sync::Arc::new(move |host: &crate::hosts::Host| {
+            Box::new(SlowApply(crate::hosts::runner::local_runners(&[("box", &home)])(host))) as Box<dyn crate::hosts::runner::Runner>
+        });
+    });
+    let (claude, codex) = (index_of("claude").unwrap(), index_of("codex").unwrap());
+    h.rt.update(move |s, _| s.toggle_link("far", claude));
     assert!(h.rt.state.host_act.is_pending(), "the link is in flight");
     h.rt.update(|s, _| s.switch_env(None));
-    std::thread::sleep(std::time::Duration::from_millis(400));
+    assert!(h.rt.state.host_busy(), "switching away leaves it running on box");
+
+    // It lands while this machine is in view: its toast names box, and its Undo acts there.
+    h.land_remote();
+    let link = remote.path().join(".claude/skills/far");
+    assert!(fs::symlink_metadata(&link).is_ok(), "box has the link");
+    assert!(!h.rt.state.is_remote() && h.rt.state.inv.get("review").is_some() && h.rt.state.inv.get("far").is_none(), "this machine's view stays");
+    let notice = h.rt.state.notice.as_ref().expect("a toast about box");
+    assert!(notice.title.ends_with(" on box") && !notice.error, "{}", notice.title);
+    assert!(notice.undo && notice.machine.as_deref() == Some("box"));
+    h.click_button("Undo");
+    h.land_remote();
+    assert!(fs::symlink_metadata(&link).is_err(), "undone on box");
+    let title = &h.rt.state.notice.as_ref().unwrap().title;
+    assert!(title.starts_with("Undid: ") && title.ends_with(" on box"), "{title}");
+
+    // Back on box, a change asked while the one from before still runs waits for it.
+    h.rt.update(|s, _| s.switch_env(Some("box")));
+    h.land_remote();
+    h.rt.update(move |s, _| s.toggle_link("far", claude));
     h.rt.update(|s, _| {
-        s.poll();
+        s.switch_env(None);
+        s.switch_env(Some("box"));
     });
-    h.settle();
-    assert!(!h.rt.state.is_remote() && !h.rt.state.host_busy());
-    assert!(h.rt.state.notice.is_none(), "no toast about box on this machine");
-    assert!(h.rt.state.inv.get("review").is_some() && h.rt.state.inv.get("far").is_none(), "this machine's view stays");
+    let start = std::time::Instant::now();
+    while h.remote_state() != Some(crate::app::RemoteState::Ready) {
+        assert!(start.elapsed().as_secs() < 10, "box never loaded");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        h.rt.update(|s, _| {
+            s.poll();
+        });
+    }
+    assert!(h.rt.state.host_act.is_pending(), "the first link still runs");
+    h.rt.update(move |s, _| s.toggle_link("far", codex));
+    assert_eq!(h.rt.state.host_jobs.len(), 1, "the second waits its turn");
+    h.land_remote();
+    assert!(fs::symlink_metadata(&link).is_ok() && fs::symlink_metadata(remote.path().join(".codex/skills/far")).is_ok(), "both landed on box");
 }
 
 #[test]

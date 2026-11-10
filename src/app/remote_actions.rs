@@ -275,8 +275,8 @@ impl App {
     pub(super) fn run_on_host(&mut self, work: Work, then: Then) {
         let Some(host) = self.host().cloned() else { return };
         // What the answer is for counts too: Edit… and Show values both read `wire server`.
-        let last = self.host_jobs.back().map(|j| (&j.work, &j.then)).or(self.host_running.as_ref().map(|(w, t)| (w, t)));
-        if last == Some((&work, &then)) {
+        let last = self.host_jobs.back().map(|j| (&j.host.name, &j.work, &j.then)).or(self.host_running.as_ref().map(|(h, w, t)| (h, w, t)));
+        if last == Some((&host.name, &work, &then)) {
             return;
         }
         self.host_jobs.push_back(HostJob { host, work, then });
@@ -288,7 +288,7 @@ impl App {
             return;
         }
         let Some(job) = self.host_jobs.pop_front() else { return };
-        self.host_running = Some((job.work.clone(), job.then.clone()));
+        self.host_running = Some((job.host.name.clone(), job.work.clone(), job.then.clone()));
         let make = self.make_runner.clone();
         self.host_act.request(job, move |job| {
             let runner = make(&job.host);
@@ -297,11 +297,11 @@ impl App {
         });
     }
 
-    /// Forgets the work asked of the last host: it was for a machine no longer in view.
+    /// Forgets the work asked of the last host that hasn't started: it was for a machine no
+    /// longer in view. The one running keeps running, and nothing else starts until it lands:
+    /// its answer shows wherever the window is by then.
     pub(super) fn drop_host_work(&mut self) {
         self.host_jobs.clear();
-        self.host_act.cancel();
-        self.host_running = None;
         self.host_last_change = None;
         self.host_values.clear();
     }
@@ -312,11 +312,14 @@ impl App {
         self.host_running.is_some() || !self.host_jobs.is_empty()
     }
 
-    /// Lands an answer from the host in view, then starts the next job.
+    /// Lands a host's answer, then starts the next job. One from a host no longer in view
+    /// still says what it changed there.
     pub(super) fn land_host(&mut self, answer: HostAnswer) {
         self.host_running = None;
         if self.host().is_some_and(|h| h.name == answer.host) {
             self.land_host_answer(answer.then, answer.outcome);
+        } else {
+            self.land_elsewhere(&answer.host, answer.then, answer.outcome);
         }
         self.next_host_job();
     }
@@ -326,31 +329,66 @@ impl App {
         self.load_remote(self.scope.clone(), false);
     }
 
-    /// A finished change's toast: Undo takes back `label` on the host.
-    fn host_done(&mut self, title: String, detail: String, label: Option<String>) {
-        self.notify(self.on_host(&title), detail, false);
-        self.offer_undo(self.env_label(), label);
+    /// A finished change's toast: Undo takes back `label` on `machine`.
+    fn host_done(&mut self, machine: &str, title: String, detail: String, label: Option<String>) {
+        self.notify(format!("{title} on {machine}"), detail, false);
+        self.offer_undo(machine.to_string(), label);
     }
 
-    fn host_failed(&mut self, why: String, undoable: bool, label: Option<String>) {
+    fn host_failed(&mut self, machine: &str, why: String, undoable: bool, label: Option<String>) {
         let why = if undoable { format!("{why}\nUndo takes back what was done.") } else { why };
-        self.notify(self.on_host("Couldn't finish that"), why, true);
+        self.notify(format!("Couldn't finish that on {machine}"), why, true);
         if undoable {
-            self.offer_undo(self.env_label(), label);
+            self.offer_undo(machine.to_string(), label);
         }
     }
 
-    fn plan_changed(&mut self, view: &PlanView) {
-        self.notify(self.on_host("Nothing was done; the files changed"), view.lines.join("\n"), true);
+    fn plan_changed(&mut self, machine: &str, view: &PlanView) {
+        self.notify(format!("Nothing was done; the files changed on {machine}"), view.lines.join("\n"), true);
+    }
+
+    /// An undo's answer from `machine`.
+    fn host_undone(&mut self, machine: &str, outcome: Outcome) {
+        match outcome {
+            Outcome::Answer(_, v) if v["stale"] == true => {
+                self.notify(format!("Couldn't undo on {machine}"), v["error"].as_str().unwrap_or_default().to_string(), true);
+            }
+            Outcome::Answer(_, v) => match v["undone"].as_str() {
+                Some(label) => self.notify(format!("Undid: {label} on {machine}"), String::new(), false),
+                None => self.notify(format!("Nothing to undo on {machine}"), String::new(), false),
+            },
+            Outcome::Failed { why, .. } => self.notify(format!("Couldn't fully undo on {machine}"), why, true),
+            _ => {}
+        }
+    }
+
+    /// An answer from a host no longer in view. Only what it wrote shows: a toast naming that
+    /// host, whose Undo acts there. Plans and reads for its dialogs, closed since, go.
+    fn land_elsewhere(&mut self, machine: &str, then: Then, outcome: Outcome) {
+        match (then, outcome) {
+            (Then::Undo, outcome) => self.host_undone(machine, outcome),
+            (Then::SyncPlan(_) | Then::McpPlan(_) | Then::EditForm(_) | Then::Reveal(_), _) => {}
+            (_, Outcome::Failed { why, undoable, label }) => self.host_failed(machine, why, undoable, label),
+            (_, Outcome::Changed(view)) => self.plan_changed(machine, &view),
+            (Then::Change(title), Outcome::Done(view, label)) => self.host_done(machine, title.text(view.lines.len()), notes(&view), label),
+            (Then::SyncApply { .. }, Outcome::Done(view, label)) => self.host_done(machine, Title::Synced.text(view.lines.len()), String::new(), label),
+            (Then::McpApply { done, .. }, Outcome::Done(_, label)) => self.host_done(machine, done, String::new(), label),
+            (Then::McpAdd { name }, Outcome::Answer(_, v)) if v["applied"] == true => {
+                self.host_done(machine, format!("Added {name}"), String::new(), v["label"].as_str().map(String::from));
+            }
+            (Then::NewSkill { name }, Outcome::Answer(..)) => self.notify(format!("Created {name} on {machine}"), String::new(), false),
+            _ => {}
+        }
     }
 
     fn land_host_answer(&mut self, then: Then, outcome: Outcome) {
+        let machine = self.env_label();
         match (then, outcome) {
             (Then::Change(title), outcome) => {
                 match outcome {
-                    Outcome::Done(view, label) => self.host_done(title.text(view.lines.len()), notes(&view), label),
-                    Outcome::Changed(view) => self.plan_changed(&view),
-                    Outcome::Failed { why, undoable, label } => self.host_failed(why, undoable, label),
+                    Outcome::Done(view, label) => self.host_done(&machine, title.text(view.lines.len()), notes(&view), label),
+                    Outcome::Changed(view) => self.plan_changed(&machine, &view),
+                    Outcome::Failed { why, undoable, label } => self.host_failed(&machine, why, undoable, label),
                     _ => self.notify(self.on_host("Nothing to change"), String::new(), false),
                 }
                 self.reload_host();
@@ -372,17 +410,17 @@ impl App {
                             (p.view, p.applying, p.notice) = (Some(Ok(view)), false, notice);
                         }
                     }
-                    Outcome::Changed(view) => self.plan_changed(&view),
+                    Outcome::Changed(view) => self.plan_changed(&machine, &view),
                     Outcome::Done(view, label) => {
                         self.close_sync();
                         if only {
                             self.checked.clear();
                         }
-                        self.host_done(Title::Synced.text(view.lines.len()), String::new(), label);
+                        self.host_done(&machine, Title::Synced.text(view.lines.len()), String::new(), label);
                     }
                     Outcome::Failed { why, undoable, label } => {
                         self.close_sync();
-                        self.host_failed(why, undoable, label);
+                        self.host_failed(&machine, why, undoable, label);
                     }
                     _ => self.close_sync(),
                 }
@@ -410,17 +448,17 @@ impl App {
                             }
                         }
                     }
-                    Outcome::Changed(view) => self.plan_changed(&view),
+                    Outcome::Changed(view) => self.plan_changed(&machine, &view),
                     Outcome::Done(_, label) => {
                         self.mcp_dialog = None;
-                        self.host_done(done, String::new(), label);
+                        self.host_done(&machine, done, String::new(), label);
                         if let Some(name) = select {
                             self.mcp_selected = Some(name);
                         }
                     }
                     Outcome::Failed { why, undoable, label } => {
                         self.mcp_dialog = None;
-                        self.host_failed(why, undoable, label);
+                        self.host_failed(&machine, why, undoable, label);
                     }
                     _ => self.mcp_dialog = None,
                 }
@@ -430,7 +468,7 @@ impl App {
                 let view = PlanView::from_json(&v).map(|view| on_host(view, &self.env_label())).unwrap_or_default();
                 if v["applied"] == true {
                     self.mcp_form = None;
-                    self.host_done(format!("Added {name}"), notes(&view), v["label"].as_str().map(String::from));
+                    self.host_done(&machine, format!("Added {name}"), notes(&view), v["label"].as_str().map(String::from));
                     self.select_mcp(&name);
                     self.reload_host();
                 } else {
@@ -513,17 +551,7 @@ impl App {
                 }
             },
             (Then::Undo, outcome) => {
-                match outcome {
-                    Outcome::Answer(_, v) if v["stale"] == true => {
-                        self.notify(self.on_host("Couldn't undo"), v["error"].as_str().unwrap_or_default().to_string(), true);
-                    }
-                    Outcome::Answer(_, v) => match v["undone"].as_str() {
-                        Some(label) => self.notify(self.on_host(&format!("Undid: {label}")), String::new(), false),
-                        None => self.notify(self.on_host("Nothing to undo"), String::new(), false),
-                    },
-                    Outcome::Failed { why, .. } => self.notify(self.on_host("Couldn't fully undo"), why, true),
-                    _ => {}
-                }
+                self.host_undone(&machine, outcome);
                 self.reload_host();
             }
         }
