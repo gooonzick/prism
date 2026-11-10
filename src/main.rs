@@ -237,7 +237,7 @@ fn window() {
         setup: Some(setup),
         poll: Some(poll),
         on_key: Some(ui::on_key),
-        min_size: Some((820.0, 520.0)),
+        min_size: Some(ui::MIN_WINDOW),
         scenes: SCENES,
         // Commands, paths and keys read as code: the system monospace (SF Mono on macOS).
         families: ("Inter", "ui-monospace"),

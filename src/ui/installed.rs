@@ -4,7 +4,7 @@ use rune::{Color, El, Tx, col, row, text};
 use rune_kit::shell::Toolbar;
 use rune_kit::{Button, ButtonVariant, Checkbox, ControlSize, IconButton, IconButtonVariant, Kit, SegmentedControl, TextInput, glyphs};
 
-use super::{PLUS, REFRESH, SYNC, UPDATE, dot, empty, inspector, page_tabs, scope_title, scroll_pane};
+use super::{PLUS, REFRESH, SYNC, UPDATE, dot, empty, inspector, scope_title, scroll_pane};
 use crate::agents::{AGENTS, tilde};
 use crate::app::{App, Filter};
 use crate::scan::{Placement, Skill};
@@ -23,7 +23,7 @@ fn toolbar(s: &App, unsynced: usize, k: &Kit) -> Toolbar {
     // skills.sh is this machine's: a host's skills aren't checked against it.
     let remote = s.is_remote();
     let check_label = if checking { "Checking for updates…" } else { "Check skills.sh for updates" };
-    Toolbar::new().leading(page_tabs(s, k)).title(scope_title(&s.scope, "skills")).trailing(
+    super::toolbar(s, k, scope_title(&s.scope, "skills"),
         row()
             .gap(6.0)
             .center_y()

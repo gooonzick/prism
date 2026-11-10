@@ -2,11 +2,11 @@
 //! the main pane shows until a host's state is in.
 
 use rune::{El, Tx, col, icon, row, text};
-use rune_kit::{Button, ButtonVariant, Dialog, Kit, Placement, Select, Spinner, TextInput, glyphs};
+use rune_kit::{Button, ButtonVariant, Dialog, Kit, Placement, Select, SelectAppearance, TextInput, glyphs};
 
 use super::dialogs::{dialog_body, field_block, note};
-use super::{empty, row_gap};
 use crate::app::{App, Env, RemoteState};
+use crate::ds::{self, Place, size, space};
 use crate::hosts::copy::this_machine;
 use crate::hosts::install::{Health, VERSION};
 
@@ -21,6 +21,8 @@ pub fn switcher(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let select = Select::new("env-switch", &labels)
         .current(Some(&current))
         .label("Machine")
+        // A field, the list's control height (`Place::List`); across the sidebar, not its 280.
+        .appearance(SelectAppearance::Field)
         .placement(Placement::BottomStart)
         .open(s.env_menu)
         .on_toggle(|s: &mut App| s.env_menu = !s.env_menu)
@@ -33,7 +35,8 @@ pub fn switcher(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 v => s.switch_env(Some(v)),
             }
         })
-        .build(k, layer);
+        .build(k, layer)
+        .w_full();
     row().key("env").w_full().center_y().child(select)
 }
 
@@ -45,7 +48,7 @@ pub fn pending(s: &App, k: &Kit) -> Option<El> {
         RemoteState::Ready => return None,
         RemoteState::Connecting => {
             let line = if s.installing_prism { format!("Installing prism {VERSION} on {name}…") } else { format!("Connecting to {name}…") };
-            row().w_full().py(48.0).center().child(row_gap().child(Spinner::new().build(k)).child(text(line).font(k.ty.small).color(k.c.text_muted)))
+            row().w_full().py(space::S6).center().child(ds::loading(k, line))
         }
         RemoteState::NeedsInstall(health) => {
             let detail = match health {
@@ -54,21 +57,16 @@ pub fn pending(s: &App, k: &Kit) -> Option<El> {
                 Health::Missing(Some(why)) => format!("Its prism doesn't run ({why}); Install puts {VERSION} in ~/.local/bin in its place."),
                 Health::Missing(None) | Health::Ready => format!("Install puts it in ~/.local/bin on {name}; nothing else there changes."),
             };
-            let install = Button::new("Install prism")
-                .variant(ButtonVariant::Contrast)
-                .disabled(matches!(health, Health::Unsupported(_)))
-                .on_press(|s: &mut App| s.install_prism())
-                .build(k)
-                .key("env-install");
-            empty(&format!("prism {VERSION} isn't on {name}"), &detail, k).child(row().pt(10.0).child(install))
+            let install = ds::primary("Install prism", Place::List).disabled(matches!(health, Health::Unsupported(_))).on_press(|s: &mut App| s.install_prism()).build(k).key("env-install");
+            ds::empty_action(k, format!("prism {VERSION} isn't on {name}"), detail, install)
         }
         RemoteState::Unreachable(e) => {
             let why = e.strip_prefix(&format!("Can't reach {name}: ")).unwrap_or(e);
-            let retry = Button::new("Retry").variant(ButtonVariant::Ghost).on_press(|s: &mut App| s.retry_remote()).build(k).key("env-retry");
-            empty(&format!("Can't reach {name}"), why, k).child(row().pt(10.0).child(retry))
+            let retry = ds::button("Retry", Place::List).on_press(|s: &mut App| s.retry_remote()).build(k).key("env-retry");
+            ds::empty_action(k, format!("Can't reach {name}"), why, retry)
         }
     };
-    Some(col().key("env-status").w_full().h_full().min_h(0.0).padding(16.0).child(body))
+    Some(col().key("env-status").w_full().h_full().min_h(0.0).padding(size::PANE_EDGE).child(body))
 }
 
 /// The note on skills.sh while a host is in view: installs land here, not there.

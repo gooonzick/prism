@@ -838,6 +838,27 @@ mod page_additions {
         let clear = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("bulk-clear")).expect("no bulk-clear");
         assert_eq!((clear.role, clear.label.as_deref(), clear.help.as_deref(), clear.focusable), ("button", Some("Clear selection"), Some("Clear selection (Esc)"), true));
     }
+
+    fn two_tabs(picked: &usize, _: &mut Cx<usize>) -> El {
+        let k = Kit::neutral(false);
+        let tabs = tabs(&k, "Show", &[("tab-a", "Skills"), ("tab-b", "MCP servers")], *picked, |s: &mut usize, i| *s = i).key("tabs");
+        col().padding(16.0).child(tabs)
+    }
+
+    #[test]
+    fn tabs_carry_their_keys_and_pick() {
+        let mut rt = run(0usize, two_tabs, (400.0, 100.0));
+        let el = |key: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap_or_else(|| panic!("no {key}"));
+        assert_eq!((el("tabs").role, el("tabs").label.as_deref()), ("radiogroup", Some("Show")));
+        assert_eq!((el("tab-a").role, el("tab-a").label.as_deref()), ("radio", Some("Skills")));
+        assert_eq!(rect(&rt, "tabs")[3], Place::Bar.height(), "tabs sit at the toolbar's control height");
+        let (a, b) = (rect(&rt, "tab-a"), rect(&rt, "tab-b"));
+        assert!(a[0] + a[2] <= b[0], "in order: {a:?} {b:?}");
+        click(&mut rt, "tab-b");
+        assert_eq!(rt.state, 1);
+        click(&mut rt, "tab-a");
+        assert_eq!(rt.state, 0);
+    }
 }
 
 mod inspector_additions {

@@ -79,6 +79,14 @@ impl Place {
             Place::List | Place::Bar => ControlSize::Large,
         }
     }
+
+    /// A control's height here, as the kit draws `control()`: 24 or 28.
+    pub fn height(self) -> f32 {
+        match self {
+            Place::Inspector => 24.0,
+            Place::List | Place::Bar => 28.0,
+        }
+    }
 }
 
 /// Type roles. Families come from the kit, so the app's fonts carry over; only size, weight and

@@ -3,10 +3,10 @@
 
 use std::rc::Rc;
 
-use rune::{El, Icon, TextEdit, Tx, text};
+use rune::{El, Icon, Shadow, TextEdit, TextStyle, Tx, row, text};
 use rune_kit::{Button, ButtonVariant, IconButton, IconButtonVariant, Kit, Menu, MenuItem, SegmentedControl, Switch, TextInput, glyphs};
 
-use super::{Place, space};
+use super::{Place, radius, space};
 
 /// Three dots: rune-kit's glyph set has no "more".
 static MORE: Icon = Icon {
@@ -160,6 +160,40 @@ pub fn filter(edit: &TextEdit, placeholder: &str) -> TextInput {
 /// is the accessible name of the choice ("Show"). The caller adds a key, then builds it.
 pub fn segments<S: 'static>(labels: &[String], current: Option<usize>, label: &str, on_pick: impl Fn(&mut S, usize, &mut Tx) + Clone + 'static) -> SegmentedControl {
     SegmentedControl::new(labels, current).label(label).fit().on_pick(on_pick)
+}
+
+/// Tabs that switch what a window shows (Skills / MCP servers): the kit's segments as they look
+/// in a toolbar, at `Place::Bar` height, but each segment keyed by the caller, since the kit's
+/// `SegmentedControl` keys its segments `segment<i>`. `items` are (key, label); `label` is the
+/// group's accessible name. The caller keys the group.
+pub fn tabs<S: 'static>(k: &Kit, label: &str, items: &[(&str, &str)], current: usize, on_pick: impl Fn(&mut S, usize) + Clone + 'static) -> El {
+    let c = &k.c;
+    let height = Place::Bar.height();
+    let hairline = |color| Shadow { spread: 0.5, color, ..Default::default() };
+    let mut group = row().role("radiogroup").label(label.to_string()).focus_group().h(height).center_y().radius(radius::CONTROL).fill(c.layer_01).box_shadow(hairline(c.border_base));
+    for (i, (key, name)) in items.iter().enumerate() {
+        let on = i == current;
+        let pick = on_pick.clone();
+        let ink = if on { c.text_base } else { c.text_muted };
+        let mut seg = row()
+            .key(key.to_string())
+            .role("radio")
+            .label(name.to_string())
+            .position_in_set(i + 1, items.len())
+            .focusable(true)
+            .focus_selected(on)
+            .focus_ring(2.0, 1.0, c.border_focus)
+            .h(height)
+            .px(space::S3)
+            .center()
+            .radius(radius::CONTROL)
+            .cursor(rune::Cursor::Pointer)
+            .on_press(move |s: &mut S| pick(s, i))
+            .child(text(name.to_string()).font(TextStyle { line_height: 13.0, ..k.ty.ui }).color(ink).a11y_hidden());
+        seg = if on { seg.fill(c.bg_base).box_shadow(hairline(c.border_strong)) } else { seg.hover(c.hover) };
+        group = group.child(seg);
+    }
+    group
 }
 
 /// A toolbar title, in the kit's toolbar type, at the leading edge. It truncates before the

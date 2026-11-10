@@ -9,12 +9,13 @@ mod installed;
 mod mcp;
 mod mcp_dialogs;
 
-use rune::{Chrome, Color, Cx, El, Icon, KeyEvent, ScrollSpec, Spring, TextStyle, Tx, col, el, row, text};
-use rune_kit::shell::{self, PaneMotion, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar};
-use rune_kit::{ControlSize, Kit, Markdown, MarkdownStyle, Toast, ToastRegion, glyphs};
+use rune::{Chrome, Color, Cx, El, Icon, KeyEvent, ScrollSpec, TextStyle, Tx, col, el, row, text};
+use rune_kit::shell::{self, PaneState, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar};
+use rune_kit::{Kit, Markdown, MarkdownStyle, Toast, ToastRegion, glyphs};
 
 use crate::agents::{Scope, tilde};
 use crate::app::{App, Page};
+use crate::ds::{self, Place, motion, size, space};
 
 pub static HOME: Icon = Icon {
     name: "se-home",
@@ -48,6 +49,10 @@ pub static UPDATE: Icon = Icon {
     body: r#"<path d="M8 10.5V3.5M5 6.5L8 3.5L11 6.5M3.5 12.5H12.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#,
 };
 
+/// The smallest window: with the default sidebar (232) it shows all three panes (232 + `size::LIST_MIN`
+/// + `size::INSPECTOR_MIN`).
+pub const MIN_WINDOW: (f32, f32) = (860.0, 520.0);
+
 pub fn chrome() -> Chrome {
     Chrome { full_size_content: true, traffic_lights: Some((16.0, 25.0)), drag_regions: true }
 }
@@ -61,7 +66,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     }
     let (main, toolbar, inspector) = match (s.page.clone(), hosts::pending(s, &k)) {
         // A host whose state isn't in yet: what is happening with it, in place of the page.
-        (Page::Installed | Page::Mcp, Some(pane)) => (pane, Toolbar::new().leading(page_tabs(s, &k)).title(s.env_label()), inspector_body(&k)),
+        (Page::Installed | Page::Mcp, Some(pane)) => (pane, toolbar(s, &k, s.env_label(), row()), inspector_body(&k)),
         (Page::Installed, None) => installed::page(s, &k, &mut layer),
         (Page::Mcp, None) => mcp::page(s, &k, &mut layer),
         (Page::Browse, _) => browse::page(s, &k, &mut layer),
@@ -87,19 +92,39 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         toast = toast.icon(&k, if n.error { &glyphs::CIRCLE_X } else { &glyphs::CHECK });
         layer.push(ToastRegion::new().toast(toast.build(&k)).build(&k));
     }
-    let split = SplitView::new(main)
-        .sidebar(&s.sidebar, |s: &mut App| &mut s.sidebar, sidebar(s, &k, &mut layer))
-        .inspector(&s.inspector, |s: &mut App| &mut s.inspector, scroll_pane("inspector-scroll", inspector))
+    let mut split = SplitView::new(main).sidebar(&s.sidebar, |s: &mut App| &mut s.sidebar, sidebar(s, &k, &mut layer));
+    if let Some(pane) = inspector_pane(s, cx) {
+        split = split.inspector(&pane, |s: &mut App| &mut s.inspector, scroll_pane("inspector-scroll", inspector));
+    }
+    let split = split
         .toolbar(toolbar)
         .titlebar_inset(cx.titlebar_inset())
-        .frame_inset(8.0)
+        .frame_inset(space::S2)
         .toolbar_in_panel()
-        .sidebar_padding(18.0, 10.0)
-        .sidebar_toggle(SidebarToggle::new().size(ControlSize::Large).past_lights(16.0).edge(18.0).gap(4.0).in_header())
-        .pane_motion(PaneMotion::new().spring(Spring::new(0.3, 0.0)).scale_with_width(480.0, 0.15, 0.3).fade_tail(0.15))
+        .sidebar_padding(space::S2, space::S2)
+        .sidebar_toggle(SidebarToggle::new().size(Place::Bar.control()).past_lights(space::S4).edge(space::S4).gap(space::S1).in_header())
+        .pane_motion(motion::panes())
         .reduced_motion(cx.is_reduced_motion())
         .build(&k);
     rune_kit::root(split, layer)
+}
+
+/// The inspector pane as it is drawn, or `None` when the window has no room for it. The list
+/// keeps `size::LIST_MIN`: the inspector is drawn at the stored width, or narrower (down to
+/// `size::INSPECTOR_MIN`) when that is all the room there is. Below that it hides. The stored
+/// width in `App::inspector` is never changed, so the inspector returns to the width the user
+/// chose when the window widens. Before the first layout there is no width yet, and it shows at
+/// the stored width.
+pub fn inspector_pane(s: &App, cx: &Cx<App>) -> Option<PaneState> {
+    let stored = s.inspector;
+    let Some(window) = cx.layout_with("kit-root", |r| r[2]) else { return Some(stored) };
+    let room = window - s.sidebar.shown_width() - size::LIST_MIN;
+    if room < size::INSPECTOR_MIN {
+        return None;
+    }
+    let mut pane = stored;
+    pane.set_width(stored.width().min(room));
+    Some(pane)
 }
 
 fn sidebar(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
@@ -110,14 +135,14 @@ fn sidebar(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         if stats.unsynced > 0 { row.badge(stats.unsynced.to_string()) } else { row }
     };
     let global = counted(SidebarRow::new("Global").icon(&HOME), &Scope::Global)
-        .height(32.0)
+        .height(size::ROW_1)
         .selected(installed && s.scope == Scope::Global)
         .on_select(|s: &mut App, _| s.open_scope(Scope::Global))
         .build(k)
         .key("scope-global");
     let browse = SidebarRow::new("skills.sh")
         .icon(&GLOBE)
-        .height(32.0)
+        .height(size::ROW_1)
         .selected(s.page == Page::Browse)
         .on_select(|s: &mut App, _| s.open_browse())
         .build(k)
@@ -130,7 +155,7 @@ fn sidebar(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 let n = s.stats.get(&Scope::Project(p.clone())).map_or(0, |x| x.total);
                 format!("{} · {n} skill{}", tilde(p.parent().unwrap_or(p), &s.paths), if n == 1 { "" } else { "s" })
             })
-            .height(40.0)
+            .height(size::ROW_2)
             .selected(installed && s.scope == Scope::Project(p.clone()))
             .on_select(move |s: &mut App, _| s.open_scope(Scope::Project(open.clone())))
             .on_close(move |s: &mut App, _| s.forget_project(&forget));
@@ -138,7 +163,7 @@ fn sidebar(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     });
     let add = SidebarRow::new(if s.discovering { "Looking for projects…" } else { "Add project…" })
         .icon(&PLUS)
-        .height(32.0)
+        .height(size::ROW_1)
         .on_select(|s: &mut App, tx: &mut Tx| {
             if s.discovering {
                 return;
@@ -166,9 +191,9 @@ fn sidebar(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     Sidebar::new()
         .label("Scopes")
         .inset(0.0)
-        .header_gap(4.0)
-        .header_padding(0.0, 12.0)
-        .row_gap(2.0)
+        .header_gap(space::S1)
+        .header_padding(0.0, space::S3)
+        .row_gap(space::ROW_GAP)
         .header(hosts::switcher(s, k, layer))
         .header(global)
         .header(browse)
@@ -184,43 +209,25 @@ pub fn scope_title(scope: &Scope, what: &str) -> String {
     }
 }
 
-/// Skills or MCP servers of the open scope, in the toolbar: segments as the kit draws them,
-/// keyed so a test (or a scene) can pick one.
-pub fn page_tabs(s: &App, k: &Kit) -> El {
-    let c = &k.c;
-    let tab = |key: &str, label: &str, on: bool, open: fn(&mut App)| {
-        let seg = row()
-            .key(key.to_string())
-            .role("radio")
-            .label(label.to_string())
-            .focusable(true)
-            .focus_selected(on)
-            .focus_ring(2.0, 1.0, c.border_focus)
-            .h(28.0)
-            .px(12.0)
-            .center()
-            .radius(6.0)
-            .cursor(rune::Cursor::Pointer)
-            .on_press(open)
-            .child(text(label.to_string()).font(rune::TextStyle { line_height: 13.0, ..k.ty.ui }).color(if on { c.text_base } else { c.text_muted }).a11y_hidden());
-        if on {
-            seg.fill(c.bg_base).box_shadow(rune::Shadow { spread: 0.5, color: c.border_strong, ..Default::default() })
-        } else {
-            seg.hover(c.hover)
-        }
-    };
-    row()
-        .key("page-tabs")
-        .role("radiogroup")
-        .label("Show")
-        .focus_group()
-        .h(28.0)
-        .center_y()
-        .radius(6.0)
-        .fill(c.layer_01)
-        .box_shadow(rune::Shadow { spread: 0.5, color: c.border_base, ..Default::default() })
-        .child(tab("tab-skills", "Skills", s.page == Page::Installed, |s| s.open_skills()))
-        .child(tab("tab-mcp", "MCP servers", s.page == Page::Mcp, |s| s.open_mcp()))
+/// Skills or MCP servers of the open scope, in the toolbar: `ds::tabs`, keyed so a test (or a
+/// scene) can pick one.
+fn page_tabs(s: &App, k: &Kit) -> El {
+    let current = if s.page == Page::Mcp { 1 } else { 0 };
+    ds::tabs(k, "Show", &[("tab-skills", "Skills"), ("tab-mcp", "MCP servers")], current, |s: &mut App, i| if i == 1 { s.open_mcp() } else { s.open_skills() }).key("page-tabs")
+}
+
+/// The toolbar of a page with tabs: the page tabs, then the page's title (it truncates first),
+/// on the leading side; `trailing` (the page's buttons) on the other.
+pub fn toolbar(s: &App, k: &Kit, title: impl Into<String>, trailing: El) -> Toolbar {
+    // One leading child, so the tabs and the title sit `S3` apart rather than at the kit's slot gap.
+    let leading = row().gap(space::S3).center_y().shrink().min_w(0.0).child(page_tabs(s, k)).child(ds::toolbar_title(k, title).shrink().min_w(0.0));
+    Toolbar::new().leading(leading).trailing(trailing)
+}
+
+/// The toolbar of a page without tabs (skills.sh): the title on the leading side, `trailing` on
+/// the other.
+pub fn toolbar_untabbed(k: &Kit, title: impl Into<String>, trailing: El) -> Toolbar {
+    Toolbar::new().leading(ds::toolbar_title(k, title)).trailing(trailing)
 }
 
 /// A pane's content in a vertical scroll view that fills the pane.

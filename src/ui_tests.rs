@@ -2139,3 +2139,73 @@ fn a_double_pressed_toast_undo_runs_one_undo() {
     let undos = log.lock().unwrap().iter().filter(|(argv, _)| argv.first().is_some_and(|w| w == "undo")).count();
     assert_eq!(undos, 1, "one undo ran on laptop");
 }
+
+// The shell.
+
+/// The pane defaults leave room for all three panes in the smallest window.
+#[test]
+fn pane_widths() {
+    use crate::ds::size;
+    const { assert!(232.0 + size::LIST_MIN + size::INSPECTOR_MIN <= 860.0) };
+    assert_eq!(crate::ui::MIN_WINDOW, (860.0, 520.0));
+    let h = Harness::project();
+    let (sidebar, inspector) = (h.rt.state.sidebar, h.rt.state.inspector);
+    assert_eq!(sidebar.width(), 232.0);
+    assert!(sidebar.width() + size::LIST_MIN + size::INSPECTOR_MIN <= crate::ui::MIN_WINDOW.0);
+    assert_eq!((inspector.min_width(), inspector.max_width()), (size::INSPECTOR_MIN, size::INSPECTOR_READ_MAX));
+    assert!(!inspector.is_open(), "the inspector starts closed and opens on a selection");
+}
+
+/// The window at its minimum, with a skill selected.
+fn smallest_with_selection() -> Harness {
+    let mut h = Harness::project();
+    h.rt.set_viewport(crate::ui::MIN_WINDOW, 2.0);
+    h.settle();
+    h.click("skill-review");
+    h
+}
+
+#[test]
+fn inspector_shows_at_minimum_window() {
+    use crate::ds::size;
+    let h = smallest_with_selection();
+    let (pane, opacity) = h.rt.presented("inspector").expect("the inspector at 860");
+    assert!(opacity > 0.99, "the inspector is visible: {opacity}");
+    assert!(pane[2] >= size::INSPECTOR_MIN, "the inspector is {} wide at 860", pane[2]);
+    let (list, _) = h.rt.presented("main-pane").expect("the list");
+    assert!(list[2] >= size::LIST_MIN, "the list is {} wide at 860", list[2]);
+}
+
+#[test]
+fn inspector_hides_when_sidebar_is_wide() {
+    use crate::ds::size;
+    let mut h = smallest_with_selection();
+    let stored = h.rt.state.inspector.width();
+    h.rt.state.sidebar.set_width(300.0);
+    h.rt.invalidate();
+    h.settle();
+    assert!(h.rt.find("inspector").is_none(), "a 300 sidebar at 860: the list keeps its room and the inspector goes");
+    assert!(h.rt.find("skill-review").is_some(), "the list is still there");
+
+    h.rt.state.sidebar.set_width(232.0);
+    h.rt.invalidate();
+    h.settle();
+    let (pane, _) = h.rt.presented("inspector").expect("back with the default sidebar");
+    assert!(pane[2] >= size::INSPECTOR_MIN, "{pane:?}");
+    assert_eq!(h.rt.state.inspector.width(), stored, "the stored width was never touched");
+    h.rt.set_viewport((1180.0, 760.0), 2.0);
+    h.settle();
+    let (pane, _) = h.rt.presented("inspector").unwrap();
+    assert_eq!(pane[2], stored, "a wide window draws it at the stored width");
+}
+
+#[test]
+fn toolbar_title_follows_tabs() {
+    let h = Harness::project();
+    let (leading, _) = h.rt.presented("leading").expect("the toolbar's leading slot");
+    let (tab, _) = h.rt.presented("tab-mcp").expect("the MCP tab");
+    let (title, _) = h.rt.presented("title").expect("the title");
+    let inside = |r: [f32; 4]| r[0] >= leading[0] && r[0] + r[2] <= leading[0] + leading[2] + 0.5;
+    assert!(inside(tab) && inside(title), "tabs {tab:?} and title {title:?} in the leading slot {leading:?}");
+    assert!(tab[0] + tab[2] < title[0], "the title {title:?} after the tabs {tab:?}");
+}

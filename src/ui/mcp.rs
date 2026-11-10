@@ -6,7 +6,7 @@ use rune_kit::shell::Toolbar;
 use rune_kit::{Button, ButtonVariant, ControlSize, Divider, IconButton, IconButtonVariant, Kit, SegmentedControl, glyphs};
 
 use super::installed::tag;
-use super::{PLUS, REFRESH, code_box, dot, empty, inspector_body, inspector_title, mono, prop, section, words, page_tabs, scope_title, scroll_pane};
+use super::{PLUS, REFRESH, code_box, dot, empty, inspector_body, inspector_title, mono, prop, section, words, scope_title, scroll_pane};
 use crate::agents::{self, Scope, tilde};
 use crate::app::{App, McpFilter};
 use crate::mcp::agents::MCP_AGENTS;
@@ -18,7 +18,7 @@ pub fn page(s: &App, k: &Kit, _layer: &mut Vec<El>) -> (El, Toolbar, El) {
 }
 
 fn toolbar(s: &App, k: &Kit) -> Toolbar {
-    Toolbar::new().leading(page_tabs(s, k)).title(scope_title(&s.scope, "MCP servers")).trailing(
+    super::toolbar(s, k, scope_title(&s.scope, "MCP servers"),
         row()
             .gap(6.0)
             .center_y()

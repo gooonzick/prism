@@ -21,6 +21,7 @@ use rune::{Latest, TextEdit, Waker};
 use rune_kit::shell::PaneState;
 
 use crate::agents::{self, AGENTS, CANONICAL, Paths, Scope};
+use crate::ds::size;
 use crate::fsops::Journal;
 use crate::hosts::runner::{self as host_runner, MakeRunner};
 use crate::mcp::scan::{self as mcp_scan, McpInventory, McpServer};
@@ -229,8 +230,8 @@ impl App {
             gallery: false,
             paths,
             settings,
-            sidebar: PaneState::new(248.0).range(180.0, 420.0),
-            inspector: PaneState::new(380.0).range(300.0, 640.0).collapsed(),
+            sidebar: PaneState::new(232.0).range(180.0, 420.0),
+            inspector: PaneState::new(380.0).range(size::INSPECTOR_MIN, size::INSPECTOR_READ_MAX).collapsed(),
             page: Page::Installed,
             scope,
             inv,

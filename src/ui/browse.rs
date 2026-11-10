@@ -35,9 +35,7 @@ pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>) -> (El, Toolbar, El) {
         })
         .build(k, layer)
         .key("install-scope");
-    let toolbar = Toolbar::new()
-        .title("skills.sh")
-        .trailing(row().gap(8.0).center_y().child(text("Install into").font(k.ty.small).color(k.c.text_muted)).child(scope_select));
+    let toolbar = super::toolbar_untabbed(k, "skills.sh", row().gap(8.0).center_y().child(text("Install into").font(k.ty.small).color(k.c.text_muted)).child(scope_select));
 
     let search = TextInput::new(&s.query)
         .placeholder("Search skills.sh")

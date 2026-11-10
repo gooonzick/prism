@@ -27,6 +27,9 @@ Keysmith base: `287ebb5`.
 | (rule) | Kit controls `Switch`, `SegmentedControl`, `RadioItem`, `TextArea`, `Spinner` | Allowed in `ds` and its callers, through the wrappers above where there is one (`switch`, `segments`, `loading`); `RadioItem` and `TextArea` as the kit draws them, inside card rows, like `Checkbox` (spec #16). |
 | `tokens.rs` | `size::INSPECTOR_READ_MAX` (640) | The widest an inspector that shows a document may be dragged, so SKILL.md can be widened to read; `INSPECTOR_MIN` still applies (spec #17). |
 | `gallery.rs` | A fifth column: a `Plan` (grouped, skipped, heads-up), `command`, `markdown`, `switch` off/on, `reveal` both ways, `secret_input` hidden and shown | Every new block in the gallery; the `ds` scene snaps at 1500×760 (`scripts/snap-scenes.sh`) to fit it. A Wide dialog is too big for a column; dialog kinds are covered by tests. |
+| `controls.rs` | `tabs<S>(k, label, items: &[(key, label)], current, on_pick) -> El` | Segments that switch what the window shows, drawn as the kit's `SegmentedControl` at `Place::Bar` height (radiogroup of radios, `radius::CONTROL`, `space::S3` sides), but with a caller key on each segment: the kit keys its segments `segment<i>`, and Prism's page tabs must stay `tab-skills` / `tab-mcp`. Keeps `k.c` / `k.ty` out of `src/ui/` (Task 4). |
+| `tokens.rs` | `Place::height()` (24 / 28 / 28) | A control's height for a place, as the kit draws `Place::control()`: `tabs` uses it, and tests can assert heights without a literal (Task 4). |
+| `gallery.rs` | A "Tabs" section in the fifth column | Every new block in the gallery (Task 4). |
 
 ## Fixes to Keysmith's ds
 
