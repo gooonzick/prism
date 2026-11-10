@@ -47,7 +47,8 @@ pub struct McpForm {
 /// What a plan dialog is for, with the user's picks.
 pub enum McpChange {
     Copy { name: String, to: Vec<usize>, from: Option<usize> },
-    Edit { name: String, changes: Vec<EditChange> },
+    /// `definition`: the transport as the edit leaves it, which a host takes on stdin.
+    Edit { name: String, changes: Vec<EditChange>, definition: Transport },
     Remove { name: String, from: Vec<usize> },
     Switch { name: String, disabled: bool },
     /// Boxed: a text field is far larger than the other variants.
@@ -224,7 +225,7 @@ impl McpChange {
     fn request(&self) -> Request {
         match self {
             McpChange::Copy { name, to, from } => Request::Copy { name: name.clone(), to: to.clone(), from: *from },
-            McpChange::Edit { name, changes } => Request::Edit { name: name.clone(), changes: changes.clone() },
+            McpChange::Edit { name, changes, .. } => Request::Edit { name: name.clone(), changes: changes.clone() },
             McpChange::Remove { name, from } => Request::Remove { name: name.clone(), from: from.clone() },
             McpChange::Switch { name, disabled } => Request::SetDisabled { name: name.clone(), disabled: *disabled },
             McpChange::Merge { names, into } => Request::Merge { names: names.clone(), into: into.text.trim().to_string() },
@@ -414,11 +415,14 @@ impl App {
         if let Some((name, old)) = &form.editing {
             match form.changes(old) {
                 Ok(changes) if changes.is_empty() => form.error = Some("Nothing changed".into()),
-                Ok(changes) => {
-                    let name = name.clone();
-                    self.mcp_form = None;
-                    self.open_mcp_plan(McpChange::Edit { name, changes });
-                }
+                Ok(changes) => match plan::edited(old, &changes, name) {
+                    Ok(definition) => {
+                        let name = name.clone();
+                        self.mcp_form = None;
+                        self.open_mcp_plan(McpChange::Edit { name, changes, definition });
+                    }
+                    Err(e) => form.error = Some(e),
+                },
                 Err(e) => form.error = Some(e),
             }
             return;

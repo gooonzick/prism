@@ -31,7 +31,7 @@ pub enum Cmd {
         show_secrets: bool,
     },
     /// Add a server to agents (acts at once).
-    #[command(group(ArgGroup::new("transport").required(true).args(["command", "url"])))]
+    #[command(group(ArgGroup::new("transport").required(true).args(["command", "url", "definition"])))]
     Add {
         name: String,
         /// The program that starts a local server.
@@ -56,6 +56,10 @@ pub enum Cmd {
         /// Where Claude Code keeps a project server: local (this machine) or project (`.mcp.json`).
         #[arg(long, value_name = "SCOPE", default_value = "local", value_parser = ["local", "project"])]
         claude_scope: String,
+        /// `-`: the whole transport as JSON on stdin (command, args, url, env, headers), so no
+        /// part of it is in the command line. The window's way.
+        #[arg(long, value_name = "-", hide = true)]
+        definition: Option<String>,
     },
     /// Copy a server into other agents, here or on another machine.
     Copy {
@@ -122,6 +126,10 @@ pub enum Cmd {
         header: Vec<String>,
         #[arg(long, value_name = "KEY")]
         unset_header: Vec<String>,
+        /// `-`: the edited transport as JSON on stdin; the fields that differ from the first
+        /// editable copy are the changes. The window's way.
+        #[arg(long, value_name = "-", hide = true, conflicts_with_all = ["command", "args", "no_args", "env", "unset_env", "url", "header", "unset_header"])]
+        definition: Option<String>,
         #[command(flatten)]
         apply: Apply,
     },
@@ -161,13 +169,17 @@ pub fn run(cmd: Cmd, ctx: &mut Ctx, scope: &Scope, out: &mut Out, err: &mut dyn 
     let (request, label, apply) = match cmd {
         Cmd::List => return list(ctx, scope, out),
         Cmd::Show { name, show_secrets } => return show(ctx, scope, &name, show_secrets, out, err),
-        Cmd::Add { name, command, args, env, url, header, to, claude_scope } => {
+        Cmd::Add { name, command, args, env, url, header, to, claude_scope, definition } => {
             let built = (|| {
+                if definition.is_some() && (command.is_some() || url.is_some() || !args.is_empty() || !env.is_empty() || !header.is_empty()) {
+                    return Err("--definition gives the whole server: drop --command, --arg, --env, --url and --header".to_string());
+                }
                 let mut values = Values::new(ctx, &[&env, &header]);
-                let transport = match (command, url) {
-                    (Some(command), _) => Transport::Stdio { command, args, env: values.pairs("--env", &env)?, cwd: None },
-                    (None, Some(url)) => Transport::Http { url, headers: values.pairs("--header", &header)?, sse: false },
-                    (None, None) => return Err("give --command or --url".to_string()),
+                let transport = match (definition, command, url) {
+                    (Some(d), _, _) => read_definition(ctx, &d, &name)?,
+                    (None, Some(command), _) => Transport::Stdio { command, args, env: values.pairs("--env", &env)?, cwd: None },
+                    (None, None, Some(url)) => Transport::Http { url, headers: values.pairs("--header", &header)?, sse: false },
+                    (None, None, None) => return Err("give --command or --url".to_string()),
                 };
                 let claude_scope = if claude_scope == "project" { ClaudeScope::Project } else { ClaudeScope::Local };
                 Ok(Request::Add { server: Server { name: name.clone(), transport }, to: agent_indices(&to)?, claude_scope })
@@ -197,7 +209,20 @@ pub fn run(cmd: Cmd, ctx: &mut Ctx, scope: &Scope, out: &mut Out, err: &mut dyn 
                 Err(e) => return usage(err, &e),
             }
         }
-        Cmd::Edit { name, command, args, no_args, env, unset_env, url, header, unset_header, apply } => {
+        Cmd::Edit { definition: Some(d), name, apply, .. } => {
+            let built = read_definition(ctx, &d, &name).and_then(|new| {
+                let inv = scan::scan(scope, &ctx.paths);
+                let server = inv.get(&name).ok_or_else(|| format!("No MCP server named {name}"))?;
+                let old = server.copies.iter().find(|c| c.read_only.is_none()).ok_or_else(|| format!("{name} is read-only here"))?;
+                plan::diff(&old.server.transport, &new)
+            });
+            match built {
+                Ok(changes) if changes.is_empty() => return usage(err, "nothing to change: the definition is the server as it is"),
+                Ok(changes) => (Request::Edit { name: name.clone(), changes }, format!("edit {name}"), apply),
+                Err(e) => return usage(err, &e),
+            }
+        }
+        Cmd::Edit { name, command, args, no_args, env, unset_env, url, header, unset_header, apply, definition: None } => {
             let built = (|| {
                 let mut values = Values::new(ctx, &[&env, &header]);
                 let mut changes = Vec::new();
@@ -386,6 +411,17 @@ impl<'a> Values<'a> {
         }
         Ok(EnvValue::parse(v))
     }
+}
+
+/// `--definition -`: a server's transport as JSON on stdin. serde's errors quote the input,
+/// and the input holds secrets: say only what failed.
+fn read_definition(ctx: &mut Ctx, flag: &str, name: &str) -> Result<Transport, String> {
+    if flag != "-" {
+        return Err("--definition takes - (the definition comes on stdin)".into());
+    }
+    let mut reader = ctx.stdin.take().unwrap_or_else(|| Box::new(std::io::stdin()));
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).ok().and_then(|_| serde_json::from_slice(&bytes).ok()).ok_or_else(|| format!("the definition of {name} on stdin can't be read"))
 }
 
 /// Files and stdin end in a newline the value doesn't have.

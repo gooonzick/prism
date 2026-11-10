@@ -160,7 +160,7 @@ pub struct App {
     /// Changes waiting to run on the host in view, oldest first.
     pub host_jobs: VecDeque<HostJob>,
     /// The one running there now.
-    host_running: Option<remote_actions::Work>,
+    host_running: Option<(remote_actions::Work, remote_actions::Then)>,
     pub host_act: Latest<HostAnswer>,
     /// The label of the change `undo` would take back on the host in view.
     pub host_last_change: Option<String>,

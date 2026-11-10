@@ -16,8 +16,8 @@ use crate::hosts::Host;
 use crate::hosts::copy::{parse, why};
 use crate::hosts::runner::Runner;
 use crate::mcp::agents::MCP_AGENTS;
-use crate::mcp::model::{EnvValue, Transport};
-use crate::mcp::plan::{ClaudeScope, EditChange};
+use crate::mcp::model::Transport;
+use crate::mcp::plan::ClaudeScope;
 use crate::mcp::scan::McpServer;
 use crate::plan_view::PlanView;
 use crate::scan::Placement;
@@ -116,6 +116,7 @@ pub(super) enum Outcome {
 }
 
 /// What a finished change says in its toast; some count what was done.
+#[derive(Clone, PartialEq)]
 pub(super) enum Title {
     Text(String),
     Copied { names: Vec<String>, to: String },
@@ -136,6 +137,7 @@ impl Title {
 }
 
 /// What landing the answer does.
+#[derive(Clone, PartialEq)]
 pub(super) enum Then {
     /// A change made at once, and its toast.
     Change(Title),
@@ -241,17 +243,9 @@ fn notes(view: &PlanView) -> String {
     skipped.chain(view.warnings.iter().map(|w| format!("Heads-up: {w}"))).collect::<Vec<_>>().join("\n")
 }
 
-/// `--env`/`--header` arguments for `values`, each `KEY=-`, and the values for stdin.
-fn secret_args(flag: &str, values: &[(String, EnvValue)], args: &mut Vec<String>, stdin: &mut Vec<String>) {
-    for (key, value) in values {
-        args.push(format!("--{flag}={key}=-"));
-        stdin.push(value.written());
-    }
-}
-
-/// The values for stdin, apart by NUL bytes; none when no argument reads stdin.
-fn stdin_of(values: Vec<String>) -> Option<Vec<u8>> {
-    if values.is_empty() { None } else { Some(values.join("\0").into_bytes()) }
+/// A server's transport for `--definition -`: all of it, secrets included, for stdin only.
+fn definition(t: &Transport) -> Vec<u8> {
+    serde_json::to_vec(t).expect("a transport always serializes")
 }
 
 fn ids(agents: &[usize]) -> Vec<String> {
@@ -276,7 +270,9 @@ impl App {
     /// The same work asked twice in a row (a double click) runs once.
     pub(super) fn run_on_host(&mut self, work: Work, then: Then) {
         let Some(host) = self.host().cloned() else { return };
-        if self.host_jobs.back().map(|j| &j.work).or(self.host_running.as_ref()) == Some(&work) {
+        // What the answer is for counts too: Edit… and Show values both read `wire server`.
+        let last = self.host_jobs.back().map(|j| (&j.work, &j.then)).or(self.host_running.as_ref().map(|(w, t)| (w, t)));
+        if last == Some((&work, &then)) {
             return;
         }
         self.host_jobs.push_back(HostJob { host, work, then });
@@ -288,7 +284,7 @@ impl App {
             return;
         }
         let Some(job) = self.host_jobs.pop_front() else { return };
-        self.host_running = Some(job.work.clone());
+        self.host_running = Some((job.work.clone(), job.then.clone()));
         let make = self.make_runner.clone();
         self.host_act.request(job, move |job| {
             let runner = make(&job.host);
@@ -343,7 +339,7 @@ impl App {
     }
 
     fn plan_changed(&mut self, view: &PlanView) {
-        self.notify(format!("The files changed on {}; nothing was done", self.env_label()), view.lines.join("\n"), true);
+        self.notify(self.on_host("Nothing was done; the files changed"), view.lines.join("\n"), true);
     }
 
     fn land_host_answer(&mut self, then: Then, outcome: Outcome) {
@@ -537,7 +533,7 @@ impl App {
             Placement::Missing => ("link", sync::label::link(name, agent)),
             Placement::Dir => {
                 let why = format!("{} has its own folder; use \"Use link\" or move it to the trash", AGENTS[agent].name);
-                self.notify("Couldn't finish that".into(), why, true);
+                self.notify(self.on_host("Couldn't finish that"), why, true);
                 return;
             }
         };
@@ -565,7 +561,8 @@ impl App {
             [one] => format!("Removed {one}"),
             _ => format!("Removed {} skills", names.len()),
         };
-        self.run_on_host(Work::Act { command, strict: true }, Then::Change(Title::Text(title)));
+        // Like the local remove, a skill it can't remove doesn't hold back the others.
+        self.run_on_host(Work::Act { command, strict: false }, Then::Change(Title::Text(title)));
     }
 
     pub(super) fn host_remove_broken(&mut self) {
@@ -710,24 +707,12 @@ impl App {
     }
 
     /// Adds the server on the host, as the Add form describes it; the form stays open until the
-    /// host answers, to show why it couldn't.
+    /// host answers, to show why it couldn't. The whole definition goes on stdin.
     pub(super) fn host_add_mcp(&mut self, name: String, transport: Transport, agents: &[usize], claude_scope: ClaudeScope) {
-        let mut args = self.scoped(&["mcp", "add"]);
-        let mut values = Vec::new();
-        match transport {
-            Transport::Stdio { command, args: words, env, .. } => {
-                args.push(format!("--command={command}"));
-                args.extend(words.iter().map(|a| format!("--arg={a}")));
-                secret_args("env", &env.into_iter().collect::<Vec<_>>(), &mut args, &mut values);
-            }
-            Transport::Http { url, headers, .. } => {
-                args.push(format!("--url={url}"));
-                secret_args("header", &headers.into_iter().collect::<Vec<_>>(), &mut args, &mut values);
-            }
-        }
+        let mut args = self.scoped(&["mcp", "add", "--definition=-"]);
         args.extend(ids(agents));
         args.push(format!("--claude-scope={}", if claude_scope == ClaudeScope::Project { "project" } else { "local" }));
-        let command = HostCommand { args, names: vec![name.clone()], stdin: stdin_of(values) };
+        let command = HostCommand { args, names: vec![name.clone()], stdin: Some(definition(&transport)) };
         self.run_on_host(Work::Run(command), Then::McpAdd { name });
     }
 
@@ -768,26 +753,10 @@ impl App {
             }
             McpChange::Switch { name, disabled } => HostCommand::new(self.scoped(&["mcp", if *disabled { "disable" } else { "enable" }]), vec![name.clone()]),
             McpChange::Merge { names, into } => HostCommand::new(self.scoped(&["mcp", "merge", &format!("--into={}", into.text.trim())]), names.clone()),
-            McpChange::Edit { name, changes } => {
-                let mut args = self.scoped(&["mcp", "edit"]);
-                let (mut env, mut headers) = (Vec::new(), Vec::new());
-                for change in changes {
-                    match change {
-                        EditChange::Command(c) => args.push(format!("--command={c}")),
-                        EditChange::Args(words) if words.is_empty() => args.push("--no-args".into()),
-                        EditChange::Args(words) => args.extend(words.iter().map(|a| format!("--arg={a}"))),
-                        EditChange::Url(u) => args.push(format!("--url={u}")),
-                        EditChange::UnsetEnv(k) => args.push(format!("--unset-env={k}")),
-                        EditChange::UnsetHeader(k) => args.push(format!("--unset-header={k}")),
-                        EditChange::SetEnv(k, v) => env.push((k.clone(), v.clone())),
-                        EditChange::SetHeader(k, v) => headers.push((k.clone(), v.clone())),
-                    }
-                }
-                // The CLI reads the env values first, then the header ones.
-                let mut values = Vec::new();
-                secret_args("env", &env, &mut args, &mut values);
-                secret_args("header", &headers, &mut args, &mut values);
-                HostCommand { args, names: vec![name.clone()], stdin: stdin_of(values) }
+            // The command, args, URL and values may all hold secrets: the edited definition goes
+            // on stdin, and the host takes what differs from its copy as the changes.
+            McpChange::Edit { name, definition: d, .. } => {
+                HostCommand { args: self.scoped(&["mcp", "edit", "--definition=-"]), names: vec![name.clone()], stdin: Some(definition(d)) }
             }
         }
     }

@@ -1134,6 +1134,43 @@ fn edit_clears_the_args_and_renames_a_header_by_case() {
 }
 
 #[test]
+fn definition_on_stdin_adds_and_edits_with_nothing_in_argv() {
+    use crate::mcp::model::{EnvValue, Transport};
+    let home = empty_mcp_home();
+    let mut c = ctx(home.path());
+    let url = "https://mcp.example.com/mcp?key=FIXTURE_URL_TOKEN";
+    let t = Transport::Http { url: url.into(), headers: [("X-Key".to_string(), EnvValue::literal("FIXTURE_HEADER_TOKEN"))].into(), sse: false };
+    c.stdin = Some(Box::new(std::io::Cursor::new(serde_json::to_vec(&t).unwrap())));
+    let (code, out, err) = go(&["mcp", "add", "web", "--definition", "-", "--to", "cursor", "--json"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    let cursor = |h: &std::path::Path| json(&std::fs::read_to_string(h.join(".cursor/mcp.json")).unwrap());
+    assert_eq!(cursor(home.path())["mcpServers"]["web"]["url"], url);
+    assert_eq!(cursor(home.path())["mcpServers"]["web"]["headers"]["X-Key"], "FIXTURE_HEADER_TOKEN");
+
+    // An edit takes what differs from the copy: here, the URL only.
+    let edited = Transport::Http { url: "https://mcp.example.com/mcp?key=FIXTURE_NEW_TOKEN".into(), headers: [("X-Key".to_string(), EnvValue::literal("FIXTURE_HEADER_TOKEN"))].into(), sse: false };
+    let body = serde_json::to_vec(&edited).unwrap();
+    c.stdin = Some(Box::new(std::io::Cursor::new(body.clone())));
+    let (code, out, _) = go(&["mcp", "edit", "web", "--definition", "-", "--json"], &mut c);
+    assert_eq!(code, 0, "{out}");
+    let plan = json(&out);
+    assert_eq!(plan["actions"].as_array().unwrap().len(), 1, "{out}");
+    assert!(!out.contains("FIXTURE"), "the plan prints no value: {out}");
+    c.stdin = Some(Box::new(std::io::Cursor::new(body)));
+    let (code, out, err) = go(&["mcp", "edit", "web", "--definition", "-", "--apply", "--plan-id", plan["plan_id"].as_str().unwrap(), "--json"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(cursor(home.path())["mcpServers"]["web"]["url"], "https://mcp.example.com/mcp?key=FIXTURE_NEW_TOKEN");
+
+    // A definition that can't be read is named, not quoted.
+    c.stdin = Some(Box::new(std::io::Cursor::new("{FIXTURE_BROKEN")));
+    let (code, _, err) = go(&["mcp", "edit", "web", "--definition", "-"], &mut c);
+    assert_eq!(code, 2);
+    assert!(err.contains("can't be read") && !err.contains("FIXTURE"), "{err}");
+    let (code, _, _) = go(&["mcp", "edit", "web", "--definition", "-", "--url", "https://x"], &mut c);
+    assert_eq!(code, 2, "--definition goes alone");
+}
+
+#[test]
 fn sync_to_agents_alone_only_moves_into_agents() {
     let home = tempfile::tempdir().unwrap();
     let mut c = unsynced(home.path());

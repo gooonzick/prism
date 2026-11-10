@@ -1,7 +1,7 @@
 //! MCP changes as plans: what each request would write, file by file, shown before anything
 //! is written, then applied through the journal so undo can take it back.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -394,8 +394,39 @@ fn field_keys(changes: &[EditChange]) -> Vec<String> {
     keys
 }
 
+/// The edits that turn `old` into `new`: the fields that differ, unsets first (header names
+/// match without case, so a set before an unset of the same name would go with it).
+pub fn diff(old: &Transport, new: &Transport) -> Result<Vec<EditChange>, String> {
+    let values = |old: &BTreeMap<String, EnvValue>, new: &BTreeMap<String, EnvValue>, set: fn(String, EnvValue) -> EditChange, unset: fn(String) -> EditChange| {
+        let mut out: Vec<EditChange> = old.keys().filter(|k| !new.contains_key(*k)).map(|k| unset(k.clone())).collect();
+        out.extend(new.iter().filter(|(k, v)| old.get(*k) != Some(v)).map(|(k, v)| set(k.clone(), v.clone())));
+        out
+    };
+    let mut changes = Vec::new();
+    match (old, new) {
+        (Transport::Stdio { command, args, env, .. }, Transport::Stdio { command: c, args: a, env: e, .. }) => {
+            if c != command {
+                changes.push(EditChange::Command(c.clone()));
+            }
+            if a != args {
+                changes.push(EditChange::Args(a.clone()));
+            }
+            changes.extend(values(env, e, EditChange::SetEnv, EditChange::UnsetEnv));
+        }
+        (Transport::Http { url, headers, .. }, Transport::Http { url: u, headers: h, .. }) => {
+            if u != url {
+                changes.push(EditChange::Url(u.clone()));
+            }
+            changes.extend(values(headers, h, EditChange::SetHeader, EditChange::UnsetHeader));
+        }
+        (Transport::Stdio { .. }, _) => return Err("the server runs a command; the definition is a URL".into()),
+        (Transport::Http { .. }, _) => return Err("the server is a remote one; the definition is a command".into()),
+    }
+    Ok(changes)
+}
+
 /// The changes `changes` make to `t`. A change for the other kind of server is an error.
-fn edited(t: &Transport, changes: &[EditChange], name: &str) -> Result<Transport, String> {
+pub fn edited(t: &Transport, changes: &[EditChange], name: &str) -> Result<Transport, String> {
     let mut t = t.clone();
     for change in changes {
         match (&mut t, change) {

@@ -1547,3 +1547,148 @@ fn remote_mcp_add_writes_on_host() {
     assert_eq!(h.rt.state.notice.as_ref().unwrap().title, "Added fresh on box");
     assert!(!h.root.join(".claude.json").exists(), "nothing here");
 }
+
+impl Harness {
+    /// Host `box` at `home`, in view and loaded, its command lines recorded.
+    fn recorded_host(&mut self, home: &Path) -> Log {
+        let log: Log = std::sync::Arc::default();
+        let (home, record) = (home.to_path_buf(), log.clone());
+        self.with_host(std::sync::Arc::new(move |host: &crate::hosts::Host| {
+            let inner = crate::hosts::runner::local_runners(&[("box", &home)])(host);
+            Box::new(Recorded { inner, log: record.clone() }) as Box<dyn crate::hosts::runner::Runner>
+        }));
+        self.rt.update(|s, _| s.switch_env(Some("box")));
+        self.land_remote();
+        log
+    }
+}
+
+/// No command line the host ran holds `fixture`.
+fn argv_free_of(log: &Log, fixture: &str) {
+    for (argv, _) in log.lock().unwrap().iter() {
+        let line = argv.join(" ");
+        assert!(!line.contains(fixture), "a value in argv: {line}");
+    }
+}
+
+#[test]
+fn remote_mcp_tokens_in_urls_and_args_go_by_stdin() {
+    let mut h = Harness::project();
+    let remote = host_home(crate::hosts::install::VERSION);
+    let log = h.recorded_host(remote.path());
+    h.click("tab-mcp");
+
+    // Add: a token in an arg, and one in a URL.
+    h.click("mcp-add");
+    h.fill_form(|f| {
+        f.name = rune::TextEdit::new("cmd");
+        f.command = rune::TextEdit::new("npx -y cmd-mcp --api-key=FIXTURE_ARG_TOKEN");
+    });
+    h.click("mcp-add-save");
+    h.land_remote();
+    h.click("mcp-add");
+    h.fill_form(|f| {
+        f.name = rune::TextEdit::new("web");
+        f.http = true;
+        f.url = rune::TextEdit::new("https://mcp.example.com/mcp?key=FIXTURE_URL_TOKEN");
+    });
+    h.click("mcp-add-save");
+    h.land_remote();
+    let config = remote.path().join(".claude.json");
+    assert_eq!(json(&config)["mcpServers"]["cmd"]["args"][2], "--api-key=FIXTURE_ARG_TOKEN");
+    assert_eq!(json(&config)["mcpServers"]["web"]["url"], "https://mcp.example.com/mcp?key=FIXTURE_URL_TOKEN");
+
+    // Edit both: the new tokens go the same way.
+    for (row, edit) in [("cmd", "npx -y cmd-mcp --api-key=FIXTURE_ARG_NEW"), ("web", "https://mcp.example.com/mcp?key=FIXTURE_URL_NEW")] {
+        h.click(&format!("mcp-row-{row}"));
+        h.click("mcp-edit");
+        h.land_remote();
+        let text = edit.to_string();
+        h.fill_form(move |f| if f.http { f.url = rune::TextEdit::new(text) } else { f.command = rune::TextEdit::new(text) });
+        h.click("mcp-add-save");
+        h.land_remote();
+        h.click("mcp-apply");
+        h.land_remote();
+    }
+    assert_eq!(json(&config)["mcpServers"]["cmd"]["args"][2], "--api-key=FIXTURE_ARG_NEW");
+    assert_eq!(json(&config)["mcpServers"]["web"]["url"], "https://mcp.example.com/mcp?key=FIXTURE_URL_NEW");
+    argv_free_of(&log, "FIXTURE");
+    let stdin = log.lock().unwrap().iter().filter_map(|(_, d)| d.as_ref().map(|d| String::from_utf8_lossy(d).into_owned())).collect::<Vec<_>>().join("\n");
+    assert!(["FIXTURE_ARG_TOKEN", "FIXTURE_URL_TOKEN", "FIXTURE_ARG_NEW", "FIXTURE_URL_NEW"].iter().all(|t| stdin.contains(t)), "every value went on stdin");
+}
+
+#[test]
+fn remote_show_values_and_edit_both_read_the_server() {
+    let mut h = Harness::project();
+    let remote = host_home(crate::hosts::install::VERSION);
+    fs::write(remote.path().join(".claude.json"), r#"{"mcpServers":{"far-mcp":{"command":"far","env":{"TOKEN":"FIXTURE_HOST_SECRET"}}}}"#).unwrap();
+    h.with_host(crate::hosts::runner::local_runners(&[("box", remote.path())]));
+    h.rt.update(|s, _| s.switch_env(Some("box")));
+    h.land_remote();
+    h.click("tab-mcp");
+    h.click("mcp-row-far-mcp");
+    // The same `wire server` twice in a row, for two different uses: neither is dropped.
+    h.rt.update(|s, _| {
+        s.toggle_reveal("far-mcp");
+        s.open_mcp_edit("far-mcp");
+    });
+    h.land_remote();
+    assert!(h.rt.state.host_values.contains_key("far-mcp"), "Show values got the server");
+    assert!(h.rt.state.mcp_form.is_some(), "and so did Edit…");
+}
+
+/// A host that is a folder here, answering after a pause.
+struct Late(Box<dyn crate::hosts::runner::Runner>);
+
+impl crate::hosts::runner::Runner for Late {
+    fn prism(&self, args: &[String], stdin: Option<Vec<u8>>) -> Result<crate::hosts::runner::Output, String> {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        self.0.prism(args, stdin)
+    }
+    fn shell(&self, script: &str, stdin: Option<Vec<u8>>) -> Result<crate::hosts::runner::Output, String> {
+        self.0.shell(script, stdin)
+    }
+}
+
+#[test]
+fn an_answer_in_flight_is_dropped_when_the_machine_changes() {
+    let (mut h, remote) = on_host();
+    let home = remote.path().to_path_buf();
+    h.rt.update(move |s, _| {
+        s.make_runner = std::sync::Arc::new(move |host: &crate::hosts::Host| {
+            Box::new(Late(crate::hosts::runner::local_runners(&[("box", &home)])(host))) as Box<dyn crate::hosts::runner::Runner>
+        });
+    });
+    h.rt.update(|s, _| s.toggle_link("far", index_of("claude").unwrap()));
+    assert!(h.rt.state.host_act.is_pending(), "the link is in flight");
+    h.rt.update(|s, _| s.switch_env(None));
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    h.rt.update(|s, _| {
+        s.poll();
+    });
+    h.settle();
+    assert!(!h.rt.state.is_remote() && !h.rt.state.host_busy());
+    assert!(h.rt.state.notice.is_none(), "no toast about box on this machine");
+    assert!(h.rt.state.inv.get("review").is_some() && h.rt.state.inv.get("far").is_none(), "this machine's view stays");
+}
+
+#[test]
+fn remote_actions_in_a_host_project_name_it() {
+    let mut h = Harness::project();
+    let remote = host_home(crate::hosts::install::VERSION);
+    let site = fs::canonicalize(remote.path()).unwrap().join("work/site");
+    skill(&site.join(".agents/skills"), "page");
+    let log = h.recorded_host(remote.path());
+    let dir = site.clone();
+    h.rt.update(move |s, _| s.add_project(dir));
+    h.land_remote();
+    assert_eq!(h.rt.state.scope, Scope::Project(site.clone()));
+    h.click("skill-page");
+    h.land_remote();
+    h.click("link-claude");
+    h.land_remote();
+    assert!(fs::symlink_metadata(site.join(".claude/skills/page")).is_ok_and(|m| m.file_type().is_symlink()), "linked in the host's project");
+    assert!(fs::symlink_metadata(remote.path().join(".claude/skills/page")).is_err(), "not globally");
+    let project = format!("--project={}", site.display());
+    assert!(log.lock().unwrap().iter().any(|(argv, _)| argv.first().is_some_and(|w| w == "skills") && argv.contains(&project)), "the command names the project");
+}
