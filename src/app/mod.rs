@@ -367,7 +367,7 @@ impl App {
             changed = true;
         }
         if let Some((title, detail, failed)) = self.cli_tool.take() {
-            self.notify(title, detail, failed);
+            self.notify(self.here(title), detail, failed);
             changed = true;
         }
         if let Some(answer) = self.remote_load.take() {

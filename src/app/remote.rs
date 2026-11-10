@@ -143,12 +143,17 @@ impl App {
         });
     }
 
+    /// A toast's title about this machine: while a host is in view, it says which machine.
+    pub(super) fn here(&self, title: String) -> String {
+        if self.is_remote() { format!("{title} on {}", crate::hosts::copy::this_machine()) } else { title }
+    }
+
     pub(super) fn finish_install(&mut self, skills: Vec<String>, result: Result<String, String>) {
         let Some(job) = self.installing.take() else { return };
         let ok = result.is_ok();
         self.install_log = Some(result);
         if !ok {
-            self.notify(format!("Installing {} failed", job.label), "The log is in the details pane".into(), true);
+            self.notify(self.here(format!("Installing {} failed", job.label)), "The log is in the details pane".into(), true);
             return;
         }
         let (paths, settings) = (self.local_paths().clone(), self.local_settings().clone());
@@ -157,7 +162,7 @@ impl App {
             Ok(n) => format!("Into {} · {} link{}", sync::label::scope(&job.scope, &paths), n, if n == 1 { "" } else { "s" }),
             Err(e) => e,
         };
-        self.notify(format!("Installed {}", job.label), detail, false);
+        self.notify(self.here(format!("Installed {}", job.label)), detail, false);
         if self.is_remote() {
             // This machine is looked at again on the way back.
             return;
@@ -204,7 +209,8 @@ impl App {
             Ok(names) => {
                 self.updates.insert(scope, names);
             }
-            Err(e) if scope == self.scope => self.notify("Couldn't check for updates".into(), e, true),
+            // This machine's scope: while a host is in view, the one installs go to.
+            Err(e) if scope == *self.local_scope() => self.notify(self.here("Couldn't check for updates".into()), e, true),
             Err(_) => {}
         }
     }
@@ -235,12 +241,54 @@ impl App {
                     v.retain(|n| !job.skills.contains(n));
                 }
                 let what = if job.skills.len() == 1 { job.skills[0].clone() } else { format!("{} skills", job.skills.len()) };
-                self.notify(format!("Updated {what}"), String::new(), false);
+                self.notify(self.here(format!("Updated {what}")), String::new(), false);
             }
-            Err(e) => self.notify("Update failed".into(), e.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").to_string(), true),
+            Err(e) => self.notify(self.here("Update failed".into()), e.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").to_string(), true),
         }
-        if job.scope == self.scope {
+        // A host in view has none of this machine's skills to look at again.
+        if job.scope == self.scope && !self.is_remote() {
             self.rescan();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::Paths;
+    use crate::app::{Install, RemoteState};
+    use crate::hosts::Host;
+    use crate::hosts::copy::this_machine;
+    use crate::store::Settings;
+
+    /// A window with host `box` in view, reaching nothing.
+    fn on_box(home: &std::path::Path) -> App {
+        let mut app = App::new(Paths::isolated(home), Settings::default());
+        app.show_remote(Host { name: "box".into(), ssh: "me@box".into() }, Err(RemoteState::Unreachable("down".into())));
+        assert!(app.is_remote());
+        app
+    }
+
+    #[test]
+    fn toasts_about_this_machine_name_it_while_a_host_is_in_view() {
+        let home = tempfile::tempdir().unwrap();
+        let mut app = on_box(home.path());
+        let here = this_machine();
+        app.installing = Some(Install { label: "pdf".into(), scope: Scope::Global });
+        app.finish_install(vec![], Err("npx failed".into()));
+        assert_eq!(app.notice.as_ref().unwrap().title, format!("Installing pdf failed on {here}"));
+        app.installing = Some(Install { label: "pdf".into(), scope: Scope::Global });
+        app.finish_install(vec![], Ok(String::new()));
+        assert_eq!(app.notice.as_ref().unwrap().title, format!("Installed pdf on {here}"));
+        app.finish_update(UpdateJob { scope: Scope::Global, skills: vec!["pdf".into()] }, Ok(String::new()));
+        assert_eq!(app.notice.as_ref().unwrap().title, format!("Updated pdf on {here}"));
+        app.land_update_check(Scope::Global, Err("no node".into()));
+        assert_eq!(app.notice.as_ref().unwrap().title, format!("Couldn't check for updates on {here}"));
+
+        // With this machine in view, they say nothing more.
+        app.switch_env(None);
+        app.installing = Some(Install { label: "pdf".into(), scope: Scope::Global });
+        app.finish_install(vec![], Ok(String::new()));
+        assert_eq!(app.notice.as_ref().unwrap().title, "Installed pdf");
     }
 }
