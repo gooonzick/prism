@@ -3,9 +3,9 @@
 //! shows one field.
 
 use rune::{Color, El, ScrollSpec, Tx, col, icon, row, text};
-use rune_kit::{Button, ButtonVariant, Checkbox, ControlSize, Dialog, IconButton, IconButtonVariant, Kit, RadioItem, TextInput, glyphs};
+use rune_kit::{Button, ButtonVariant, Checkbox, ControlSize, Dialog, IconButton, IconButtonVariant, Kit, RadioItem, Spinner, TextInput, glyphs};
 
-use super::heading;
+use super::{heading, row_gap};
 use crate::agents::tilde;
 use crate::app::{App, McpChange, McpForm};
 use crate::mcp::agents::{Flavor, MCP_AGENTS};
@@ -358,24 +358,37 @@ fn picks(s: &App, change: &McpChange, k: &Kit) -> Option<El> {
     Some(c)
 }
 
-/// The plan, as the CLI prints it: its lines, the skipped agents and the heads-ups.
+/// The plan, as the CLI prints it: its lines, the skipped agents and the heads-ups. On a host,
+/// the plan the host made, once it is in.
 fn plan_view(s: &App, k: &Kit) -> (El, usize) {
     let d = s.mcp_dialog.as_ref().expect("the plan dialog is open");
-    let mut c = col().key("mcp-plan").w_full().gap(8.0);
-    let plan = match &d.plan {
-        None => return (c.child(heading("Changes", k)).child(note("Pick the copy to copy from.", k)), 0),
-        Some(Err(e)) => return (c.child(heading("Changes", k)).child(flagged(cross(k.c.danger.icon), e.clone(), k)), 0),
-        Some(Ok(plan)) => plan,
+    let c = col().key("mcp-plan").w_full().gap(8.0);
+    let failed = |c: El, e: &String| (c.child(heading("Changes", k)).child(flagged(cross(k.c.danger.icon), e.clone(), k)), 0);
+    let (view, n) = match (&d.plan, &d.host_plan) {
+        (_, Some(host)) => match &host.view {
+            None => {
+                let asking = format!("Asking {} for the plan…", s.env_label());
+                return (c.child(heading("Changes", k)).child(row_gap().child(Spinner::new().build(k)).child(text(asking).font(k.ty.small).color(k.c.text_muted))), 0);
+            }
+            Some(Err(e)) => return failed(c, e),
+            // The host's lines already join agents, so they are the count.
+            Some(Ok(view)) => (view.clone(), view.lines.len()),
+        },
+        (None, None) => return (c.child(heading("Changes", k)).child(note("Pick the copy to copy from.", k)), 0),
+        (Some(Err(e)), None) => return failed(c, e),
+        // Lines for several agents share one, so the count is the plan's actions, not the lines.
+        (Some(Ok(plan)), None) => (PlanView::from((plan, &s.paths)), plan.actions.len()),
     };
-    let view = PlanView::from((plan, &s.paths));
-    // Lines for several agents share one, so the count is the plan's actions, not the lines.
-    let n = plan.actions.len();
+    (lines(c, view, n, k), n)
+}
+
+/// A plan's lines under their count, then what it skips and the heads-ups.
+fn lines(mut c: El, view: PlanView, n: usize, k: &Kit) -> El {
     c = c.child(heading(&if n == 0 { "Changes".to_string() } else { format!("{n} change{}", if n == 1 { "" } else { "s" }) }, k));
-    let lines = view.lines;
-    if lines.is_empty() {
+    if view.lines.is_empty() {
         c = c.child(note("Nothing to do.", k));
     }
-    for (i, line) in lines.into_iter().enumerate() {
+    for (i, line) in view.lines.into_iter().enumerate() {
         c = c.child(text(line).key(format!("mcp-plan-{i}")).font(k.ty.ui).color(k.c.text_base).wrap());
     }
     if !view.skipped.is_empty() {
@@ -390,7 +403,7 @@ fn plan_view(s: &App, k: &Kit) -> (El, usize) {
             c = c.child(flagged(spot(k.c.info.icon), w, k));
         }
     }
-    (c, n)
+    c
 }
 
 fn plan_title(change: &McpChange) -> String {
@@ -418,19 +431,19 @@ pub fn plan(s: &App, k: &Kit, layer: &mut Vec<El>) {
         None => changes,
     });
     let danger = matches!(d.change, McpChange::Remove { .. });
+    let apply = if d.host_plan.as_ref().is_some_and(|p| p.applying) {
+        Button::new("Applying…").variant(ButtonVariant::Loading).disabled(true)
+    } else {
+        Button::new(if n == 0 { "Nothing to do".to_string() } else { format!("Apply {n} change{}", if n == 1 { "" } else { "s" }) })
+            .variant(if danger { ButtonVariant::Danger } else { ButtonVariant::Contrast })
+            .disabled(n == 0)
+    };
     let buttons = row()
         .w_full()
         .gap(8.0)
         .justify_end()
         .child(Button::new("Cancel").variant(ButtonVariant::Ghost).on_press(|s: &mut App| s.close_mcp_dialog()).build(k).key("mcp-cancel"))
-        .child(
-            Button::new(if n == 0 { "Nothing to do".to_string() } else { format!("Apply {n} change{}", if n == 1 { "" } else { "s" }) })
-                .variant(if danger { ButtonVariant::Danger } else { ButtonVariant::Contrast })
-                .disabled(n == 0)
-                .on_press(|s: &mut App| s.apply_mcp_plan())
-                .build(k)
-                .key("mcp-apply"),
-        );
+        .child(apply.on_press(|s: &mut App| s.apply_mcp_plan()).build(k).key("mcp-apply"));
     Dialog::new("mcp-plan", plan_title(&d.change))
         .width(if picks_shown(&d.change) { 760.0 } else { 560.0 })
         .fit()

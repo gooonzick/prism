@@ -156,7 +156,7 @@ prism skills sync --apply --plan-id 3f9c2a1b7d40
 prism undo                                # takes back the last change, from here or the app
 ```
 
-Add `--json` to any command for output a script or an agent can read. Secrets print as `***` unless you ask for `--show-secrets`; pass them in with `KEY=@file` or `KEY=-` (stdin) to keep them out of your shell history.
+Add `--json` to any command for output a script or an agent can read. Secrets print as `***` unless you ask for `--show-secrets`; pass them in with `KEY=@file` or `KEY=-` (stdin) to keep them out of your shell history. Several `KEY=-` share stdin, their values apart by NUL bytes (`--env` ones first, then `--header` ones).
 
 ### Other machines
 

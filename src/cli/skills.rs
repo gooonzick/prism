@@ -39,7 +39,8 @@ pub enum Cmd {
     Sync {
         /// Only these skills (default: all).
         names: Vec<String>,
-        /// Link into these agents instead of the targets.
+        /// Link into these agents instead of the targets; `agents` alone only moves the skills
+        /// into .agents.
         #[arg(long, value_name = "AGENT", num_args = 1..)]
         to: Vec<String>,
         #[command(flatten)]
@@ -336,7 +337,9 @@ fn run_local(cmd: Cmd, ctx: &Ctx, scope: &Scope, out: &mut Out, err: &mut dyn Wr
         Cmd::Show { name } => show(&inv, &name, scope, out, err),
         Cmd::New { name, description } => new_skill(ctx, scope, &inv, &name, &description, out, err),
         Cmd::Sync { names, to, apply } => {
-            let targets = if to.is_empty() { Ok(ctx.targets()) } else { to.iter().map(|t| agent_index(t)).collect::<Result<Vec<_>, _>>() };
+            // `.agents` is no agent to link into, but as the only one it asks for the move alone.
+            let target = |t: &String| if t == AGENTS[CANONICAL].id { Ok(CANONICAL) } else { agent_index(t) };
+            let targets = if to.is_empty() { Ok(ctx.targets()) } else { to.iter().map(target).collect::<Result<Vec<_>, _>>() };
             let targets = match targets {
                 Ok(t) => t,
                 Err(e) => return usage(err, &e),

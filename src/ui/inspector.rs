@@ -59,7 +59,7 @@ fn update_banner(s: &App, name: &str, k: &Kit) -> El {
 
 /// Open, reveal and copy on the left; the destructive action apart from them on the right.
 fn actions(s: &App, skill: &Skill, k: &Kit) -> El {
-    // A host's files aren't on this machine, and changes on a host come later.
+    // A host's files aren't on this machine: nothing here opens or reveals them.
     let remote = s.is_remote();
     let small = |label: &str| Button::new(label).variant(ButtonVariant::Outline).control_size(ControlSize::Small);
     // Looking for the file reads the disk: a host's folder isn't on this machine.
@@ -96,7 +96,6 @@ fn actions(s: &App, skill: &Skill, k: &Kit) -> El {
         left = left.child(
             small("Copy to…")
                 .help("Copy this skill into another scope")
-                .disabled(remote)
                 .on_press(move |s: &mut App| s.open_copy(vec![copy.clone()]))
                 .build(k)
                 .key("copy"),
@@ -106,7 +105,6 @@ fn actions(s: &App, skill: &Skill, k: &Kit) -> El {
         Button::new("Remove…")
             .variant(ButtonVariant::Danger)
             .control_size(ControlSize::Small)
-            .disabled(remote)
             .on_press(move |s: &mut App| s.confirm_remove = Some(vec![remove.clone()]))
             .build(k)
             .key("remove"),
@@ -166,7 +164,6 @@ fn placement_row(s: &App, skill: &Skill, a: usize, k: &Kit) -> El {
         .child(text(format!("{} · {status}", agent.dir_label(&s.inv.scope, &s.paths))).font(k.ty.caption()).color(k.c.text_faint).truncate());
 
     let name = skill.name.clone();
-    let remote = s.is_remote();
     let control: El = if a == CANONICAL {
         if p.present() || matches!(p, Placement::Broken(_)) {
             row()
@@ -175,7 +172,6 @@ fn placement_row(s: &App, skill: &Skill, a: usize, k: &Kit) -> El {
                 .variant(ButtonVariant::Outline)
                 .control_size(ControlSize::Small)
                 .help("Move the agent's copy into .agents and leave a link behind")
-                .disabled(remote)
                 .on_press(move |s: &mut App| s.replace_with_link(&name, CANONICAL))
                 .build(k)
                 .key("adopt")
@@ -192,7 +188,6 @@ fn placement_row(s: &App, skill: &Skill, a: usize, k: &Kit) -> El {
                     .variant(ButtonVariant::Outline)
                     .control_size(ControlSize::Small)
                     .help("Replace this copy with a link to .agents; the copy goes to the trash")
-                    .disabled(remote)
                     .on_press(move |s: &mut App| s.replace_with_link(&name, a))
                     .build(k),
             )
@@ -201,7 +196,6 @@ fn placement_row(s: &App, skill: &Skill, a: usize, k: &Kit) -> El {
                     .variant(IconButtonVariant::GhostMuted)
                     .label("Move this copy to the trash")
                     .help("Move this copy to the trash")
-                    .disabled(remote)
                     .on_press(move |s: &mut App| s.trash_copy(&other, a))
                     .build(k),
             )
@@ -213,7 +207,6 @@ fn placement_row(s: &App, skill: &Skill, a: usize, k: &Kit) -> El {
         switch
             .label(format!("Link {} into {}", skill.name, agent.name))
             .hide_label()
-            .disabled(remote)
             .on_toggle(move |s: &mut App| s.toggle_link(&name, a))
             .build(k)
             .key(format!("link-{}", agent.id))

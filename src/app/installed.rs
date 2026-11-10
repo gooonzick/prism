@@ -169,9 +169,6 @@ impl App {
     }
 
     pub fn confirm_remove_checked(&mut self) {
-        if self.is_remote() {
-            return;
-        }
         if !self.checked.is_empty() {
             self.confirm_remove = Some(self.checked.clone());
         }
@@ -182,7 +179,7 @@ impl App {
     /// Links or unlinks `skill` for `agent`, from its switch.
     pub fn toggle_link(&mut self, skill: &str, agent: usize) {
         if self.is_remote() {
-            return;
+            return self.host_toggle_link(skill, agent);
         }
         let Some(s) = self.inv.get(skill) else { return };
         let mut j = self.new_journal();
@@ -197,15 +194,14 @@ impl App {
                 Err(format!("{} has its own folder; use \"Use link\" or move it to the trash", AGENTS[agent].name)),
             ),
         };
-        let mut chars = label.chars();
-        let title = chars.next().map(|c| c.to_uppercase().chain(chars).collect::<String>()).unwrap_or_default();
+        let title = sentence(&label);
         self.changed(label, j, result.map(|_| title));
     }
 
     /// Replaces `agent`'s own copy with a link to `.agents` (adopting it if `.agents` lacks it).
     pub fn replace_with_link(&mut self, skill: &str, agent: usize) {
         if self.is_remote() {
-            return;
+            return self.host_replace_with_link(skill, agent);
         }
         let plan = sync::plan_one(&self.inv, skill, &[agent], &self.paths);
         let mut j = self.new_journal();
@@ -218,7 +214,7 @@ impl App {
 
     pub fn trash_copy(&mut self, skill: &str, agent: usize) {
         if self.is_remote() {
-            return;
+            return self.host_trash_copy(skill, agent);
         }
         let mut j = self.new_journal();
         let result = sync::trash_copy(&self.scope, &self.paths, skill, agent, &mut j)
@@ -228,10 +224,11 @@ impl App {
 
     /// Removes every skill in `names`, going on past failures.
     pub fn remove(&mut self, names: &[String]) {
-        if self.is_remote() {
-            return;
-        }
         self.confirm_remove = None;
+        if self.is_remote() {
+            self.checked.retain(|n| !names.contains(n));
+            return self.host_remove(names);
+        }
         let mut j = self.new_journal();
         let mut failed = Vec::new();
         for name in names {
@@ -250,14 +247,14 @@ impl App {
     }
 
     pub fn remove_broken(&mut self) {
-        if self.is_remote() {
-            return;
-        }
-        let mut j = self.new_journal();
-        let result = sync::remove_broken(&self.inv, &self.paths, &mut j).map(|n| format!("Removed {}", plural(n, "broken link", "broken links")));
         if self.status_filter == Filter::Broken {
             self.status_filter = Filter::All;
         }
+        if self.is_remote() {
+            return self.host_remove_broken();
+        }
+        let mut j = self.new_journal();
+        let result = sync::remove_broken(&self.inv, &self.paths, &mut j).map(|n| format!("Removed {}", plural(n, "broken link", "broken links")));
         self.changed(sync::label::BROKEN.into(), j, result);
     }
 
@@ -275,7 +272,7 @@ impl App {
 
     fn open_sync_for(&mut self, only: Option<Vec<String>>) {
         if self.is_remote() {
-            return;
+            return self.host_open_sync(only);
         }
         self.rescan();
         let targets = self.targets();
@@ -288,12 +285,18 @@ impl App {
 
     pub fn close_sync(&mut self) {
         self.sync_plan = None;
+        self.sync_host = None;
         self.sync_only = None;
+    }
+
+    /// The sync dialog is open, with this machine's plan or a host's.
+    pub fn sync_open(&self) -> bool {
+        self.sync_plan.is_some() || self.sync_host.is_some()
     }
 
     pub fn toggle_target(&mut self, agent: usize) {
         if self.is_remote() {
-            return;
+            return self.host_toggle_target(agent);
         }
         let paths = self.paths.clone();
         self.edit_settings(|s| {
@@ -315,7 +318,7 @@ impl App {
 
     pub fn apply_sync(&mut self) {
         if self.is_remote() {
-            return;
+            return self.host_apply_sync();
         }
         let Some(plan) = self.sync_plan.take() else { return };
         let only = self.sync_only.take();
@@ -333,19 +336,16 @@ impl App {
     // Copying to another scope.
 
     pub fn open_copy(&mut self, names: Vec<String>) {
-        if self.is_remote() {
-            return;
-        }
         if !names.is_empty() {
             self.copy_dialog = Some(names);
         }
     }
 
     pub fn copy_to(&mut self, dest: Scope) {
-        if self.is_remote() {
-            return;
-        }
         let Some(names) = self.copy_dialog.take() else { return };
+        if self.is_remote() {
+            return self.host_copy_to(names, &dest);
+        }
         let targets = self.targets();
         let mut j = self.new_journal();
         let mut failed = Vec::new();
@@ -368,9 +368,6 @@ impl App {
     // A new skill.
 
     pub fn open_new_skill(&mut self) {
-        if self.is_remote() {
-            return;
-        }
         let mut name = TextEdit::new("");
         name.focused = true;
         self.new_skill = Some(NewSkill { name, description: TextEdit::new(""), error: None });
@@ -379,7 +376,7 @@ impl App {
     /// Writes `.agents/skills/<name>/SKILL.md`, links it into the targets and opens it.
     pub fn create_skill(&mut self) {
         if self.is_remote() {
-            return;
+            return self.host_create_skill();
         }
         let Some(form) = &mut self.new_skill else { return };
         let name = form.name.text.trim().to_string();
@@ -408,6 +405,12 @@ impl App {
         self.select(&name);
         open_path(&dir.join("SKILL.md"));
     }
+}
+
+/// `label` as a toast's title: its first letter capitalised.
+pub(super) fn sentence(label: &str) -> String {
+    let mut chars = label.chars();
+    chars.next().map(|c| c.to_uppercase().chain(chars).collect::<String>()).unwrap_or_default()
 }
 
 /// Opens a file or folder with its default app.

@@ -171,7 +171,7 @@ fn answer(out: Output, label: &str) -> Result<Value, String> {
 }
 
 /// The JSON on stdout, past anything a remote shell's startup files printed before it.
-fn parse(stdout: &[u8]) -> Option<Value> {
+pub(crate) fn parse(stdout: &[u8]) -> Option<Value> {
     let text = String::from_utf8_lossy(stdout);
     if let Ok(v) = serde_json::from_str(&text) {
         return Some(v);
@@ -181,7 +181,7 @@ fn parse(stdout: &[u8]) -> Option<Value> {
 }
 
 /// The last thing a failed command said.
-fn why(out: &Output) -> String {
+pub(crate) fn why(out: &Output) -> String {
     out.stderr.lines().map(str::trim).rfind(|l| !l.is_empty()).map_or_else(|| format!("prism exited with {}", out.code), String::from)
 }
 

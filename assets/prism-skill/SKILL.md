@@ -22,7 +22,7 @@ Use `prism` instead of editing `~/.claude.json`, `~/.cursor/mcp.json`, `~/.codex
 1. Add `--json` to every command and read stdout.
 2. `projects add`, `projects remove`, `targets set`, `skills new`, `skills install`, `skills update` and `mcp add` act at once, without a plan. Confirm with the user first.
 3. Every other command that changes or removes something prints a plan and changes nothing. Read the plan, tell the user what it does, then run the same command with `--apply --plan-id <plan_id>`. Exit 4 means the files changed since the plan: read the new plan and confirm again.
-4. Pass secrets with `KEY=@file` (read from a file) or `KEY=-` (read from stdin), never inline. `'KEY=${VAR}'` writes a reference the agent expands. Never print or echo secret values.
+4. Pass secrets with `KEY=@file` (read from a file) or `KEY=-` (read from stdin), never inline. Several `KEY=-` share stdin, values separated by NUL bytes (`--env` ones, then `--header` ones). `'KEY=${VAR}'` writes a reference the agent expands. Never print or echo secret values.
 5. Env and header values print as `***`. Run `prism mcp show NAME --show-secrets` only when the user asks to see them.
 6. `prism undo` reverts the last change, made from the command line or the Prism window.
 7. Commands work on the global setup (the home folder). `--project DIR` works on that project instead.

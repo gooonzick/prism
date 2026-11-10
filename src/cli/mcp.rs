@@ -40,7 +40,8 @@ pub enum Cmd {
         /// An argument for the program (repeat for more).
         #[arg(long = "arg", value_name = "A", allow_hyphen_values = true, requires = "command")]
         args: Vec<String>,
-        /// `KEY=VALUE`, `KEY=@file`, `KEY=-` (stdin) or `KEY=${VAR}`.
+        /// `KEY=VALUE`, `KEY=@file`, `KEY=-` (stdin) or `KEY=${VAR}`. Several `KEY=-` read one
+        /// stdin, their values apart by NUL bytes: the env ones, then the header ones.
         #[arg(long, value_name = "K=V", requires = "command")]
         env: Vec<String>,
         /// The address of a remote server.
@@ -107,6 +108,10 @@ pub enum Cmd {
         /// Replaces the arguments (repeat for more).
         #[arg(long = "arg", value_name = "A", allow_hyphen_values = true)]
         args: Vec<String>,
+        /// Removes every argument.
+        #[arg(long, conflicts_with = "args")]
+        no_args: bool,
+        /// `KEY=VALUE`, `KEY=@file`, `KEY=-` (stdin) or `KEY=${VAR}`, as for `add`.
         #[arg(long, value_name = "K=V")]
         env: Vec<String>,
         #[arg(long, value_name = "KEY")]
@@ -158,7 +163,7 @@ pub fn run(cmd: Cmd, ctx: &mut Ctx, scope: &Scope, out: &mut Out, err: &mut dyn 
         Cmd::Show { name, show_secrets } => return show(ctx, scope, &name, show_secrets, out, err),
         Cmd::Add { name, command, args, env, url, header, to, claude_scope } => {
             let built = (|| {
-                let mut values = Values::new(ctx);
+                let mut values = Values::new(ctx, &[&env, &header]);
                 let transport = match (command, url) {
                     (Some(command), _) => Transport::Stdio { command, args, env: values.pairs("--env", &env)?, cwd: None },
                     (None, Some(url)) => Transport::Http { url, headers: values.pairs("--header", &header)?, sse: false },
@@ -192,21 +197,23 @@ pub fn run(cmd: Cmd, ctx: &mut Ctx, scope: &Scope, out: &mut Out, err: &mut dyn 
                 Err(e) => return usage(err, &e),
             }
         }
-        Cmd::Edit { name, command, args, env, unset_env, url, header, unset_header, apply } => {
+        Cmd::Edit { name, command, args, no_args, env, unset_env, url, header, unset_header, apply } => {
             let built = (|| {
-                let mut values = Values::new(ctx);
+                let mut values = Values::new(ctx, &[&env, &header]);
                 let mut changes = Vec::new();
                 changes.extend(command.map(EditChange::Command));
-                if !args.is_empty() {
+                if !args.is_empty() || no_args {
                     changes.push(EditChange::Args(args));
                 }
-                changes.extend(values.pairs("--env", &env)?.into_iter().map(|(k, v)| EditChange::SetEnv(k, v)));
+                // Unsets first: header names match without case, so `authorization` set before
+                // `Authorization` is unset would go with it.
                 changes.extend(unset_env.into_iter().map(EditChange::UnsetEnv));
+                changes.extend(values.pairs("--env", &env)?.into_iter().map(|(k, v)| EditChange::SetEnv(k, v)));
                 changes.extend(url.map(EditChange::Url));
-                changes.extend(values.pairs("--header", &header)?.into_iter().map(|(k, v)| EditChange::SetHeader(k, v)));
                 changes.extend(unset_header.into_iter().map(EditChange::UnsetHeader));
+                changes.extend(values.pairs("--header", &header)?.into_iter().map(|(k, v)| EditChange::SetHeader(k, v)));
                 if changes.is_empty() {
-                    return Err("nothing to change: give --command, --arg, --env, --url, --header, --unset-env or --unset-header".to_string());
+                    return Err("nothing to change: give --command, --arg, --no-args, --env, --url, --header, --unset-env or --unset-header".to_string());
                 }
                 Ok(Request::Edit { name: name.clone(), changes })
             })();
@@ -327,14 +334,23 @@ fn agent_indices(ids: &[String]) -> Result<Vec<usize>, String> {
 
 /// Turns `KEY=VALUE` arguments into env or header values. Errors name the key or the file,
 /// never a value: the value may be a secret.
+///
+/// `KEY=-` takes its value from stdin, read as typed (`${VAR}` there is a reference too). One
+/// such argument takes all of stdin; several share it, their values apart by NUL bytes (no env
+/// or header value can hold one), in the order they are read: `--env` ones, then `--header`
+/// ones, each in command-line order. Each value loses one trailing newline.
 struct Values<'a> {
     ctx: &'a mut Ctx,
-    stdin_used: bool,
+    /// How many `KEY=-` arguments there are.
+    dashes: usize,
+    /// The stdin values not yet taken, once stdin is read.
+    stdin: Option<std::vec::IntoIter<String>>,
 }
 
 impl<'a> Values<'a> {
-    fn new(ctx: &'a mut Ctx) -> Self {
-        Values { ctx, stdin_used: false }
+    fn new(ctx: &'a mut Ctx, lists: &[&[String]]) -> Self {
+        let dashes = lists.iter().flat_map(|l| l.iter()).filter(|a| a.split_once('=').is_some_and(|(k, v)| !k.is_empty() && v == "-")).count();
+        Values { ctx, dashes, stdin: None }
     }
 
     fn pairs(&mut self, flag: &str, args: &[String]) -> Result<BTreeMap<String, EnvValue>, String> {
@@ -351,11 +367,18 @@ impl<'a> Values<'a> {
 
     fn value(&mut self, flag: &str, key: &str, v: &str) -> Result<EnvValue, String> {
         if v == "-" {
-            if std::mem::replace(&mut self.stdin_used, true) {
-                return Err(format!("{flag} {key}=-: stdin can be read only once"));
+            if self.stdin.is_none() {
+                let mut reader = self.ctx.stdin.take().unwrap_or_else(|| Box::new(std::io::stdin()));
+                let mut text = String::new();
+                reader.read_to_string(&mut text).map_err(|_| format!("{flag} {key}=-: could not read stdin as text"))?;
+                let values: Vec<String> = if self.dashes > 1 { text.split('\0').map(|t| trim_newline(t).to_string()).collect() } else { vec![trim_newline(&text).to_string()] };
+                if values.len() != self.dashes {
+                    return Err(format!("stdin holds {} values for {} KEY=- arguments; separate them with NUL bytes", values.len(), self.dashes));
+                }
+                self.stdin = Some(values.into_iter());
             }
-            let mut reader = self.ctx.stdin.take().unwrap_or_else(|| Box::new(std::io::stdin()));
-            return read_text(&mut reader).map(|t| EnvValue::literal(&t)).map_err(|_| format!("{flag} {key}=-: could not read stdin as text"));
+            let text = self.stdin.as_mut().and_then(Iterator::next).ok_or_else(|| format!("{flag} {key}=-: stdin has no value left"))?;
+            return Ok(EnvValue::parse(&text));
         }
         if let Some(path) = v.strip_prefix('@') {
             let text = std::fs::read(path).ok().and_then(|b| String::from_utf8(b).ok());
@@ -363,12 +386,6 @@ impl<'a> Values<'a> {
         }
         Ok(EnvValue::parse(v))
     }
-}
-
-fn read_text(r: &mut dyn Read) -> std::io::Result<String> {
-    let mut text = String::new();
-    r.read_to_string(&mut text)?;
-    Ok(trim_newline(&text).to_string())
 }
 
 /// Files and stdin end in a newline the value doesn't have.

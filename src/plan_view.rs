@@ -43,7 +43,6 @@ impl From<(&McpPlan, &Paths)> for PlanView {
 impl PlanView {
     /// The plan JSON of the skills and mcp commands: `actions`, `conflicts` (skills) or
     /// `skipped` (mcp), `warnings`, `plan_id`.
-    #[allow(dead_code)] // read by the remote-host dialogs
     pub fn from_json(v: &Value) -> Result<PlanView, String> {
         let strings = |key: &str| -> Result<Vec<String>, String> {
             match v.get(key) {

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use rune::TextEdit;
 
-use super::App;
+use super::{App, HostPlan};
 use crate::agents::AGENTS;
 use crate::mcp::agents::{Flavor, MCP_AGENTS, index_of};
 use crate::mcp::model::{EnvValue, Place, Server, Transport, masked_args, masked_url};
@@ -244,7 +244,7 @@ impl McpChange {
     }
 
     /// The toast once it is done.
-    fn done(&self) -> String {
+    pub(super) fn done(&self) -> String {
         match self {
             McpChange::Copy { name, .. } => format!("Copied {name}"),
             McpChange::Edit { name, .. } => format!("Edited {name}"),
@@ -261,6 +261,8 @@ pub struct McpDialog {
     pub change: McpChange,
     /// `None` while the plan waits for a pick (a copy's source); `Err` when the planner refused.
     pub plan: Option<Result<McpPlan, String>>,
+    /// The plan on a host: made there, `None` while the plan waits for a pick.
+    pub host_plan: Option<HostPlan>,
     /// Why the plan shown is not the one first shown.
     pub notice: Option<String>,
 }
@@ -294,9 +296,6 @@ impl App {
     // The Add and Edit dialog.
 
     pub fn open_mcp_add(&mut self) {
-        if self.is_remote() {
-            return;
-        }
         let mut name = TextEdit::new("");
         name.focused = true;
         self.mcp_form = Some(McpForm {
@@ -316,12 +315,18 @@ impl App {
         });
     }
 
-    /// The Add dialog filled from the server's first editable copy; values stay masked.
+    /// The Add dialog filled from the server's first editable copy; values stay masked. A host's
+    /// values come masked in its state, so its form waits for the server as written there.
     pub fn open_mcp_edit(&mut self, name: &str) {
         if self.is_remote() {
-            return;
+            return self.host_open_mcp_edit(name);
         }
-        let Some(copy) = self.mcp.get(name).and_then(|s| s.copies.iter().find(|c| c.read_only.is_none())) else { return };
+        let Some(server) = self.mcp.get(name).cloned() else { return };
+        self.fill_mcp_edit(name, &server);
+    }
+
+    pub(super) fn fill_mcp_edit(&mut self, name: &str, server: &McpServer) {
+        let Some(copy) = server.copies.iter().find(|c| c.read_only.is_none()) else { return };
         let t = copy.server.transport.clone();
         let pairs = |m: &BTreeMap<String, EnvValue>| m.iter().map(|(k, v)| McpPair::new(k, &v.written())).collect::<Vec<_>>();
         let (http, command, url, line_secret, env, headers) = match &t {
@@ -403,9 +408,7 @@ impl App {
 
     /// Add writes at once, as in the CLI; Edit shows its plan first.
     pub fn save_mcp_form(&mut self) {
-        if self.is_remote() {
-            return;
-        }
+        let remote = self.is_remote();
         let Some(form) = &mut self.mcp_form else { return };
         form.error = None;
         if let Some((name, old)) = &form.editing {
@@ -438,6 +441,11 @@ impl App {
                 return;
             }
         };
+        if remote {
+            form.error = None;
+            let (agents, claude_scope) = (form.agents.clone(), form.claude_scope);
+            return self.host_add_mcp(name, transport, &agents, claude_scope);
+        }
         let request = Request::Add { server: Server { name: name.clone(), transport }, to: form.agents.clone(), claude_scope: form.claude_scope };
         let planned = plan::plan(&self.mcp, &request, &self.paths);
         let Some(form) = &mut self.mcp_form else { return };
@@ -458,6 +466,7 @@ impl App {
     /// Writes a planned Add and reports it. A file that changed since the plan keeps the form
     /// open, before the last change's backups go.
     pub fn write_mcp_add(&mut self, name: &str, plan: McpPlan) {
+        // A plan made here names this machine's files; a host adds through its own CLI.
         if self.is_remote() {
             return;
         }
@@ -484,9 +493,6 @@ impl App {
 
     /// Copies to the agents without a copy; when the copies differ, waits for a source.
     pub fn open_mcp_copy(&mut self, name: &str) {
-        if self.is_remote() {
-            return;
-        }
         let Some(s) = self.mcp.get(name) else { return };
         let to = self.mcp_defaults().into_iter().filter(|a| !s.copies.iter().any(|c| c.agent == *a)).collect();
         self.open_mcp_plan(McpChange::Copy { name: name.into(), to, from: None });
@@ -494,9 +500,6 @@ impl App {
 
     /// Removes from every agent with a copy here, unless some are unticked.
     pub fn confirm_mcp_remove(&mut self, name: &str) {
-        if self.is_remote() {
-            return;
-        }
         let Some(s) = self.mcp.get(name) else { return };
         let from = self.mcp_own_agents(s);
         self.open_mcp_plan(McpChange::Remove { name: name.into(), from });
@@ -504,9 +507,6 @@ impl App {
 
     /// Enables a server some agent skips in this project, else disables it.
     pub fn toggle_mcp_disabled(&mut self, name: &str) {
-        if self.is_remote() {
-            return;
-        }
         let Some(s) = self.mcp.get(name) else { return };
         let disabled = s.disabled_for.is_empty();
         self.open_mcp_plan(McpChange::Switch { name: name.into(), disabled });
@@ -514,9 +514,6 @@ impl App {
 
     /// Merges the servers into the first one's name, unless another is typed.
     pub fn open_mcp_merge(&mut self, names: Vec<String>) {
-        if self.is_remote() {
-            return;
-        }
         if names.is_empty() {
             return;
         }
@@ -525,7 +522,7 @@ impl App {
     }
 
     fn open_mcp_plan(&mut self, change: McpChange) {
-        self.mcp_dialog = Some(McpDialog { change, plan: None, notice: None });
+        self.mcp_dialog = Some(McpDialog { change, plan: None, host_plan: None, notice: None });
         self.replan_mcp();
     }
 
@@ -556,6 +553,9 @@ impl App {
 
     /// Plans the open dialog's change again, against the configs as they are now.
     pub fn replan_mcp(&mut self) {
+        if self.is_remote() {
+            return self.host_replan_mcp();
+        }
         let Some(d) = &self.mcp_dialog else { return };
         let differs = self.mcp.get(d.change.name()).is_some_and(|s| s.status == Status::Differs);
         let plan = match &d.change {
@@ -574,7 +574,7 @@ impl App {
     /// with a notice, before the last change's backups go.
     pub fn apply_mcp_plan(&mut self) {
         if self.is_remote() {
-            return;
+            return self.host_apply_mcp_plan();
         }
         let Some(McpDialog { plan: Some(Ok(plan)), .. }) = &self.mcp_dialog else { return };
         if plan.is_empty() {

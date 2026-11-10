@@ -10,6 +10,8 @@ impl App {
     /// when it has none, and adds it as is when nothing inside has skills either. A folder already
     /// listed just opens.
     pub fn add_folder(&mut self, dir: PathBuf) {
+        // A folder picked here is on this machine; a host's projects are typed paths
+        // (`save_host_project`).
         if self.is_remote() {
             return;
         }

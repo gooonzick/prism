@@ -70,6 +70,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     mcp_dialogs::form(s, &k, &mut layer);
     mcp_dialogs::plan(s, &k, &mut layer);
     hosts::add_host(s, &k, &mut layer);
+    hosts::add_project(s, &k, &mut layer);
     if let Some(n) = &s.notice {
         let mut toast = Toast::new("notice", n.title.clone()).closable().on_close(|s: &mut App| s.notice = None);
         if !n.detail.is_empty() {
@@ -126,9 +127,8 @@ fn sidebar(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
             })
             .height(40.0)
             .selected(installed && s.scope == Scope::Project(p.clone()))
-            .on_select(move |s: &mut App, _| s.open_scope(Scope::Project(open.clone())));
-        // A host's projects stay listed there until window actions reach hosts.
-        let row = if s.is_remote() { row } else { row.on_close(move |s: &mut App, _| s.forget_project(&forget)) };
+            .on_select(move |s: &mut App, _| s.open_scope(Scope::Project(open.clone())))
+            .on_close(move |s: &mut App, _| s.forget_project(&forget));
         row.build(k).key(format!("project-{i}"))
     });
     let add = SidebarRow::new(if s.discovering { "Looking for projects…" } else { "Add project…" })
@@ -136,6 +136,11 @@ fn sidebar(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         .height(32.0)
         .on_select(|s: &mut App, tx: &mut Tx| {
             if s.discovering {
+                return;
+            }
+            // No folder picker reaches a host's disk: its projects are typed paths.
+            if s.is_remote() {
+                s.open_host_project();
                 return;
             }
             let dev = s.paths.home.join("Development");
@@ -152,11 +157,7 @@ fn sidebar(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         })
         .build(k)
         .key("add-project");
-    let mut section = SidebarSection::new("Projects").key("projects").count(s.settings.projects.len()).rows(projects);
-    // Projects on a host are added there for now: no folder picker reaches it.
-    if !s.is_remote() {
-        section = section.row(add);
-    }
+    let section = SidebarSection::new("Projects").key("projects").count(s.settings.projects.len()).rows(projects).row(add);
     Sidebar::new()
         .label("Scopes")
         .inset(0.0)
@@ -246,7 +247,7 @@ pub fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
         s.sidebar.toggle();
         return true;
     }
-    if ev.key == rune::Key::Escape && !s.checked.is_empty() && s.sync_plan.is_none() && s.confirm_remove.is_none() {
+    if ev.key == rune::Key::Escape && !s.checked.is_empty() && !s.sync_open() && s.confirm_remove.is_none() {
         s.clear_checked();
         return true;
     }
@@ -254,7 +255,8 @@ pub fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
         s.toggle_all_visible();
         return true;
     }
-    if ev.is_command('z') && s.last_change.is_some() {
+    // The machine in view: a host's last change is undone there.
+    if ev.is_command('z') && s.can_undo() {
         s.undo();
         return true;
     }
@@ -269,7 +271,7 @@ pub fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
         }
         return true;
     }
-    let in_list = s.page == Page::Installed && !s.filter.focused && s.sync_plan.is_none() && s.confirm_remove.is_none();
+    let in_list = s.page == Page::Installed && !s.filter.focused && !s.sync_open() && s.confirm_remove.is_none();
     if in_list && matches!(ev.key, rune::Key::Up | rune::Key::Down) && !ev.mods.cmd {
         let delta = if ev.key == rune::Key::Down { 1 } else { -1 };
         if let Some(key) = s.step_selection(delta, ev.mods.shift) {

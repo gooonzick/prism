@@ -117,8 +117,8 @@ fn load(r: &dyn Runner, host: &Host, scope: &Scope, install_first: bool) -> (Res
 }
 
 impl App {
-    /// A host is in view: nothing reads or writes this machine's disk with its paths, and changes
-    /// wait until window actions reach hosts.
+    /// A host is in view: nothing reads or writes this machine's disk with its paths; changes
+    /// run there, through its own CLI.
     pub fn is_remote(&self) -> bool {
         matches!(self.env, Env::Remote { .. })
     }
@@ -245,6 +245,7 @@ impl App {
     fn close_everything(&mut self) {
         self.reset_view();
         self.sync_plan = None;
+        self.sync_host = None;
         self.sync_only = None;
         self.confirm_remove = None;
         self.copy_dialog = None;
@@ -254,6 +255,9 @@ impl App {
         self.mcp_dialog = None;
         self.env_menu = false;
         self.add_host = None;
+        self.host_project = None;
+        // Changes asked of the last machine: those not started stay undone.
+        self.drop_host_work();
         // A toast about the last machine would read as one about this one.
         self.notice = None;
         self.notice_at = None;
@@ -330,6 +334,10 @@ impl App {
                     self.global_names = self.inv.skills.iter().map(|s| s.name.clone()).collect();
                 }
                 self.remote_detected = Some((w.detected, w.mcp_detected));
+                self.host_last_change = w.last_change;
+                // Shown values were read before; any change since would not show in them.
+                self.host_values.clear();
+                self.mcp_revealed.clear();
                 if self.selected.as_deref().is_some_and(|n| self.inv.get(n).is_none()) {
                     self.selected = None;
                 }

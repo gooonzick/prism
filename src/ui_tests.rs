@@ -1083,17 +1083,24 @@ impl Harness {
         self.settle();
     }
 
-    /// Waits for the host's answer, then lands it with one poll.
+    /// Lands the host's answers as they come, until nothing more is asked of it: a change, then
+    /// the state read after it.
     fn land_remote(&mut self) {
         let start = std::time::Instant::now();
-        while self.rt.state.remote_load.is_pending() || self.rt.state.remote_preview.is_pending() {
-            assert!(start.elapsed().as_secs() < 10, "the host never answered");
-            std::thread::sleep(std::time::Duration::from_millis(10));
+        let pending = |s: &App| s.remote_load.is_pending() || s.remote_preview.is_pending() || s.host_act.is_pending();
+        loop {
+            while pending(&self.rt.state) {
+                assert!(start.elapsed().as_secs() < 10, "the host never answered");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            // Nothing runs now: a poll that lands nothing asks nothing new either.
+            let mut landed = false;
+            self.rt.update(|s, _| landed = s.poll());
+            self.settle();
+            if !landed && !pending(&self.rt.state) && !self.rt.state.host_busy() {
+                break;
+            }
         }
-        self.rt.update(|s, _| {
-            s.poll();
-        });
-        self.settle();
     }
 
     fn remote_state(&self) -> Option<crate::app::RemoteState> {
@@ -1129,11 +1136,6 @@ fn switching_to_host_shows_its_skills() {
     h.click("skill-far");
     h.land_remote();
     assert!(h.rt.state.preview.as_deref().is_some_and(|md| md.contains("# far")), "{:?}", h.rt.state.preview);
-
-    // Nothing writes while the host is in view.
-    let link = remote.path().join(".claude/skills/far");
-    h.rt.update(|s, _| s.toggle_link("far", index_of("claude").unwrap()));
-    assert!(fs::symlink_metadata(&link).is_err(), "no link on the host");
 
     h.rt.update(|s, _| s.switch_env(None));
     h.settle();
@@ -1312,4 +1314,236 @@ fn a_reload_during_an_install_never_strands_it() {
         s.land_remote(crate::app::RemoteAnswer { host: "box".into(), result, installed: false, install_error: None });
     });
     assert!(!h.rt.state.installing_prism);
+}
+
+// Acting on a host.
+
+/// Each command line a host ran, with what went on its stdin.
+type Log = std::sync::Arc<std::sync::Mutex<Vec<(Vec<String>, Option<Vec<u8>>)>>>;
+
+/// A host's runner that records each command line and what went on its stdin.
+struct Recorded {
+    inner: Box<dyn crate::hosts::runner::Runner>,
+    log: Log,
+}
+
+impl crate::hosts::runner::Runner for Recorded {
+    fn prism(&self, args: &[String], stdin: Option<Vec<u8>>) -> Result<crate::hosts::runner::Output, String> {
+        self.log.lock().unwrap().push((args.to_vec(), stdin.clone()));
+        self.inner.prism(args, stdin)
+    }
+    fn shell(&self, script: &str, stdin: Option<Vec<u8>>) -> Result<crate::hosts::runner::Output, String> {
+        self.log.lock().unwrap().push((vec![script.to_string()], stdin.clone()));
+        self.inner.shell(script, stdin)
+    }
+}
+
+/// A host `box` whose `far` lives in `.agents` only, in view and loaded.
+fn on_host() -> (Harness, tempfile::TempDir) {
+    let mut h = Harness::project();
+    let remote = host_home(crate::hosts::install::VERSION);
+    skill(&remote.path().join(".agents/skills"), "far");
+    h.with_host(crate::hosts::runner::local_runners(&[("box", remote.path())]));
+    h.rt.update(|s, _| s.switch_env(Some("box")));
+    h.land_remote();
+    (h, remote)
+}
+
+#[test]
+fn remote_link_toggle_writes_on_host() {
+    let (mut h, remote) = on_host();
+    h.click("skill-far");
+    h.land_remote();
+    h.click("link-claude");
+    h.land_remote();
+    let link = remote.path().join(".claude/skills/far");
+    assert!(fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()), "the host has the link");
+    assert_eq!(h.placement("far", "claude"), Placement::Linked, "the host's state was read again");
+    let notice = h.rt.state.notice.as_ref().expect("a toast");
+    assert!(notice.title.ends_with(" on box") && !notice.error, "{}", notice.title);
+    // This machine is untouched.
+    assert!(fs::symlink_metadata(h.root.join(".claude/skills/far")).is_err());
+    assert_eq!(crate::store::load_last_change(&Paths::isolated(&h.root)), None);
+}
+
+#[test]
+fn remote_mcp_edit_secret_goes_by_stdin() {
+    let mut h = Harness::project();
+    let remote = host_home(crate::hosts::install::VERSION);
+    let config = remote.path().join(".claude.json");
+    fs::write(&config, r#"{"mcpServers":{"far-mcp":{"command":"far","env":{"TOKEN":"FIXTURE_OLD_SECRET","OTHER":"x"}}}}"#).unwrap();
+    let log: Log = std::sync::Arc::default();
+    let (home, record) = (remote.path().to_path_buf(), log.clone());
+    h.with_host(std::sync::Arc::new(move |host: &crate::hosts::Host| {
+        let inner = crate::hosts::runner::local_runners(&[("box", &home)])(host);
+        Box::new(Recorded { inner, log: record.clone() }) as Box<dyn crate::hosts::runner::Runner>
+    }));
+    h.rt.update(|s, _| s.switch_env(Some("box")));
+    h.land_remote();
+    h.click("tab-mcp");
+    h.click("mcp-row-far-mcp");
+    h.click("mcp-edit");
+    h.land_remote();
+    let form = h.rt.state.mcp_form.as_ref().expect("the Edit form opens with the host's values");
+    let value = |k: &str| form.env.iter().find(|p| p.key.text == k).map(|p| p.value.text.clone());
+    assert_eq!(value("TOKEN").as_deref(), Some("FIXTURE_OLD_SECRET"), "unmasked, from wire server");
+
+    h.fill_form(|f| {
+        for p in &mut f.env {
+            p.value = rune::TextEdit::new(if p.key.text == "TOKEN" { "FIXTURE_NEW_SECRET" } else { "FIXTURE_NEW_OTHER" });
+        }
+    });
+    h.click("mcp-add-save");
+    h.land_remote();
+    assert!(h.rt.state.mcp_form.is_none(), "the form and its values are gone");
+    assert!(h.texts().contains("on box"), "the plan names the host: {}", h.texts());
+    h.click("mcp-apply");
+    h.land_remote();
+
+    let written = json(&config);
+    assert_eq!(written["mcpServers"]["far-mcp"]["env"]["TOKEN"], "FIXTURE_NEW_SECRET");
+    assert_eq!(written["mcpServers"]["far-mcp"]["env"]["OTHER"], "FIXTURE_NEW_OTHER");
+    let notice = h.rt.state.notice.as_ref().expect("a toast");
+    assert_eq!(notice.title, "Edited far-mcp on box");
+    let log = log.lock().unwrap();
+    assert!(log.iter().any(|(_, stdin)| stdin.as_deref().is_some_and(|d| String::from_utf8_lossy(d).contains("FIXTURE_NEW_SECRET"))), "the values went on stdin");
+    for (argv, _) in log.iter() {
+        let line = argv.join(" ");
+        assert!(!line.contains("FIXTURE_NEW") && !line.contains("FIXTURE_OLD"), "a value in argv: {line}");
+    }
+}
+
+#[test]
+fn remote_undo_acts_on_host() {
+    let mut h = Harness::project();
+    // A change on this machine first.
+    h.click("skill-review");
+    h.click("link-codex");
+    let here = Paths::isolated(&h.root);
+    let mine = crate::store::load_last_change(&here).expect("this machine's last change").label;
+    let remote = host_home(crate::hosts::install::VERSION);
+    skill(&remote.path().join(".agents/skills"), "far");
+    h.with_host(crate::hosts::runner::local_runners(&[("box", remote.path())]));
+    h.rt.update(|s, _| s.switch_env(Some("box")));
+    h.land_remote();
+    h.click("skill-far");
+    h.land_remote();
+    h.click("link-claude");
+    h.land_remote();
+    let link = remote.path().join(".claude/skills/far");
+    assert!(fs::symlink_metadata(&link).is_ok());
+
+    key(&mut h, rune::Key::Command('z'), rune::Mods { cmd: true, ..rune::Mods::default() });
+    h.land_remote();
+    assert!(fs::symlink_metadata(&link).is_err(), "the host's change is undone");
+    let notice = h.rt.state.notice.as_ref().expect("a toast");
+    assert!(notice.title.starts_with("Undid: ") && notice.title.ends_with(" on box"), "{}", notice.title);
+    assert_eq!(crate::store::load_last_change(&here).map(|c| c.label), Some(mine), "this machine's last change stays");
+    assert!(fs::symlink_metadata(h.project_dir().join(".codex/skills/review")).is_ok(), "and so does its link");
+}
+
+#[test]
+fn remote_add_project_takes_typed_path() {
+    let (mut h, remote) = on_host();
+    let site = fs::canonicalize(remote.path()).unwrap().join("work/site");
+    skill(&site.join(".claude/skills"), "page");
+    h.click("add-project");
+    assert!(h.rt.find("host-project-path").is_some(), "a field for a path, not a folder picker");
+    h.click("host-project-path");
+    h.rt.key(rune::KeyEvent { key: rune::Key::Text(site.display().to_string()), mods: rune::Mods::default() });
+    h.settle();
+    h.click("host-project-add");
+    h.land_remote();
+    assert!(h.rt.find("host-project-path").is_none(), "the dialog closed");
+    let saved = Settings::load_from(&Paths::isolated(remote.path()));
+    assert_eq!(saved.projects, vec![site.clone()], "the host lists it");
+    assert!(Settings::load_from(&Paths::isolated(&h.root)).projects.iter().all(|p| *p != site), "this machine doesn't");
+    assert_eq!(h.rt.state.scope, Scope::Project(site));
+    assert!(h.rt.state.inv.get("page").is_some(), "the project's skills, from the host");
+}
+
+#[test]
+fn remote_sync_shows_a_changed_plan_and_applies_the_new_one() {
+    let mut h = Harness::project();
+    let remote = host_home(crate::hosts::install::VERSION);
+    skill(&remote.path().join(".claude/skills"), "far");
+    fs::create_dir_all(remote.path().join(".codex")).unwrap();
+    h.with_host(crate::hosts::runner::local_runners(&[("box", remote.path())]));
+    h.rt.update(|s, _| s.switch_env(Some("box")));
+    h.land_remote();
+
+    h.click("sync");
+    assert!(h.texts().contains("Asking box for the plan…"), "{}", h.texts());
+    h.land_remote();
+    let lines = h.rt.state.sync_host.as_ref().and_then(|p| p.view.clone()).expect("the host's plan").unwrap().lines;
+    assert!(!lines.is_empty() && lines.iter().all(|l| l.ends_with(" on box")), "{lines:?}");
+    assert!(h.rt.find("sync-line-0").is_some());
+
+    // The skill changes on the host before Apply: its plan id no longer matches.
+    fs::write(remote.path().join(".claude/skills/far/extra.md"), "new").unwrap();
+    h.click("sync-apply");
+    h.land_remote();
+    let plan = h.rt.state.sync_host.as_ref().expect("the dialog stays, with the new plan");
+    assert_eq!(plan.notice.as_deref(), Some("The files changed on box; here is the new plan"));
+    assert!(!plan.applying && matches!(plan.view, Some(Ok(_))));
+    assert!(!remote.path().join(".agents/skills/far").exists(), "nothing was done");
+
+    h.click("sync-apply");
+    h.land_remote();
+    assert!(h.rt.state.sync_host.is_none());
+    assert!(remote.path().join(".agents/skills/far/extra.md").is_file());
+    assert_eq!(h.placement("far", "codex"), Placement::Linked);
+    let notice = h.rt.state.notice.as_ref().expect("a toast");
+    assert!(notice.title.starts_with("Synced: ") && notice.title.ends_with(" on box") && notice.undo, "{}", notice.title);
+}
+
+#[test]
+fn remote_show_values_fetches_the_server_and_drops_it_when_hidden() {
+    let mut h = Harness::project();
+    let remote = host_home(crate::hosts::install::VERSION);
+    fs::write(remote.path().join(".claude.json"), r#"{"mcpServers":{"far-mcp":{"command":"far","env":{"TOKEN":"FIXTURE_HOST_SECRET"}}}}"#).unwrap();
+    h.with_host(crate::hosts::runner::local_runners(&[("box", remote.path())]));
+    h.rt.update(|s, _| s.switch_env(Some("box")));
+    h.land_remote();
+    h.click("tab-mcp");
+    h.click("mcp-row-far-mcp");
+    assert!(!h.texts().contains("FIXTURE_HOST_SECRET"), "masked until shown");
+    h.click("mcp-reveal");
+    h.land_remote();
+    assert!(h.texts().contains("FIXTURE_HOST_SECRET"), "{}", h.texts());
+    h.click("mcp-reveal");
+    assert!(h.rt.state.host_values.is_empty(), "dropped when hidden");
+    assert!(!h.texts().contains("FIXTURE_HOST_SECRET"));
+}
+
+#[test]
+fn remote_mcp_add_writes_on_host() {
+    let mut h = Harness::project();
+    let remote = host_home(crate::hosts::install::VERSION);
+    h.with_host(crate::hosts::runner::local_runners(&[("box", remote.path())]));
+    h.rt.update(|s, _| s.switch_env(Some("box")));
+    h.land_remote();
+    h.click("tab-mcp");
+    h.click("scope-global");
+    h.land_remote();
+    h.click("mcp-add");
+    assert_eq!(h.rt.state.mcp_form.as_ref().unwrap().agents, [crate::mcp::agents::index_of("claude").unwrap()], "the host's agents");
+    h.fill_form(|f| {
+        f.name = rune::TextEdit::new("fresh");
+        f.command = rune::TextEdit::new("npx -y fresh-mcp");
+    });
+    h.click("mcp-add-env-add");
+    h.fill_form(|f| {
+        f.env[0].key = rune::TextEdit::new("FRESH_TOKEN");
+        f.env[0].value = rune::TextEdit::new("${FRESH_TOKEN}").secure();
+    });
+    h.click("mcp-add-save");
+    h.land_remote();
+    assert!(h.rt.state.mcp_form.is_none(), "{:?}", h.rt.state.mcp_form.as_ref().and_then(|f| f.error.clone()));
+    let fresh = json(&remote.path().join(".claude.json"))["mcpServers"]["fresh"].clone();
+    assert_eq!(fresh["args"], serde_json::json!(["-y", "fresh-mcp"]));
+    assert_eq!(fresh["env"]["FRESH_TOKEN"], "${FRESH_TOKEN}", "a typed ${{VAR}} stays a reference through stdin");
+    assert!(h.rt.state.mcp.get("fresh").is_some() && h.rt.state.mcp_selected.as_deref() == Some("fresh"));
+    assert_eq!(h.rt.state.notice.as_ref().unwrap().title, "Added fresh on box");
+    assert!(!h.root.join(".claude.json").exists(), "nothing here");
 }

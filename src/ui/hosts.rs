@@ -124,3 +124,45 @@ pub fn add_host(s: &App, k: &Kit, layer: &mut Vec<El>) {
         .child(body.child(buttons))
         .build(k, layer);
 }
+
+/// Add project… on a host: the folder's path on that machine, typed, since no folder picker
+/// reaches its disk.
+pub fn add_project(s: &App, k: &Kit, layer: &mut Vec<El>) {
+    let Some(form) = &s.host_project else { return };
+    let name = s.env_label();
+    let path = TextInput::new(&form.path)
+        .label("Folder")
+        .placeholder("/home/me/projects/site")
+        .width(None)
+        .invalid(form.error.is_some())
+        .on_edit(|s: &mut App| &mut s.host_project.as_mut().expect("the dialog is open").path)
+        .on_submit(|s: &mut App, _: &mut Tx| s.save_host_project())
+        .build(k)
+        .key("host-project-path");
+    let mut body = dialog_body()
+        .child(note(&format!("Type the project's folder on {name}. Its skills and MCP servers show once {name} lists it."), k))
+        .child(field_block("Folder", path, k));
+    if let Some(e) = &form.error {
+        body = body.child(
+            row()
+                .key("host-project-error")
+                .gap(6.0)
+                .center_y()
+                .child(icon(&glyphs::CIRCLE_X, 14.0).color(k.c.danger.icon))
+                .child(text(e.clone()).font(k.ty.small).color(k.c.text_muted).wrap()),
+        );
+    }
+    let buttons = row()
+        .w_full()
+        .gap(8.0)
+        .justify_end()
+        .child(Button::new("Cancel").variant(ButtonVariant::Ghost).on_press(|s: &mut App| s.host_project = None).build(k).key("host-project-cancel"))
+        .child(Button::new("Add project").variant(ButtonVariant::Contrast).on_press(|s: &mut App| s.save_host_project()).build(k).key("host-project-add"));
+    Dialog::new("host-project-dialog", format!("Add a project on {name}"))
+        .width(480.0)
+        .fit()
+        .open(true)
+        .on_close(|s: &mut App| s.host_project = None)
+        .child(body.child(buttons))
+        .build(k, layer);
+}

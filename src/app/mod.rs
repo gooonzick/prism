@@ -7,9 +7,10 @@ mod installed;
 mod mcp;
 mod mcp_edit;
 mod remote;
+mod remote_actions;
 mod watch;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -21,7 +22,7 @@ use rune_kit::shell::PaneState;
 use crate::agents::{self, AGENTS, CANONICAL, Paths, Scope};
 use crate::fsops::Journal;
 use crate::hosts::runner::{self as host_runner, MakeRunner};
-use crate::mcp::scan::{self as mcp_scan, McpInventory};
+use crate::mcp::scan::{self as mcp_scan, McpInventory, McpServer};
 use crate::remote::RemoteSkill;
 use crate::scan::{self, Inventory, ScopeStats};
 use crate::store::{self, LastChange, Settings};
@@ -32,6 +33,7 @@ pub use installed::{open_path, reveal_path};
 pub use mcp::McpFilter;
 pub use mcp_edit::{McpChange, McpDialog, McpForm};
 pub use remote::{RepoListing, UpdateJob};
+pub use remote_actions::{HostAnswer, HostJob, HostPlan, HostProject};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Page {
@@ -109,6 +111,8 @@ pub struct App {
     pub show_all_agents: bool,
     /// The open sync dialog's plan.
     pub sync_plan: Option<Plan>,
+    /// The open sync dialog's plan, made by the host in view.
+    pub sync_host: Option<HostPlan>,
     /// The skills the open sync dialog is for; `None` syncs everything.
     pub sync_only: Option<Vec<String>>,
     /// The skills a "Remove" is waiting to be confirmed for.
@@ -153,6 +157,17 @@ pub struct App {
     /// The environment menu is open.
     pub env_menu: bool,
     pub add_host: Option<AddHost>,
+    /// Changes waiting to run on the host in view, oldest first.
+    pub host_jobs: VecDeque<HostJob>,
+    /// The one running there now.
+    host_running: Option<remote_actions::Work>,
+    pub host_act: Latest<HostAnswer>,
+    /// The label of the change `undo` would take back on the host in view.
+    pub host_last_change: Option<String>,
+    /// Servers on the host in view whose values are shown, unmasked.
+    pub host_values: HashMap<String, McpServer>,
+    /// Add project… on a host: the typed path.
+    pub host_project: Option<HostProject>,
 
     // Watching the scope's folders.
     waker: Option<Waker>,
@@ -214,6 +229,7 @@ impl App {
             anchor: None,
             show_all_agents: false,
             sync_plan: None,
+            sync_host: None,
             sync_only: None,
             confirm_remove: None,
             copy_dialog: None,
@@ -238,6 +254,12 @@ impl App {
             installing_prism: false,
             env_menu: false,
             add_host: None,
+            host_jobs: VecDeque::new(),
+            host_running: None,
+            host_act: Latest::default(),
+            host_last_change: None,
+            host_values: HashMap::new(),
+            host_project: None,
             waker: None,
             watcher: None,
             dirty: Arc::new(AtomicBool::new(false)),
@@ -277,7 +299,7 @@ impl App {
     /// Starts the background work a window needs: answers wake it, and the scope's folders
     /// are watched. Tests never call this, so they touch neither the network nor FSEvents.
     pub fn set_waker(&mut self, waker: Waker) {
-        for w in [&self.search as &dyn SetWaker, &self.remote_fetch, &self.install, &self.update_check, &self.update_run, &self.discover, &self.repo_fetch, &self.cli_tool, &self.remote_load, &self.remote_preview] {
+        for w in [&self.search as &dyn SetWaker, &self.remote_fetch, &self.install, &self.update_check, &self.update_run, &self.discover, &self.repo_fetch, &self.cli_tool, &self.remote_load, &self.remote_preview, &self.host_act] {
             w.set(waker.clone());
         }
         self.waker = Some(waker);
@@ -344,6 +366,10 @@ impl App {
             self.land_remote_preview(name, body);
             changed = true;
         }
+        if let Some(answer) = self.host_act.take() {
+            self.land_host(answer);
+            changed = true;
+        }
         changed
     }
 
@@ -397,6 +423,7 @@ impl App {
         self.mcp_selected = None;
         self.mcp_filter = McpFilter::All;
         self.mcp_revealed.clear();
+        self.host_values.clear();
     }
 
     /// The settings as on disk, where the CLI may have changed them. Settings built in memory
@@ -422,7 +449,7 @@ impl App {
 
     pub fn add_project(&mut self, dir: PathBuf) {
         if self.is_remote() {
-            return;
+            return self.host_add_project(dir);
         }
         self.edit_settings(|s| s.add_project(dir.clone()));
         self.open_scope(Scope::Project(dir));
@@ -431,7 +458,7 @@ impl App {
 
     pub fn forget_project(&mut self, dir: &PathBuf) {
         if self.is_remote() {
-            return;
+            return self.host_forget_project(dir);
         }
         self.edit_settings(|s| s.projects.retain(|p| p != dir));
         self.stats.remove(&Scope::Project(dir.clone()));
@@ -546,9 +573,10 @@ impl App {
         store::save_last_change(&self.paths, self.last_change.as_ref());
     }
 
+    /// Takes back the last change of the machine in view.
     pub fn undo(&mut self) {
         if self.is_remote() {
-            return;
+            return self.host_undo();
         }
         // From disk: the CLI may have undone it, or made a newer change, since this window did.
         self.last_change = store::load_last_change(&self.paths);

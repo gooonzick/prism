@@ -72,6 +72,9 @@ impl App {
 
     /// Shows or masks the server's env, header, args and URL values in the inspector.
     pub fn toggle_reveal(&mut self, name: &str) {
+        if self.is_remote() {
+            return self.host_toggle_reveal(name);
+        }
         if !self.mcp_revealed.remove(name) {
             self.mcp_revealed.insert(name.to_string());
         }

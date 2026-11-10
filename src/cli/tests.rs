@@ -1089,7 +1089,7 @@ fn env_from_file_is_read_and_masked() {
 }
 
 #[test]
-fn env_from_stdin_is_read_once() {
+fn env_from_stdin_takes_all_of_it_or_several_values_apart_by_nul() {
     let home = empty_mcp_home();
     let mut c = ctx(home.path());
     c.stdin = Some(Box::new(std::io::Cursor::new("FIXTURE_STDIN_SECRET\n")));
@@ -1097,12 +1097,52 @@ fn env_from_stdin_is_read_once() {
     assert_eq!(code, 0, "{out}{err}");
     let written = std::fs::read_to_string(home.path().join(".cursor/mcp.json")).unwrap();
     assert!(written.contains("\"FIXTURE_STDIN_SECRET\""), "{written}");
+
+    // Two `KEY=-` and one value: refused, naming no value.
     let home = empty_mcp_home();
     let mut c = ctx(home.path());
     c.stdin = Some(Box::new(std::io::Cursor::new("FIXTURE_STDIN_SECRET\n")));
     let (code, out, err) = go(&["mcp", "add", "plata", "--command", "npx", "--env", "A=-", "--env", "B=-", "--to", "cursor"], &mut c);
     assert_eq!(code, 2, "{out}{err}");
+    assert!(err.contains("stdin holds 1 values for 2") && !err.contains("FIXTURE"), "{err}");
     assert!(!home.path().join(".cursor/mcp.json").exists());
+
+    // Two values apart by a NUL, each read as typed: a reference stays one.
+    c.stdin = Some(Box::new(std::io::Cursor::new("FIXTURE_A_SECRET\0${PLATA_HOST}\n")));
+    let (code, out, err) = go(&["mcp", "add", "plata", "--command", "npx", "--env", "A=-", "--env", "B=-", "--to", "cursor"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    let written = json(&std::fs::read_to_string(home.path().join(".cursor/mcp.json")).unwrap());
+    assert_eq!(written["mcpServers"]["plata"]["env"]["A"], "FIXTURE_A_SECRET");
+    assert_eq!(written["mcpServers"]["plata"]["env"]["B"], "${env:PLATA_HOST}");
+}
+
+#[test]
+fn edit_clears_the_args_and_renames_a_header_by_case() {
+    let home = mcp_home();
+    let mut c = ctx(home.path());
+    let (code, out, err) = go(&["mcp", "edit", "gl", "--no-args", "--apply"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    let cursor = |h: &std::path::Path| json(&std::fs::read_to_string(h.join(".cursor/mcp.json")).unwrap());
+    assert!(cursor(home.path())["mcpServers"]["gl"].get("args").is_none_or(|a| a.as_array().is_some_and(|a| a.is_empty())), "{}", cursor(home.path()));
+
+    // The unset goes first, so the header renamed by case stays.
+    c.stdin = Some(Box::new(std::io::Cursor::new("Bearer FIXTURE_NEW_HEADER")));
+    let (code, out, err) = go(&["mcp", "edit", "web", "--unset-header", "Authorization", "--header", "authorization=-", "--apply"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    let headers = cursor(home.path())["mcpServers"]["web"]["headers"].clone();
+    assert_eq!(headers, serde_json::json!({ "authorization": "Bearer FIXTURE_NEW_HEADER" }));
+}
+
+#[test]
+fn sync_to_agents_alone_only_moves_into_agents() {
+    let home = tempfile::tempdir().unwrap();
+    let mut c = unsynced(home.path());
+    let (code, out, err) = go(&["skills", "sync", "review", "--to", "agents", "--apply", "--json"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(json(&out)["done"], 1, "{out}");
+    assert!(home.path().join(".agents/skills/review/SKILL.md").is_file());
+    assert!(std::fs::symlink_metadata(home.path().join(".claude/skills/review")).unwrap().file_type().is_symlink());
+    assert!(!home.path().join(".codex/skills/review").exists(), "no target was linked");
 }
 
 #[test]

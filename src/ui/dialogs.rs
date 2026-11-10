@@ -1,9 +1,10 @@
-//! Modal dialogs: the sync preview and the remove confirmation.
+//! Modal dialogs: the sync preview (this machine's plan, or a host's), the remove confirmation,
+//! Copy to…, New skill and the projects found in a folder.
 
 use rune::{El, ScrollSpec, Tx, col, icon, row, text};
-use rune_kit::{Button, ButtonVariant, Checkbox, Dialog, Kit, TextArea, TextInput, glyphs};
+use rune_kit::{Button, ButtonVariant, Checkbox, Dialog, Kit, Spinner, TextArea, TextInput, glyphs};
 
-use super::heading;
+use super::{dot, heading, row_gap};
 use crate::agents::{AGENTS, CANONICAL};
 use crate::app::App;
 use crate::plan_view::PlanView;
@@ -49,7 +50,9 @@ fn changes_heading(changes: usize, skills: usize) -> String {
 }
 
 pub fn sync(s: &App, k: &Kit, layer: &mut Vec<El>) {
-    let Some(plan) = &s.sync_plan else { return };
+    if !s.sync_open() {
+        return;
+    }
     let targets = s.targets();
     let mut agents = col().key("sync-targets").gap(6.0).child(heading("Link into", k));
     for a in (0..AGENTS.len()).filter(|&a| a != CANONICAL) {
@@ -66,21 +69,53 @@ pub fn sync(s: &App, k: &Kit, layer: &mut Vec<El>) {
         agents = agents.child(cb.build(k).key(format!("target-{}", agent.id)));
     }
 
-    let linkable = targets.iter().filter(|&&t| !s.inv.shares_canonical[t]).count();
-    let view = PlanView::from((plan, &s.paths));
-    let groups = group_actions(&plan.actions, linkable);
     let mut changes = col().key("sync-changes").gap(10.0).w_full();
-    if view.lines.is_empty() && view.skipped.is_empty() {
+    // `settled`: the plan is in, so an empty one means there is nothing to do.
+    let (view, heading_text, applying, settled) = match (&s.sync_plan, &s.sync_host) {
+        (Some(plan), _) => {
+            let linkable = targets.iter().filter(|&&t| !s.inv.shares_canonical[t]).count();
+            let view = PlanView::from((plan, &s.paths));
+            let groups = group_actions(&plan.actions, linkable);
+            for (skill, parts) in &groups {
+                changes = changes.child(
+                    col()
+                        .w_full()
+                        .gap(2.0)
+                        .child(text(skill.clone()).font(k.ty.small_medium).color(k.c.text_base))
+                        .child(text(parts.join(" · ")).font(k.ty.small).color(k.c.text_muted).wrap()),
+                );
+            }
+            let heading_text = changes_heading(view.lines.len(), groups.len());
+            (view, heading_text, false, true)
+        }
+        (None, Some(host)) => {
+            // A host's plan comes as lines, not actions to group: they show as the host words them.
+            if let Some(notice) = &host.notice {
+                changes = changes.child(row().key("sync-notice").w_full().gap(8.0).center_y().child(dot(k.c.warning.icon)).child(text(notice.clone()).font(k.ty.small).color(k.c.text_muted).grow(1.0).min_w(0.0).wrap()));
+            }
+            let view = match &host.view {
+                None => {
+                    let asking = format!("Asking {} for the plan…", s.env_label());
+                    changes = changes.child(row_gap().child(Spinner::new().build(k)).child(text(asking).font(k.ty.small).color(k.c.text_muted)));
+                    PlanView::default()
+                }
+                Some(Err(e)) => {
+                    changes = changes.child(failure(e, k));
+                    PlanView::default()
+                }
+                Some(Ok(view)) => view.clone(),
+            };
+            for (i, line) in view.lines.iter().enumerate() {
+                changes = changes.child(text(line.clone()).key(format!("sync-line-{i}")).font(k.ty.small).color(k.c.text_base).wrap());
+            }
+            let n = view.lines.len();
+            let heading_text = if n == 0 { "Changes".to_string() } else { format!("{n} change{}", if n == 1 { "" } else { "s" }) };
+            (view, heading_text, host.applying, matches!(host.view, Some(Ok(_))))
+        }
+        (None, None) => return,
+    };
+    if settled && view.lines.is_empty() && view.skipped.is_empty() {
         changes = changes.child(text("Everything is in sync.").font(k.ty.small).color(k.c.text_muted));
-    }
-    for (skill, parts) in &groups {
-        changes = changes.child(
-            col()
-                .w_full()
-                .gap(2.0)
-                .child(text(skill.clone()).font(k.ty.small_medium).color(k.c.text_base))
-                .child(text(parts.join(" · ")).font(k.ty.small).color(k.c.text_muted).wrap()),
-        );
     }
     if !view.skipped.is_empty() {
         changes = changes.child(heading(&format!("Skipped ({})", view.skipped.len()), k));
@@ -104,19 +139,17 @@ pub fn sync(s: &App, k: &Kit, layer: &mut Vec<El>) {
     }
 
     let n = view.lines.len();
+    let apply = match (applying, n) {
+        (true, _) => Button::new("Applying…").variant(ButtonVariant::Loading).disabled(true),
+        (false, 0) => Button::new("Nothing to do").variant(ButtonVariant::Contrast).disabled(true),
+        (false, n) => Button::new(format!("Apply {n} change{}", if n == 1 { "" } else { "s" })).variant(ButtonVariant::Contrast),
+    };
     let buttons = row()
         .w_full()
         .gap(8.0)
         .justify_end()
         .child(Button::new("Cancel").variant(ButtonVariant::Ghost).on_press(|s: &mut App| s.close_sync()).build(k).key("sync-cancel"))
-        .child(
-            Button::new(if n == 0 { "Nothing to do".to_string() } else { format!("Apply {n} change{}", if n == 1 { "" } else { "s" }) })
-                .variant(ButtonVariant::Contrast)
-                .disabled(n == 0)
-                .on_press(|s: &mut App| s.apply_sync())
-                .build(k)
-                .key("sync-apply"),
-        );
+        .child(apply.on_press(|s: &mut App| s.apply_sync()).build(k).key("sync-apply"));
     let body = row()
         .w_full()
         .gap(20.0)
@@ -126,7 +159,7 @@ pub fn sync(s: &App, k: &Kit, layer: &mut Vec<El>) {
                 .grow(1.0)
                 .min_w(0.0)
                 .gap(6.0)
-                .child(heading(&changes_heading(view.lines.len(), groups.len()), k))
+                .child(heading(&heading_text, k))
                 .child(col().w_full().h(260.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(changes)),
         );
     let title = match s.sync_only.as_deref() {
@@ -143,10 +176,23 @@ pub fn sync(s: &App, k: &Kit, layer: &mut Vec<El>) {
         .build(k, layer);
 }
 
+/// Why a plan couldn't be made: a red mark and the reason.
+fn failure(why: &str, k: &Kit) -> El {
+    row()
+        .w_full()
+        .gap(8.0)
+        .items_start()
+        .child(icon(&glyphs::CIRCLE_X, 14.0).color(k.c.danger.icon))
+        .child(text(why.to_string()).font(k.ty.small).color(k.c.text_muted).grow(1.0).min_w(0.0).wrap())
+}
+
 pub fn remove(s: &App, k: &Kit, layer: &mut Vec<El>) {
     let Some(names) = &s.confirm_remove else { return };
     let skills: Vec<_> = names.iter().filter_map(|n| s.inv.get(n)).collect();
-    let scope = s.scope_label(&s.inv.scope);
+    let mut scope = s.scope_label(&s.inv.scope);
+    if let Some(host) = s.host() {
+        scope.push_str(&format!(" on {}", host.name));
+    }
     let (title, message) = match skills.as_slice() {
         [] => return,
         [skill] => {
@@ -273,8 +319,14 @@ pub fn new_skill(s: &App, k: &Kit, layer: &mut Vec<El>) {
         .on_edit(|s: &mut App| &mut s.new_skill.as_mut().expect("the dialog is open").description)
         .build(k)
         .key("new-description");
+    let dir = crate::agents::tilde(&crate::agents::AGENTS[CANONICAL].dir(&s.scope, &s.paths), &s.paths);
+    // A host's file opens in no editor here.
+    let what = match s.host() {
+        Some(h) => format!("Creates {dir}/<name>/SKILL.md on {} and links it into the sync targets there.", h.name),
+        None => format!("Creates {dir}/<name>/SKILL.md, links it into your sync targets and opens it in your editor."),
+    };
     let mut body = dialog_body()
-        .child(note(&format!("Creates {}/<name>/SKILL.md, links it into your sync targets and opens it in your editor.", crate::agents::tilde(&crate::agents::AGENTS[CANONICAL].dir(&s.scope, &s.paths), &s.paths)), k))
+        .child(note(&what, k))
         .child(field_block("Name", name, k))
         .child(field_block("When to use it", description, k));
     if let Some(e) = &form.error {
