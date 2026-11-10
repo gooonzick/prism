@@ -30,11 +30,13 @@ impl McpFilter {
 impl App {
     pub fn open_mcp(&mut self) {
         self.page = Page::Mcp;
+        self.toolbar_menu = false;
         self.rescan_mcp();
     }
 
     pub fn open_skills(&mut self) {
         self.page = Page::Installed;
+        self.toolbar_menu = false;
     }
 
     pub fn rescan_mcp(&mut self) {

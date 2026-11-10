@@ -3,7 +3,7 @@
 use rune::{El, col, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, Divider, IconButton, IconButtonVariant, Kit, Switch, glyphs};
 
-use super::installed::placement_color;
+use super::installed::placement_tone;
 use super::{UPDATE, dot, empty, inspector_body, inspector_title, mono, prop, section, skill_md};
 use crate::agents::{AGENTS, CANONICAL, tilde};
 use crate::app::{App, open_path, reveal_path};
@@ -153,8 +153,8 @@ fn placement_row(s: &App, skill: &Skill, a: usize, k: &Kit) -> El {
         _ => p.label(),
     };
     let mut title = row().gap(6.0).center_y().child(text(agent.name).font(k.ty.ui).color(k.c.text_base));
-    if let Some(c) = placement_color(p, k) {
-        title = title.child(dot(c));
+    if let Some(tone) = placement_tone(p) {
+        title = title.child(crate::ds::dot(k, tone));
     }
     let label = col()
         .gap(1.0)

@@ -859,6 +859,31 @@ mod page_additions {
         click(&mut rt, "tab-a");
         assert_eq!(rt.state, 0);
     }
+
+    fn measured(_: &(), _: &mut Cx<()>) -> El {
+        let k = Kit::neutral(false);
+        static ICON: rune::Icon = rune::Icon { name: "t-dot", view: 16.0, body: r#"<circle cx="8" cy="8" r="2" fill="currentColor"/>"# };
+        col()
+            .items_start()
+            .child(primary("Sync 12 skills", Place::Bar).icon(&ICON).build(&k).key("bar-icon"))
+            .child(button("Copy to…", Place::List).build(&k).key("list"))
+            .child(danger("Remove…", Place::Inspector).build(&k).key("inspector"))
+            .child(toolbar_title(&k, "Global skills"))
+    }
+
+    #[test]
+    fn widths_before_layout_match_the_layout() {
+        let rt = run((), measured, (600.0, 300.0));
+        let k = Kit::neutral(false);
+        let near = |key: &str, w: f32| {
+            let got = rect(&rt, key)[2];
+            assert!((got - w).abs() <= 1.0, "{key}: laid out {got}, measured {w}");
+        };
+        near("bar-icon", button_width(&k, "Sync 12 skills", Place::Bar, true));
+        near("list", button_width(&k, "Copy to…", Place::List, false));
+        near("inspector", button_width(&k, "Remove…", Place::Inspector, false));
+        near("title", toolbar_title_width(&k, "Global skills"));
+    }
 }
 
 mod inspector_additions {

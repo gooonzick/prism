@@ -120,6 +120,9 @@ pub struct App {
     pub anchor: Option<String>,
     /// The inspector lists every agent, not only the relevant ones.
     pub show_all_agents: bool,
+    /// The Skills toolbar's "…" menu is open: the narrow toolbar's New skill, Check skills.sh
+    /// for updates and Rescan. Cleared when the page changes.
+    pub toolbar_menu: bool,
     /// The open sync dialog's plan.
     pub sync_plan: Option<Plan>,
     /// The open sync dialog's plan, made by the host in view.
@@ -242,6 +245,7 @@ impl App {
             checked: Vec::new(),
             anchor: None,
             show_all_agents: false,
+            toolbar_menu: false,
             sync_plan: None,
             sync_host: None,
             sync_only: None,
@@ -412,6 +416,7 @@ impl App {
 
     /// Opens `scope` on the page that's open (skills or MCP); from skills.sh, on its skills.
     pub fn open_scope(&mut self, scope: Scope) {
+        self.toolbar_menu = false;
         if self.page == Page::Browse {
             self.page = Page::Installed;
         }
@@ -441,6 +446,7 @@ impl App {
         self.mcp_filter = McpFilter::All;
         self.mcp_revealed.clear();
         self.host_values.clear();
+        self.toolbar_menu = false;
     }
 
     /// The settings as on disk, where the CLI may have changed them. Settings built in memory

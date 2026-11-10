@@ -39,7 +39,7 @@ anything not listed here does not exist in this app and is a bug if you add it.
   `words`, `mono`, `skill_md`, `heading`, `dot`, `empty`, `inspector_body`, `row_gap`.
   Use these before writing a new element; add a new helper here, not in a page file, when two
   pages need it.
-- `src/ui/installed.rs`: `tag()` and `placement_color()`.
+- `src/ui/installed.rs`: `placement_tone()` (an agent copy's tone, for `ds::tag` and `ds::dot`) and `sync_status()`.
 - `src/ui/hosts.rs`: the environment switcher (`switcher`, the `Select` that heads the
   sidebar: this machine, the saved hosts, "Add host…"), what the main pane shows while a host
   connects, needs prism or can't be reached (`pending`), and the Add host and host Add

@@ -5,7 +5,7 @@ use rune::{Color, El, Tx, col, row, text};
 use rune_kit::shell::Toolbar;
 use rune_kit::{Button, ButtonVariant, ControlSize, Divider, IconButton, IconButtonVariant, Kit, SegmentedControl, glyphs};
 
-use super::installed::tag;
+use crate::ds::{self, Tone};
 use super::{PLUS, REFRESH, code_box, dot, empty, inspector_body, inspector_title, mono, prop, section, words, scope_title, scroll_pane};
 use crate::agents::{self, Scope, tilde};
 use crate::app::{App, McpFilter};
@@ -178,20 +178,20 @@ fn server_row(s: &App, server: &McpServer, k: &Kit) -> El {
     let name = server.name.clone();
     let mut tags = row().key("tags").gap(4.0).center_y();
     if server.inherited {
-        tags = tags.child(tag("global", None, "A global server; it applies in this project too", k).key("global-tag"));
+        tags = tags.child(ds::tag(k, "global", None, "A global server; it applies in this project too").key("global-tag"));
     }
     if !server.disabled_for.is_empty() {
         let who: Vec<&str> = server.disabled_for.iter().map(|&a| MCP_AGENTS[a].name).collect();
-        tags = tags.child(tag("disabled", Some(k.c.warning.icon), &format!("Switched off here for {}", who.join(", ")), k).key("disabled-tag"));
+        tags = tags.child(ds::tag(k, "disabled", Some(Tone::Warn), format!("Switched off here for {}", who.join(", "))).key("disabled-tag"));
     }
     let mut chips = row().key("agents").gap(4.0).center_y();
     for a in agents_of(server) {
         let copies: Vec<&McpCopy> = server.copies.iter().filter(|c| c.agent == a).collect();
         let files: Vec<String> = copies.iter().map(|c| tilde(&c.file, &s.paths)).collect();
         let off = server.disabled_for.contains(&a);
-        let color = if off { Some(k.c.warning.icon) } else { None };
+        let tone = if off { Some(Tone::Warn) } else { None };
         let help = format!("{}: {}{}", MCP_AGENTS[a].name, files.join(", "), if off { " (off here)" } else { "" });
-        chips = chips.child(tag(short(a), color, &help, k).key(format!("agent-{}", MCP_AGENTS[a].id)));
+        chips = chips.child(ds::tag(k, short(a), tone, help).key(format!("agent-{}", MCP_AGENTS[a].id)));
     }
     let (word, color, why) = status(server, k);
     let status = row()

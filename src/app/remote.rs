@@ -25,6 +25,7 @@ pub struct UpdateJob {
 impl App {
     pub fn open_browse(&mut self) {
         self.page = Page::Browse;
+        self.toolbar_menu = false;
         self.query.focused = true;
     }
 

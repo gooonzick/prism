@@ -1188,7 +1188,7 @@ fn unreachable_host_shows_retry() {
     assert!(matches!(h.remote_state(), Some(crate::app::RemoteState::Unreachable(e)) if e.contains("Connection refused")));
     assert!(h.texts().contains("Can't reach box"));
     assert!(h.rt.find("env-retry").is_some());
-    assert!(h.rt.find("skills").is_none(), "no list in place of the host's");
+    assert!(h.rt.find("installed").is_none(), "no list in place of the host's");
 
     h.click("env-retry");
     assert_eq!(h.remote_state(), Some(crate::app::RemoteState::Connecting));
@@ -2208,4 +2208,101 @@ fn toolbar_title_follows_tabs() {
     let inside = |r: [f32; 4]| r[0] >= leading[0] && r[0] + r[2] <= leading[0] + leading[2] + 0.5;
     assert!(inside(tab) && inside(title), "tabs {tab:?} and title {title:?} in the leading slot {leading:?}");
     assert!(tab[0] + tab[2] < title[0], "the title {title:?} after the tabs {tab:?}");
+}
+
+// The Skills page.
+
+#[test]
+fn skill_rows_are_one_anatomy() {
+    use crate::ds::size;
+    let h = Harness::project();
+    let (row, _) = h.rt.presented("skill-review").expect("the review row");
+    assert_eq!(row[3], size::ROW_2, "a row with a description is two lines");
+    let (filter, _) = h.rt.presented("filter").expect("the filter");
+    let (check, _) = h.rt.presented("check-review").expect("the row's checkbox");
+    let (all, _) = h.rt.presented("check-all").expect("the select-all checkbox");
+    let (name, _) = h.rt.presented("skill-review-name").expect("the row's name");
+    // One content edge: the filter, the select-all checkbox and the rows' checkboxes; the name follows.
+    assert_eq!(check[0], filter[0], "the row's checkbox {check:?} on the filter's edge {filter:?}");
+    assert_eq!(all[0], check[0], "select-all {all:?} over the rows' checkboxes {check:?}");
+    assert!(name[0] > check[0] + check[2], "the name {name:?} after the checkbox {check:?}");
+    let (status, _) = h.rt.presented("skill-review-trailing").expect("the status column");
+    assert!((status[0] + status[2] - (filter[0] + filter[2])).abs() < 0.5, "the status {status:?} ends on the filter's right edge {filter:?}");
+}
+
+#[test]
+fn bulk_bar_replaces_summary() {
+    let mut h = Harness::project();
+    h.click("check-review");
+    assert!(h.rt.find("bulk-bar").is_some());
+    assert!(h.rt.find("bulk-sync").is_some());
+    let (filter, _) = h.rt.presented("filter").unwrap();
+    let (remove, _) = h.rt.presented("bulk-remove").expect("Remove… in the bulk bar");
+    assert!((remove[0] + remove[2] - (filter[0] + filter[2])).abs() < 0.5, "Remove… {remove:?} ends on the content edge {filter:?}");
+    h.click("bulk-clear");
+    assert!(h.rt.state.checked.is_empty());
+    assert!(h.rt.find("bulk-bar").is_none(), "the summary is back");
+}
+
+/// The toolbar's elements as drawn: none may cover another.
+fn toolbar_overlaps(h: &Harness) -> Vec<String> {
+    let keys = ["tab-skills", "tab-mcp", "title", "new-skill", "check-updates", "rescan", "toolbar-more", "sync"];
+    let rects: Vec<(&str, [f32; 4])> = keys.iter().filter_map(|&k| h.rt.presented(k).map(|(r, _)| (k, r))).collect();
+    let (pane, _) = h.rt.presented("main-pane").unwrap();
+    let mut bad = Vec::new();
+    for (i, (a, ra)) in rects.iter().enumerate() {
+        if ra[0] < pane[0] || ra[0] + ra[2] > pane[0] + pane[2] + 0.5 {
+            bad.push(format!("{a} {ra:?} outside the pane {pane:?}"));
+        }
+        for (b, rb) in &rects[i + 1..] {
+            let apart = ra[0] + ra[2] <= rb[0] + 0.5 || rb[0] + rb[2] <= ra[0] + 0.5;
+            if !apart && ra[2] > 0.0 && rb[2] > 0.0 {
+                bad.push(format!("{a} {ra:?} overlaps {b} {rb:?}"));
+            }
+        }
+    }
+    bad
+}
+
+#[test]
+fn skills_toolbar_fits_the_smallest_window() {
+    let h = smallest_with_selection();
+    assert!(h.rt.find("inspector").is_some(), "the inspector is open");
+    let bad = toolbar_overlaps(&h);
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+    assert!(h.rt.find("sync").is_some() && h.rt.find("toolbar-more").is_some(), "Sync and the menu stay");
+    assert!(h.rt.find("title").is_none(), "no room for the title");
+
+    let wide = Harness::project();
+    assert!(toolbar_overlaps(&wide).is_empty(), "{}", toolbar_overlaps(&wide).join("\n"));
+    for k in ["title", "new-skill", "check-updates", "rescan", "sync"] {
+        assert!(wide.rt.find(k).is_some(), "{k} in a wide toolbar");
+    }
+    assert!(wide.rt.find("toolbar-more").is_none(), "no menu when everything fits");
+}
+
+#[test]
+fn narrow_toolbar_keeps_its_shortcuts_and_menu() {
+    let mut h = smallest_with_selection();
+    assert!(h.rt.find("new-skill").is_none(), "New skill is in the menu");
+    key(&mut h, rune::Key::Command('n'), rune::Mods { cmd: true, ..rune::Mods::default() });
+    assert!(h.rt.state.new_skill.is_some(), "⌘N still opens New skill");
+    h.rt.update(|s, _| s.new_skill = None);
+    h.settle();
+
+    h.click("toolbar-more");
+    assert!(h.rt.state.toolbar_menu);
+    let label = |h: &Harness, i: usize| h.rt.elements().into_iter().find(|e| e.key.as_deref() == Some(format!("toolbar-more-popup-item{i}").as_str())).and_then(|e| e.label);
+    assert_eq!(label(&h, 0).as_deref(), Some("New skill"));
+    assert_eq!(label(&h, 1).as_deref(), Some("Check skills.sh for updates"));
+    assert_eq!(label(&h, 2).as_deref(), Some("Rescan"));
+    h.click("toolbar-more-popup-item0");
+    assert!(h.rt.state.new_skill.is_some(), "the menu's New skill opens it");
+    assert!(!h.rt.state.toolbar_menu, "choosing closes the menu");
+
+    h.rt.update(|s, _| s.new_skill = None);
+    h.settle();
+    h.click("toolbar-more");
+    h.click("tab-mcp");
+    assert!(!h.rt.state.toolbar_menu, "another page lets go of the menu");
 }

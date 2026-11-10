@@ -67,7 +67,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     let (main, toolbar, inspector) = match (s.page.clone(), hosts::pending(s, &k)) {
         // A host whose state isn't in yet: what is happening with it, in place of the page.
         (Page::Installed | Page::Mcp, Some(pane)) => (pane, toolbar(s, &k, s.env_label(), row()), inspector_body(&k)),
-        (Page::Installed, None) => installed::page(s, &k, &mut layer),
+        (Page::Installed, None) => installed::page(s, &k, &mut layer, cx.is_reduced_motion(), toolbar_room(cx)),
         (Page::Mcp, None) => mcp::page(s, &k, &mut layer),
         (Page::Browse, _) => browse::page(s, &k, &mut layer),
     };
@@ -222,6 +222,22 @@ pub fn toolbar(s: &App, k: &Kit, title: impl Into<String>, trailing: El) -> Tool
     // One leading child, so the tabs and the title sit `S3` apart rather than at the kit's slot gap.
     let leading = row().gap(space::S3).center_y().shrink().min_w(0.0).child(page_tabs(s, k)).child(ds::toolbar_title(k, title).shrink().min_w(0.0));
     Toolbar::new().leading(leading).trailing(trailing)
+}
+
+/// The toolbar of a page with tabs and no title: a narrow list pane, where the title has no room
+/// left beside the page's buttons.
+pub fn toolbar_untitled(s: &App, k: &Kit, trailing: El) -> Toolbar {
+    Toolbar::new().leading(page_tabs(s, k)).trailing(trailing)
+}
+
+/// What the toolbar of a page with tabs has left for the page's title and buttons: from the
+/// tabs' end to the list pane's, less the kit band's end padding (`S3`) and the `S2` gaps either
+/// side of its spacer. `None` before the first layout. The pane's width does not depend on what
+/// the toolbar holds, so a page that folds its buttons by this never flips back and forth.
+fn toolbar_room(cx: &Cx<App>) -> Option<f32> {
+    let pane_end = cx.layout_with("main-pane", |r| r[0] + r[2])?;
+    let tabs_end = cx.layout_with("page-tabs", |r| r[0] + r[2])?;
+    Some(pane_end - tabs_end - space::S3 - 2.0 * space::S2)
 }
 
 /// The toolbar of a page without tabs (skills.sh): the title on the leading side, `trailing` on

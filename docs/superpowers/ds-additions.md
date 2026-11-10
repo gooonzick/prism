@@ -30,6 +30,7 @@ Keysmith base: `287ebb5`.
 | `controls.rs` | `tabs<S>(k, label, items: &[(key, label)], current, on_pick) -> El` | Segments that switch what the window shows, drawn as the kit's `SegmentedControl` at `Place::Bar` height (radiogroup of radios, `radius::CONTROL`, `space::S3` sides), but with a caller key on each segment: the kit keys its segments `segment<i>`, and Prism's page tabs must stay `tab-skills` / `tab-mcp`. Keeps `k.c` / `k.ty` out of `src/ui/` (Task 4). |
 | `tokens.rs` | `Place::height()` (24 / 28 / 28) | A control's height for a place, as the kit draws `Place::control()`: `tabs` uses it, and tests can assert heights without a literal (Task 4). |
 | `gallery.rs` | A "Tabs" section in the fifth column | Every new block in the gallery (Task 4). |
+| `controls.rs` | `button_width(k, label, place, icon) -> f32`, `toolbar_title_width(k, title) -> f32` | What a text button and an untruncated `toolbar_title` take, measured before layout with the kit's push-button metrics (padding 12/14, 16 icon + 6 gap, medium UI face): the Skills toolbar folds its buttons into "…" when the list pane is narrower than they need. Not blocks, so no gallery entry; a ds test checks them against the laid-out widths (Task 5). |
 
 ## Fixes to Keysmith's ds
 

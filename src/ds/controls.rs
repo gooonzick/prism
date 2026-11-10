@@ -6,7 +6,7 @@ use std::rc::Rc;
 use rune::{El, Icon, Shadow, TextEdit, TextStyle, Tx, row, text};
 use rune_kit::{Button, ButtonVariant, IconButton, IconButtonVariant, Kit, Menu, MenuItem, SegmentedControl, Switch, TextInput, glyphs};
 
-use super::{Place, radius, space};
+use super::{Place, radius, size, space};
 
 /// Three dots: rune-kit's glyph set has no "more".
 static MORE: Icon = Icon {
@@ -48,6 +48,21 @@ pub fn copy_button(label: impl Into<String>, place: Place, copied: bool) -> Butt
     }
     let label = label.into();
     button("Copied", place).icon(&glyphs::CHECK).label_with(move |font, ink| text(label).font(font).color(ink))
+}
+
+/// The width a text button (`button`, `primary`, `quiet`, `danger`) of `label` takes at `place`,
+/// with its icon or without, as the kit lays it out: for a caller that has to know what fits
+/// before layout, such as a toolbar that folds its buttons into "…".
+pub fn button_width(k: &Kit, label: &str, place: Place, icon: bool) -> f32 {
+    // The kit's push button: 12 points of padding a side at Regular, 14 at Large; its label in
+    // the medium UI face; a 16-point icon 6 points before the label.
+    let pad = match place {
+        Place::Inspector => 12.0,
+        Place::List | Place::Bar => 14.0,
+    };
+    let (label, _) = rune::text::measure(label, &[], k.ty.ui_medium, None);
+    let icon = if icon { size::ICON + 6.0 } else { 0.0 };
+    2.0 * pad + icon + label
 }
 
 /// An icon-only button; `label` is its accessible name and tooltip.
@@ -201,6 +216,11 @@ pub fn tabs<S: 'static>(k: &Kit, label: &str, items: &[(&str, &str)], current: u
 /// (`size::LIST_MIN`) it would sit under the buttons.
 pub fn toolbar_title(k: &Kit, title: impl Into<String>) -> El {
     text(title.into()).key("title").font(k.ty.ui_medium).color(k.c.text_base).truncate()
+}
+
+/// The width `toolbar_title` takes untruncated.
+pub fn toolbar_title_width(k: &Kit, title: &str) -> f32 {
+    rune::text::measure(title, &[], k.ty.ui_medium, None).0
 }
 
 /// One entry of an overflow menu.
