@@ -273,6 +273,8 @@ pub fn empty(title: &str, detail: &str, k: &Kit) -> El {
 pub fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if shell::is_sidebar_toggle(ev) {
         s.sidebar.toggle();
+        // The list's width changes, and with it whether the Skills toolbar folds into "…".
+        s.toolbar_menu = false;
         return true;
     }
     if ev.key == rune::Key::Escape && !s.checked.is_empty() && !s.sync_open() && s.confirm_remove.is_none() {

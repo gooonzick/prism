@@ -53,6 +53,8 @@ impl App {
 
     pub fn select(&mut self, name: &str) {
         self.selected = Some(name.to_string());
+        // Opening the inspector narrows the list: a "…" left open from before must not pop up.
+        self.toolbar_menu = false;
         self.load_preview();
         if !self.inspector.is_open() {
             self.inspector.toggle();

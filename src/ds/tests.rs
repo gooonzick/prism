@@ -860,6 +860,92 @@ mod page_additions {
         assert_eq!(rt.state, 0);
     }
 
+    /// A page whose content is 244 wide: the list pane at the smallest window (`LIST_MIN` less
+    /// `PANE_EDGE` either side).
+    fn smallest_page(_: &(), _: &mut Cx<()>) -> El {
+        let k = Kit::neutral(false);
+        let edit = TextEdit::new("");
+        let labels = vec!["All 7".to_string(), "Unsynced 7".to_string(), "Broken 1".to_string(), "Updates 0".to_string()];
+        let tags = (0..3).map(|i| tag(&k, format!("agent-{i}"), Some(Tone::Ok), ""));
+        let list_row = ListRow::new("row", "vercel-react-best-practices-for-large-apps")
+            .meta("React and Next.js performance guidelines from Vercel Engineering.")
+            .pick(false, "Select", |_: &mut (), _: &mut Tx| {})
+            .tags(tags)
+            .trailing(status(&k, Tone::Warn, "not in .agents"))
+            .build(&k, |_: &mut ()| {});
+        rune::row().h_full().child(col().w(size::LIST_MIN).h_full().child(
+            Page::new("page")
+                .filter(filter(&edit, "Filter").build(&k).key("filter"))
+                .segments(segments(&labels, Some(0), "Show", |_: &mut (), _, _: &mut Tx| {}).build(&k).key("segments"))
+                .count("7 skills")
+                .rows([list_row])
+                .build(&k),
+        ))
+    }
+
+    #[test]
+    fn a_row_at_the_smallest_width_keeps_its_status() {
+        let rt = run((), smallest_page, (400.0, 400.0));
+        let filter = rect(&rt, "filter");
+        let edge = filter[0] + filter[2];
+        assert_eq!(filter[2], size::LIST_MIN - 2.0 * size::PANE_EDGE);
+        let trailing = rect(&rt, "row-trailing");
+        assert_eq!(trailing[2], size::ROW_TRAILING, "the status column keeps its width");
+        assert!(trailing[0] + trailing[2] <= edge + 0.5, "the status column {trailing:?} ends inside the content edge {edge}");
+        let name = rect(&rt, "row-name");
+        let check = rect(&rt, "row-check");
+        assert!(name[0] > check[0] + check[2], "the name follows the checkbox");
+        assert!(name[2] > 0.0 && name[2] < size::ROW_NAME_MIN, "the name truncates below ROW_NAME_MIN: {name:?}");
+        assert!(name[0] + name[2] <= trailing[0], "the name {name:?} ends before the status {trailing:?}");
+    }
+
+    #[test]
+    fn segments_at_the_smallest_width_stay_inside() {
+        let rt = run((), smallest_page, (400.0, 400.0));
+        let filter = rect(&rt, "filter");
+        let seg = rect(&rt, "segments");
+        assert!(seg[0] + seg[2] <= filter[0] + filter[2] + 0.5, "the segments {seg:?} end inside the content edge {filter:?}");
+        let last = rect(&rt, "segment3");
+        assert!(last[0] + last[2] <= filter[0] + filter[2] + 0.5, "the last segment {last:?} too");
+    }
+
+    /// A wide row is laid out as before: the name keeps the room the tags leave.
+    #[test]
+    fn a_wide_row_is_unchanged() {
+        fn wide(_: &(), _: &mut Cx<()>) -> El {
+            let k = Kit::neutral(false);
+            let tags = (0..3).map(|i| tag(&k, format!("agent-{i}"), None, ""));
+            let row = ListRow::new("row", "review").pick(false, "Select", |_: &mut (), _: &mut Tx| {}).tags(tags).trailing(status(&k, Tone::Ok, "synced")).build(&k, |_: &mut ()| {});
+            col().w(600.0).items_stretch().px(space::S2).child(row)
+        }
+        let rt = run((), wide, (700.0, 200.0));
+        let (name, trailing) = (rect(&rt, "row-name"), rect(&rt, "row-trailing"));
+        let row = rect(&rt, "row");
+        assert_eq!(trailing[0] + trailing[2], row[0] + row[2] - space::S2, "the status ends at the row's padding");
+        assert!(name[2] > size::ROW_NAME_MIN, "the name takes the free room: {name:?}");
+    }
+
+    /// A long meta line doesn't take the tags' room: they show whole while the name has
+    /// `ROW_NAME_MIN` beside them.
+    #[test]
+    fn a_long_meta_leaves_the_tags_whole() {
+        fn long_meta(_: &(), _: &mut Cx<()>) -> El {
+            let k = Kit::neutral(false);
+            let tags = (0..3).map(|i| tag(&k, format!("agent-{i}"), None, "").key(format!("t{i}")));
+            let row = ListRow::new("row", "find-skills")
+                .meta("Finds and installs agent skills when you ask how to do something new, and a good deal more besides.")
+                .pick(false, "Select", |_: &mut (), _: &mut Tx| {})
+                .tags(tags)
+                .trailing(status(&k, Tone::Ok, "2 to link"))
+                .build(&k, |_: &mut ()| {});
+            col().w(560.0).items_stretch().px(space::S2).child(row)
+        }
+        let rt = run((), long_meta, (700.0, 200.0));
+        let tag = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("t2")).expect("the last tag");
+        assert_eq!(tag.visible[2], tag.rect[2], "the last tag {:?} shows whole, visible {:?}", tag.rect, tag.visible);
+        assert!(rect(&rt, "row-name")[2] >= size::ROW_NAME_MIN);
+    }
+
     fn measured(_: &(), _: &mut Cx<()>) -> El {
         let k = Kit::neutral(false);
         static ICON: rune::Icon = rune::Icon { name: "t-dot", view: 16.0, body: r#"<circle cx="8" cy="8" r="2" fill="currentColor"/>"# };

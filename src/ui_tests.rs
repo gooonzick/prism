@@ -2306,3 +2306,58 @@ fn narrow_toolbar_keeps_its_shortcuts_and_menu() {
     h.click("tab-mcp");
     assert!(!h.rt.state.toolbar_menu, "another page lets go of the menu");
 }
+
+impl Harness {
+    /// Whether the narrow toolbar's menu item `i` takes presses (a disabled item isn't focusable).
+    fn menu_item_enabled(&self, i: usize) -> bool {
+        let key = format!("toolbar-more-popup-item{i}");
+        self.rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key.as_str())).unwrap_or_else(|| panic!("no {key}")).focusable
+    }
+}
+
+#[test]
+fn narrow_menu_disables_the_check_while_checking_and_on_a_host() {
+    let mut h = smallest_with_selection();
+    let scope = h.rt.state.scope.clone();
+    h.rt.update(move |s, _| {
+        s.checking.insert(scope);
+    });
+    h.settle();
+    h.click("toolbar-more");
+    assert!(h.menu_item_enabled(0) && h.menu_item_enabled(2), "New skill and Rescan stay");
+    assert!(!h.menu_item_enabled(1), "Checking for updates… is disabled while it runs");
+
+    let (mut h, _remote) = on_host();
+    h.rt.set_viewport(crate::ui::MIN_WINDOW, 2.0);
+    h.settle();
+    h.click("skill-far");
+    assert!(h.rt.find("new-skill").is_none(), "narrow on the host too");
+    h.click("toolbar-more");
+    assert!(!h.menu_item_enabled(1), "a host's skills aren't checked against skills.sh");
+    assert!(h.menu_item_enabled(0) && h.menu_item_enabled(2));
+}
+
+#[test]
+fn cmd_r_rescans_in_a_narrow_toolbar() {
+    let mut h = smallest_with_selection();
+    assert!(h.rt.find("rescan").is_none(), "Rescan is in the menu");
+    skill(&h.project_dir().join(".claude/skills"), "fresh");
+    key(&mut h, rune::Key::Command('r'), rune::Mods { cmd: true, ..rune::Mods::default() });
+    assert!(h.rt.state.inv.get("fresh").is_some(), "⌘R rescanned");
+}
+
+#[test]
+fn selecting_a_row_lets_go_of_a_stale_menu() {
+    let mut h = smallest_with_selection();
+    h.click("toolbar-more");
+    assert!(h.rt.state.toolbar_menu);
+    // Widening hides the menu with the flag still set; a new selection drops it.
+    h.rt.set_viewport((1180.0, 760.0), 2.0);
+    h.settle();
+    assert!(h.rt.find("toolbar-more").is_none());
+    h.click("skill-review");
+    assert!(!h.rt.state.toolbar_menu, "a selection clears it");
+    h.rt.set_viewport(crate::ui::MIN_WINDOW, 2.0);
+    h.settle();
+    assert!(h.rt.find("toolbar-more-popup-item0").is_none(), "the menu doesn't reopen by itself");
+}

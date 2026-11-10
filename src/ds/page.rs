@@ -1,7 +1,7 @@
 //! The list page: filter, status line, a scrolling list of rows (or an empty state), all on one
 //! content edge. Plus the row that goes in the list.
 
-use rune::{Cursor, El, Icon, ScrollSpec, Tx, col, icon, row};
+use rune::{Cursor, El, Icon, ScrollSpec, Tx, col, el, icon, row};
 use rune_kit::{Checkbox, Kit, Spinner, glyphs};
 
 use super::{color, motion, radius, size, space, text, ty};
@@ -88,8 +88,9 @@ impl Page {
             page = page.child(f);
         }
         if let Some(s) = self.segments {
-            // In a row, so the segments keep the width their labels need.
-            page = page.child(row().w_full().child(s));
+            // In a row, so the segments keep the width their labels need; narrower than that, they
+            // shrink to the content edge, share it equally and truncate their labels.
+            page = page.child(row().w_full().child(s.shrink()));
         }
         let first = self.selection.or_else(|| self.count.map(|c| text::label(k, c).key("count")));
         if first.is_some() || !self.notices.is_empty() {
@@ -359,10 +360,18 @@ impl ListRow {
         let check_key = self.pick_key.unwrap_or_else(|| format!("{}-check", self.key));
         let trailing_key = format!("{}-trailing", self.key);
         let height = if self.meta.is_some() { size::ROW_2 } else { size::ROW_1 };
-        let mut body = col().grow(1.0).min_w(size::ROW_NAME_MIN).child(text::name(k, self.name.clone()).key(format!("{}-name", self.key)));
+        // The name column's floor is `ROW_NAME_MIN`, or all the room the name has when the row
+        // is narrower than its checkbox, icon, `ROW_NAME_MIN` and trailing column. Its only
+        // in-flow child is an invisible `ROW_NAME_MIN` strut, so that is its min-content (the
+        // name and meta lines are pinned over it and add none, however long), and its full width
+        // in the middle caps that floor, as CSS's automatic minimum size does (`min(content,
+        // specified width)`). So the tags give way first, then the name truncates; the trailing
+        // column never does.
+        let mut lines = col().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).justify_center().child(text::name(k, self.name.clone()).key(format!("{}-name", self.key)));
         if let Some(m) = self.meta {
-            body = body.child(text::label(k, m));
+            lines = lines.child(text::label(k, m));
         }
+        let body = col().grow(1.0).w_frac(1.0).h_full().child(el().w(size::ROW_NAME_MIN).h(0.0).a11y_hidden()).child(lines);
         let mut r = row()
             .key(self.key)
             .role("button")
@@ -382,11 +391,12 @@ impl ListRow {
         if let Some(i) = self.icon {
             r = r.child(icon(i, size::ICON).color(color::text_muted(k)));
         }
-        r = r.child(body);
+        let mut middle = row().grow(1.0).min_w(0.0).h_full().gap(space::S3).center_y().child(body);
         if !self.tags.is_empty() {
             // Tags give way to the name: past `ROW_NAME_MIN` they narrow and are cut at the end.
-            r = r.child(row().shrink().gap(space::S1).center_y().clip_rounded(radius::TAG).children(self.tags));
+            middle = middle.child(row().shrink().gap(space::S1).center_y().clip_rounded(radius::TAG).children(self.tags));
         }
+        r = r.child(middle);
         if let Some(t) = self.trailing {
             r = r.child(row().key(trailing_key).w(size::ROW_TRAILING).center_y().justify_end().child(t));
         }

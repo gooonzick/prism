@@ -35,8 +35,9 @@ fn toolbar(s: &App, unsynced: usize, room: Option<f32>, k: &Kit, layer: &mut Vec
         n => format!("Sync {n} skills"),
     };
     let title = scope_title(&s.scope, "skills");
-    // The wide toolbar: the title (it may truncate, though not below a list name's minimum), three
-    // icon buttons and Sync, `S2` apart.
+    // The wide toolbar: the title, three icon buttons and Sync, `S2` apart.
+    // The title counts at most `ROW_NAME_MIN`: past that it truncates, so a long project name
+    // never folds the buttons into "…" while they fit beside a shortened title.
     let icons = 3.0 * (Place::Bar.height() + space::S2);
     let wide = space::S3 + ds::toolbar_title_width(k, &title).min(size::ROW_NAME_MIN) + icons + ds::button_width(k, &sync_label, Place::Bar, true);
     let trailing = row().gap(space::S2).center_y();
