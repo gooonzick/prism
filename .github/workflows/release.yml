@@ -13,12 +13,14 @@ jobs:
     strategy:
       matrix:
         include:
-          - { arch: x86_64, os: ubuntu-24.04 }
-          - { arch: arm64, os: ubuntu-24.04-arm }
+          - { arch: x86_64, os: ubuntu-24.04, musl: x86_64-unknown-linux-musl }
+          - { arch: arm64, os: ubuntu-24.04-arm, musl: aarch64-unknown-linux-musl }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y pkg-config libwayland-dev libxkbcommon-dev libdbus-1-dev
+      # musl-tools: the CLI archive is a static musl build (package-cli.sh).
+      - run: sudo apt-get update && sudo apt-get install -y pkg-config libwayland-dev libxkbcommon-dev libdbus-1-dev musl-tools
+      - run: rustup target add ${{ matrix.musl }}
       - uses: Swatinem/rust-cache@v2
       - run: ./scripts/package-linux.sh
       - run: ./scripts/package-cli.sh

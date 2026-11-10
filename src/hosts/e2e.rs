@@ -38,6 +38,8 @@ fn ssh(name: &str) -> Ssh {
 /// for the control operation.
 fn control(op: &str) -> std::process::Output {
     let mut argv = ssh("box").argv("true");
+    // It ends `TARGET -- true`: drop those three, whatever comes before them.
+    assert_eq!(argv[argv.len() - 3..], [TARGET, "--", "true"], "{argv:?}");
     argv.truncate(argv.len() - 3);
     argv.extend(["-O".into(), op.into(), TARGET.into()]);
     Command::new(&argv[0]).args(&argv[1..]).output().expect("ssh runs")

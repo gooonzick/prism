@@ -173,7 +173,7 @@ prism hosts install devbox                   # put this version in ~/.local/bin 
 prism hosts list
 ```
 
-The host needs the same version of `prism` as this machine. Each release carries a CLI-only build, without the window, for that: `prism-cli-X.Y.Z-linux-x86_64.tar.gz`, `prism-cli-X.Y.Z-linux-arm64.tar.gz` and `prism-cli-X.Y.Z-macos-arm64.tar.gz`, each holding one file, `prism`, and all listed in `SHA256SUMS`. `prism hosts install` downloads the matching archive on the host, checks it against `SHA256SUMS` and puts `prism` in `~/.local/bin`; nothing else there changes. Use `--binary PATH` to upload a build of your own instead.
+The host needs the same version of `prism` as this machine. Each release carries a CLI-only build, without the window, for that: `prism-cli-X.Y.Z-linux-x86_64.tar.gz`, `prism-cli-X.Y.Z-linux-arm64.tar.gz` and `prism-cli-X.Y.Z-macos-arm64.tar.gz`, each holding one file, `prism`, and all listed in `SHA256SUMS`; the Linux ones are static (musl), so they run whatever the host's glibc. `prism hosts install` downloads the matching archive on the host, checks it against `SHA256SUMS`, runs it there to see that it reports this version, and only then puts `prism` in `~/.local/bin`; nothing else there changes. Use `--binary PATH` to upload a build of your own instead. A `~/.local/bin/prism` there that is another program stays unless you pass `--force`.
 
 **The switcher.** The machine menu above the scopes lists this machine, your saved hosts and *Add host…*. Pick a host and the window shows its skills, projects and MCP servers, and every action (sync, link, remove, edit a server, undo) acts there. A host without this version of `prism` offers *Install prism*; one that doesn't answer says why and offers *Retry*. skills.sh installs always land on this machine; copy them across afterwards.
 
@@ -214,7 +214,7 @@ cargo test -- --ignored       # also hit skills.sh and GitHub; the e2e_ ones nee
 ./scripts/demo-home.sh        # rebuild the screenshots in docs/ from a demo home
 ```
 
-The end to end tests reach a Linux container over a real ssh. `scripts/e2e-ssh.sh` starts it (Docker, or Colima on macOS), with a throwaway key and the CLI-only Linux build of `prism`; it keeps everything in `~/.cache/prism-e2e` and never touches your `~/.ssh`:
+The end to end tests reach a Linux container over a real ssh, so they need Docker running (on macOS, start Colima with `colima start`, or Docker Desktop); the script checks `docker info` first and says so when it doesn't answer. `scripts/e2e-ssh.sh` starts the container with a throwaway key and the CLI-only Linux build of `prism`, the static musl build releases ship; it keeps everything in `~/.cache/prism-e2e` and never touches your `~/.ssh`:
 
 ```bash
 ./scripts/e2e-ssh.sh && cargo test -- --ignored e2e_

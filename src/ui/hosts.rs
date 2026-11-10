@@ -49,9 +49,10 @@ pub fn pending(s: &App, k: &Kit) -> Option<El> {
         }
         RemoteState::NeedsInstall(health) => {
             let detail = match health {
-                Health::OtherVersion(v) => format!("It has prism {v}; Install puts {VERSION} in ~/.local/bin in its place."),
+                Health::OtherVersion(v, _) => format!("It has prism {v}; Install puts {VERSION} in ~/.local/bin in its place."),
                 Health::Unsupported(system) => format!("No release is built for {system}; put a build there with prism hosts install {name} --binary."),
-                Health::Missing | Health::Ready => format!("Install puts it in ~/.local/bin on {name}; nothing else there changes."),
+                Health::Missing(Some(why)) => format!("Its prism doesn't run ({why}); Install puts {VERSION} in ~/.local/bin in its place."),
+                Health::Missing(None) | Health::Ready => format!("Install puts it in ~/.local/bin on {name}; nothing else there changes."),
             };
             let install = Button::new("Install prism")
                 .variant(ButtonVariant::Contrast)

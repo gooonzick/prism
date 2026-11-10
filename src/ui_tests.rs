@@ -1174,10 +1174,29 @@ fn needs_install_offers_install() {
     h.with_host(crate::hosts::runner::local_runners(&[("box", remote.path())]));
     h.rt.update(|s, _| s.switch_env(Some("box")));
     h.land_remote();
-    assert_eq!(h.remote_state(), Some(crate::app::RemoteState::NeedsInstall(crate::hosts::install::Health::OtherVersion("0.0.1".into()))));
+    assert_eq!(h.remote_state(), Some(crate::app::RemoteState::NeedsInstall(crate::hosts::install::Health::OtherVersion("0.0.1".into(), None))));
     let version = crate::hosts::install::VERSION;
     assert!(h.texts().contains(&format!("prism {version} isn't on box")), "{}", h.texts());
     assert!(h.rt.find("env-install").is_some());
+}
+
+#[test]
+fn install_leaves_another_program_and_says_why() {
+    let mut h = Harness::project();
+    // A `prism` there that is something else: the install refuses before it fetches anything.
+    let remote = host_home("0.0.1");
+    let theirs = remote.path().join(".local/bin/prism");
+    fs::write(&theirs, "#!/bin/sh\necho 'Prism image tools 4.1'\n").unwrap();
+    h.with_host(crate::hosts::runner::local_runners(&[("box", remote.path())]));
+    h.rt.update(|s, _| s.switch_env(Some("box")));
+    h.land_remote();
+    assert_eq!(h.remote_state(), Some(crate::app::RemoteState::NeedsInstall(crate::hosts::install::Health::Missing(None))));
+    h.click("env-install");
+    h.land_remote();
+    let notice = h.rt.state.notice.as_ref().expect("a toast");
+    assert_eq!(notice.title, "Couldn't install prism on box");
+    assert!(notice.error && notice.detail.contains("another program") && notice.detail.contains("--force"), "{}", notice.detail);
+    assert!(fs::read_to_string(&theirs).unwrap().contains("image tools"), "left alone");
 }
 
 #[test]

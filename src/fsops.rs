@@ -314,9 +314,11 @@ pub fn uri_escape(path: &Path) -> String {
 
 /// The local time as a `.trashinfo` wants it: `2026-11-07T14:05:09`.
 fn local_now() -> String {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as libc::time_t;
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     // SAFETY: `localtime_r` only writes the `tm` it is given.
     let tm = unsafe {
+        // `time_t`, unnamed: musl's libc deprecates the alias while its width changes.
+        let now = secs as _;
         let mut tm: libc::tm = std::mem::zeroed();
         libc::localtime_r(&now, &mut tm);
         tm

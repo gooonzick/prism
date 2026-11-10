@@ -32,6 +32,9 @@ pub enum Cmd {
         /// Upload this file instead of downloading the release.
         #[arg(long, value_name = "PATH")]
         binary: Option<PathBuf>,
+        /// Replace a ~/.local/bin/prism there that is another program.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -70,7 +73,7 @@ pub fn run(cmd: Cmd, ctx: &mut Ctx, out: &mut Out, err: &mut dyn Write) -> Exit 
             Exit::Ok
         }
         Cmd::Check { name } => check(ctx, &name, out, err),
-        Cmd::Install { name, binary } => install(ctx, &name, binary.as_deref(), out, err),
+        Cmd::Install { name, binary, force } => install(ctx, &name, binary.as_deref(), force, out, err),
     }
 }
 
@@ -96,24 +99,24 @@ fn check(ctx: &Ctx, name: &str, out: &mut Out, err: &mut dyn Write) -> Exit {
     };
     let remote_version = match &health {
         Health::Ready => Some(VERSION.to_string()),
-        Health::OtherVersion(v) => Some(v.clone()),
-        Health::Missing | Health::Unsupported(_) => None,
+        Health::OtherVersion(v, _) => Some(v.clone()),
+        Health::Missing(_) | Health::Unsupported(_) => None,
     };
     out.emit(
         format!("prism on {} is {} ({} {})", host.name, health.describe(), platform.os, platform.arch),
-        json!({ "name": host.name, "reachable": true, "health": health.key(), "remote_version": remote_version, "os": platform.os, "arch": platform.arch }),
+        json!({ "name": host.name, "reachable": true, "health": health.key(), "remote_version": remote_version, "os": platform.os, "arch": platform.arch, "why": health.why() }),
     );
     if health == Health::Ready { Exit::Ok } else { Exit::Problems }
 }
 
-fn install(ctx: &Ctx, name: &str, binary: Option<&Path>, out: &mut Out, err: &mut dyn Write) -> Exit {
+fn install(ctx: &Ctx, name: &str, binary: Option<&Path>, force: bool, out: &mut Out, err: &mut dyn Write) -> Exit {
     let host = resolve(ctx, name);
     let runner = (ctx.make_runner)(&host);
     let platform = match install::check(runner.as_ref()) {
         Ok((_, platform)) => platform,
         Err(e) => return failed(out, err, &e),
     };
-    if let Err(e) = install::install(runner.as_ref(), VERSION, &platform, binary) {
+    if let Err(e) = install::install(runner.as_ref(), VERSION, &platform, binary, force) {
         return failed(out, err, &format!("Can't install prism on {}: {e}", host.name));
     }
     // What was put there must run as this version.

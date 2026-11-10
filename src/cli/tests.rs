@@ -1823,7 +1823,7 @@ fn version_mismatch_refuses_commands() {
     let log = log.lock().unwrap().clone();
     assert_eq!(log.len(), 2, "{log:?}");
     assert_eq!(log[0], "runner x me@x");
-    assert!(log[1].starts_with("shell uname -sm;"), "{log:?}");
+    assert!(log[1].starts_with("shell uname -sm\n"), "{log:?}");
 
     let (mut c, log) = fake_hosts(home.path(), None);
     let (code, out, _) = go(&["--json", "--host", "x", "skills", "list"], &mut c);
@@ -1932,7 +1932,7 @@ fn hosts_check_reports_health() {
     let (mut c, _) = fake_hosts(home.path(), Some(VERSION));
     let (code, out, _) = go(&["hosts", "check", "x", "--json"], &mut c);
     assert_eq!(code, 0, "{out}");
-    let want = serde_json::json!({ "name": "x", "reachable": true, "health": "ready", "remote_version": VERSION, "os": "linux", "arch": "x86_64" });
+    let want = serde_json::json!({ "name": "x", "reachable": true, "health": "ready", "remote_version": VERSION, "os": "linux", "arch": "x86_64", "why": null });
     assert_eq!(json(&out), want);
 
     let (mut c, _) = fake_hosts(home.path(), Some("0.0.0-other"));
@@ -1966,6 +1966,29 @@ fn hosts_install_uploads_a_binary() {
     assert_eq!(code, 1);
     assert!(err.contains("not prism"), "{err}");
     assert!(std::fs::read_to_string(remote.path().join(".local/bin/prism")).unwrap().contains(VERSION));
+}
+
+#[test]
+fn hosts_install_leaves_another_program_unless_forced() {
+    use std::os::unix::fs::PermissionsExt;
+    let remote = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let theirs = remote.path().join(".local/bin/prism");
+    std::fs::create_dir_all(theirs.parent().unwrap()).unwrap();
+    std::fs::write(&theirs, "#!/bin/sh\necho 'Prism image tools 4.1'\n").unwrap();
+    std::fs::set_permissions(&theirs, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let binary = home.path().join("prism-build");
+    std::fs::write(&binary, format!("#!/bin/sh\necho \"prism {VERSION}\"\n")).unwrap();
+    let mut c = on_local_host(home.path(), remote.path());
+    let install = ["hosts", "install", "x", "--binary", binary.to_str().unwrap()];
+    let (code, _, err) = go(&install, &mut c);
+    assert_eq!(code, 1);
+    assert_eq!(err.trim(), "Can't install prism on x: ~/.local/bin/prism is another program; move it away, or replace it with prism hosts install --force");
+    assert!(std::fs::read_to_string(&theirs).unwrap().contains("image tools"), "left alone");
+
+    let (code, out, err) = go(&[&install[..], &["--force"]].concat(), &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(std::fs::read_to_string(&theirs).unwrap().contains(VERSION));
 }
 
 /// `mcp_home()` plus skills in every placement, a registered project, a saved host and a last

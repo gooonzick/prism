@@ -12,8 +12,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: Linux x86_64, os: ubuntu-24.04 }
-          - { name: Linux arm64, os: ubuntu-24.04-arm }
+          - { name: Linux x86_64, os: ubuntu-24.04, musl: x86_64-unknown-linux-musl }
+          - { name: Linux arm64, os: ubuntu-24.04-arm, musl: aarch64-unknown-linux-musl }
           - { name: macOS, os: macos-15 }
     runs-on: ${{ matrix.os }}
     steps:
@@ -22,6 +22,13 @@ jobs:
       # Before the GUI libraries are installed, so a stray rune dependency fails here.
       - run: cargo clippy --no-default-features --all-targets -- -D warnings
       - run: cargo test --no-default-features
+      # The CLI archive releases ship for Linux: a static musl build (scripts/package-cli.sh).
+      - name: Build the static Linux CLI
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y musl-tools
+          rustup target add ${{ matrix.musl }}
+          cargo build --locked --no-default-features --target ${{ matrix.musl }}
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libwayland-dev libxkbcommon-dev libdbus-1-dev

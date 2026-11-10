@@ -98,7 +98,7 @@ pub(super) fn load(r: &dyn Runner, host: &Host, scope: &Scope, install_first: bo
     let mut install_error = None;
     if install_first {
         match install::check(r) {
-            Ok((_, platform)) => install_error = install::install(r, VERSION, &platform, None).err(),
+            Ok((_, platform)) => install_error = install::install(r, VERSION, &platform, None, false).err(),
             Err(e) => return (Err(RemoteState::Unreachable(e)), None),
         }
     }
