@@ -4,7 +4,11 @@
 //!
 //! `cargo run -- [project folder]` opens the window; `-- --snap out.png` renders it headless.
 
+// Much of the shared code (scan, sync, store) is only called from the window.
+#![cfg_attr(not(feature = "gui"), allow(dead_code))]
+
 mod agents;
+#[cfg(feature = "gui")]
 mod app;
 mod cli;
 mod fsops;
@@ -16,35 +20,44 @@ mod scan;
 mod skill;
 mod store;
 mod sync;
+#[cfg(feature = "gui")]
 mod ui;
-#[cfg(test)]
+#[cfg(all(test, feature = "gui"))]
 mod ui_tests;
 
+#[cfg(feature = "gui")]
 use rune::{AppSpec, Tx, Waker};
 
+#[cfg(feature = "gui")]
 use crate::agents::Paths;
+#[cfg(feature = "gui")]
 use crate::app::App;
+#[cfg(feature = "gui")]
 use crate::store::Settings;
 
+#[cfg(feature = "gui")]
 fn init() -> App {
     let paths = Paths::from_env();
     let settings = Settings::load_from(&paths);
     App::new(paths, settings)
 }
 
+#[cfg(feature = "gui")]
 fn setup(s: &mut App, waker: Waker) {
     s.set_waker(waker);
 }
 
 /// The app menu's "Install Command Line Tool…".
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "gui", target_os = "macos"))]
 fn install_cli_tool(s: &mut App, _: &mut Tx) {
     s.install_cli_tool();
 }
 
 /// How long a notice stays up.
+#[cfg(feature = "gui")]
 const NOTICE_SECS: f64 = 5.0;
 
+#[cfg(feature = "gui")]
 fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
     let mut changed = s.poll();
     match (&s.notice, s.notice_at) {
@@ -64,8 +77,10 @@ fn poll(s: &mut App, clock: f64, tx: &mut Tx) -> bool {
 }
 
 /// Headless scenes (`--scene NAME`) for checking the layout without clicking.
+#[cfg(feature = "gui")]
 type Scene = (&'static str, fn(&mut App));
 
+#[cfg(feature = "gui")]
 static SCENES: &[Scene] = &[
     ("detail", |s| {
         if let Some(name) = s.inv.skills.first().map(|x| x.name.clone()) {
@@ -172,6 +187,17 @@ fn main() {
     if let Some(code) = cli::run(std::env::args_os().skip(1).collect()) {
         std::process::exit(code);
     }
+    #[cfg(feature = "gui")]
+    window();
+    #[cfg(not(feature = "gui"))]
+    {
+        cli::run(vec!["--help".into()]);
+        std::process::exit(2);
+    }
+}
+
+#[cfg(feature = "gui")]
+fn window() {
     rune::prewarm_gpu();
     let spec = AppSpec {
         setup: Some(setup),

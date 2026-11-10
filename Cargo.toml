@@ -6,15 +6,20 @@ description = "Browse, install and sync agent skills across .agents, .claude, .c
 license = "MIT"
 repository = "https://github.com/gooonzick/prism"
 
+[features]
+default = ["gui"]
+# The window. Without it `prism` is the CLI only (for headless hosts).
+gui = ["dep:rune", "dep:rune-kit", "dep:notify"]
+
 [dependencies]
-rune = { git = "https://github.com/anomalyco/rune", rev = "7ead7d63fcf6f9dd9669385a8b90e2ae80015d7b", features = ["native-file-dialog"] }
-rune-kit = { git = "https://github.com/anomalyco/rune", rev = "7ead7d63fcf6f9dd9669385a8b90e2ae80015d7b", features = ["markdown"] }
+rune = { optional = true, git = "https://github.com/anomalyco/rune", rev = "7ead7d63fcf6f9dd9669385a8b90e2ae80015d7b", features = ["native-file-dialog"] }
+rune-kit = { optional = true, git = "https://github.com/anomalyco/rune", rev = "7ead7d63fcf6f9dd9669385a8b90e2ae80015d7b", features = ["markdown"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 ureq = { version = "2", features = ["json"] }
 dirs = "5"
-notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
+notify = { optional = true, version = "8", default-features = false, features = ["macos_fsevent"] }
 # Local time for the freedesktop trash's info files.
 libc = "0.2"
 # MCP configs, edited in place so comments, key order and formatting survive.
