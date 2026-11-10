@@ -1419,3 +1419,56 @@ fn setup_works_on_the_global_setup_only() {
     assert!(err.contains("global"), "{err}");
     assert!(!h.join(".agents/skills/prism").exists());
 }
+
+#[test]
+fn hosts_add_list_remove() {
+    let home = tempfile::tempdir().unwrap();
+    let mut c = ctx(home.path());
+    let (code, out, _) = go(&["hosts", "add", "laptop", "--ssh", "george@laptop", "--json"], &mut c);
+    assert_eq!(code, 0);
+    assert_eq!(json(&out), serde_json::json!({ "name": "laptop", "ssh": "george@laptop", "added": true }));
+    // The settings file round-trips.
+    assert_eq!(Settings::load_from(&c.paths).hosts, vec![crate::hosts::Host { name: "laptop".into(), ssh: "george@laptop".into() }]);
+    let (code, out, _) = go(&["hosts", "list", "--json"], &mut c);
+    assert_eq!(code, 0);
+    assert_eq!(json(&out), serde_json::json!([{ "name": "laptop", "ssh": "george@laptop" }]));
+    let (code, out, _) = go(&["hosts", "remove", "laptop", "--json"], &mut c);
+    assert_eq!(code, 0);
+    assert_eq!(json(&out), serde_json::json!({ "name": "laptop", "removed": true }));
+    let (_, out, _) = go(&["hosts", "list", "--json"], &mut c);
+    assert_eq!(json(&out), serde_json::json!([]));
+    assert!(Settings::load_from(&c.paths).hosts.is_empty());
+}
+
+#[test]
+fn hosts_add_rejects_bad_names() {
+    let home = tempfile::tempdir().unwrap();
+    let mut c = ctx(home.path());
+    let long = "a".repeat(33);
+    for name in ["bad name", "local", "this", "", long.as_str()] {
+        let (code, _, err) = go(&["hosts", "add", name, "--ssh", "me@box"], &mut c);
+        assert_eq!(code, 2, "{name:?}");
+        assert!(!err.is_empty(), "{name:?}");
+    }
+    assert!(c.settings.hosts.is_empty());
+    assert!(Settings::load_from(&c.paths).hosts.is_empty());
+}
+
+#[test]
+fn hosts_add_twice_is_usage_error() {
+    let home = tempfile::tempdir().unwrap();
+    let mut c = ctx(home.path());
+    assert_eq!(go(&["hosts", "add", "box", "--ssh", "me@box"], &mut c).0, 0);
+    let (code, _, err) = go(&["hosts", "add", "box", "--ssh", "me@other"], &mut c);
+    assert_eq!(code, 2);
+    assert!(err.contains("already"), "{err}");
+    assert_eq!(c.settings.hosts[0].ssh, "me@box");
+}
+
+#[test]
+fn hosts_reject_project_flag() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (code, _, _) = go(&["--project", dir.path().to_str().unwrap(), "hosts", "list"], &mut ctx(home.path()));
+    assert_eq!(code, 2);
+}

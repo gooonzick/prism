@@ -12,6 +12,7 @@ use crate::agents::{self, Paths, Scope};
 use crate::store::{self, Settings};
 
 mod doctor;
+mod hosts;
 mod mcp;
 mod projects;
 pub mod setup;
@@ -79,7 +80,7 @@ impl Out<'_> {
 }
 
 /// Words that route to the CLI. Anything else (a folder, Rune's `--snap`) opens the window.
-const SUBCOMMANDS: &[&str] = &["agents", "targets", "skills", "mcp", "projects", "undo", "doctor", "setup"];
+const SUBCOMMANDS: &[&str] = &["agents", "targets", "skills", "mcp", "projects", "undo", "doctor", "setup", "hosts"];
 
 /// Whether `args` are a command line: help or the version, or a subcommand, maybe after the
 /// global flags (`--json`, `--project DIR`). Everything else is the window's.
@@ -152,6 +153,11 @@ enum Command {
     },
     /// Put `prism` on PATH and install the prism skill for agents.
     Setup,
+    /// List, add and remove the remote hosts Prism reaches over ssh.
+    Hosts {
+        #[command(subcommand)]
+        command: hosts::Cmd,
+    },
 }
 
 /// `None` when `args` aren't a command line (see [`is_cli`]), so the caller opens the window.
@@ -215,6 +221,8 @@ fn execute(cli: Cli, ctx: &mut Ctx, out: &mut dyn Write, err: &mut dyn Write) ->
         Command::Targets { command } => projects::run_targets(command, ctx, &mut out, err),
         Command::Setup if cli.global.project.is_some() => usage(err, "setup works on the global setup; drop --project"),
         Command::Setup => setup::run(ctx, &mut out),
+        Command::Hosts { .. } if cli.global.project.is_some() => usage(err, "hosts are Prism's own settings; drop --project"),
+        Command::Hosts { command } => hosts::run(command, ctx, &mut out, err),
     };
     exit as i32
 }

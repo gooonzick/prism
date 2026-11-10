@@ -12,6 +12,7 @@ mod agents;
 mod app;
 mod cli;
 mod fsops;
+mod hosts;
 mod mcp;
 mod planid;
 mod projects;

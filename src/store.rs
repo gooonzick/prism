@@ -14,6 +14,9 @@ pub struct Settings {
     /// Agent ids. `None` until the user picks: then the installed agents are used.
     #[serde(default)]
     pub targets: Option<Vec<String>>,
+    /// Remote machines reached over ssh.
+    #[serde(default)]
+    pub hosts: Vec<crate::hosts::Host>,
     /// Loaded from disk, so saved back there. Settings built in tests stay in memory.
     #[serde(skip)]
     pub persist: bool,
