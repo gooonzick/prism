@@ -3,7 +3,7 @@ use super::*;
 fn ctx(home: &std::path::Path) -> Ctx {
     let paths = Paths::isolated(home);
     let settings = Settings::load_from(&paths);
-    Ctx { paths, settings, stdin: None, path_var: None }
+    Ctx { paths, settings, stdin: None, path_var: None, make_runner: crate::hosts::runner::no_runner() }
 }
 
 fn go(args: &[&str], ctx: &mut Ctx) -> (i32, String, String) {
@@ -1471,4 +1471,204 @@ fn hosts_reject_project_flag() {
     let dir = tempfile::tempdir().unwrap();
     let (code, _, _) = go(&["--project", dir.path().to_str().unwrap(), "hosts", "list"], &mut ctx(home.path()));
     assert_eq!(code, 2);
+}
+
+// prism --host, hosts check and install
+
+use crate::hosts::install::VERSION;
+use crate::hosts::runner::{self, Output, Runner};
+use std::sync::{Arc, Mutex};
+
+/// A host that answers the check script with `uname` and `prism <version>` and logs every call.
+struct FakeHost {
+    version: Option<String>,
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+impl Runner for FakeHost {
+    fn prism(&self, args: &[String], stdin: Option<Vec<u8>>) -> Result<Output, String> {
+        self.log.lock().unwrap().push(format!("prism {} stdin={}", args.join(" "), stdin.is_some()));
+        Ok(Output { code: 0, stdout: b"remote out\n".to_vec(), stderr: String::new() })
+    }
+    fn shell(&self, script: &str, _: Option<Vec<u8>>) -> Result<Output, String> {
+        self.log.lock().unwrap().push(format!("shell {script}"));
+        let mut stdout = String::from("Linux x86_64\n");
+        if let Some(v) = &self.version {
+            stdout.push_str(&format!("prism {v}\n"));
+        }
+        Ok(Output { code: 0, stdout: stdout.into_bytes(), stderr: String::new() })
+    }
+}
+
+/// `ctx` whose runners are `FakeHost`s reporting `version`; the log also names each host asked for.
+fn fake_hosts(home: &std::path::Path, version: Option<&str>) -> (Ctx, Arc<Mutex<Vec<String>>>) {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut c = ctx(home);
+    c.settings.hosts.push(crate::hosts::Host { name: "x".into(), ssh: "me@x".into() });
+    let (shared, version) = (log.clone(), version.map(String::from));
+    c.make_runner = Arc::new(move |h: &crate::hosts::Host| {
+        shared.lock().unwrap().push(format!("runner {} {}", h.name, h.ssh));
+        Box::new(FakeHost { version: version.clone(), log: shared.clone() }) as Box<dyn Runner>
+    });
+    (c, log)
+}
+
+/// A `prism` in the remote home's `~/.local/bin` that reports this version, for the check.
+fn remote_with_prism() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let remote = tempfile::tempdir().unwrap();
+    let bin = remote.path().join(".local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("prism"), format!("#!/bin/sh\necho \"prism {VERSION}\"\n")).unwrap();
+    std::fs::set_permissions(bin.join("prism"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    remote
+}
+
+fn on_local_host(home: &std::path::Path, remote: &std::path::Path) -> Ctx {
+    let mut c = ctx(home);
+    c.settings.hosts.push(crate::hosts::Host { name: "x".into(), ssh: "me@x".into() });
+    c.make_runner = runner::local_runners(&[("x", remote)]);
+    c
+}
+
+#[test]
+fn host_flag_routes_to_the_cli() {
+    for args in [&["--host", "x", "skills", "--help"][..], &["--host=x", "--json", "doctor", "--help"]] {
+        let argv: Vec<std::ffi::OsString> = args.iter().map(|a| a.into()).collect();
+        assert_eq!(run(argv), Some(0), "{args:?}");
+    }
+    let argv: Vec<std::ffi::OsString> = ["--host", "x"].iter().map(|a| a.into()).collect();
+    assert_eq!(run(argv), None);
+}
+
+#[test]
+fn version_mismatch_refuses_commands() {
+    let home = tempfile::tempdir().unwrap();
+    let (mut c, log) = fake_hosts(home.path(), Some("0.0.0-other"));
+    let (code, out, err) = go(&["--host", "x", "skills", "list"], &mut c);
+    assert_eq!(code, 1, "{out}{err}");
+    assert_eq!(err.trim(), format!("prism on x is version 0.0.0-other, not {VERSION}; run prism hosts install x"));
+    let log = log.lock().unwrap().clone();
+    assert_eq!(log.len(), 2, "{log:?}");
+    assert_eq!(log[0], "runner x me@x");
+    assert!(log[1].starts_with("shell uname -sm;"), "{log:?}");
+
+    let (mut c, log) = fake_hosts(home.path(), None);
+    let (code, out, _) = go(&["--json", "--host", "x", "skills", "list"], &mut c);
+    assert_eq!(code, 1);
+    assert_eq!(json(&out)["error"], "prism on x is missing; run prism hosts install x");
+    assert!(log.lock().unwrap().iter().all(|l| !l.starts_with("prism ")));
+}
+
+#[test]
+fn host_flag_forwards_and_keeps_exit_code() {
+    let remote = remote_with_prism();
+    let r = remote.path();
+    std::fs::create_dir_all(r.join(".claude/skills")).unwrap();
+    std::os::unix::fs::symlink(r.join(".agents/skills/ghost"), r.join(".claude/skills/ghost")).unwrap();
+    let (_, direct, _) = go(&["doctor", "--json"], &mut ctx(r));
+
+    let home = tempfile::tempdir().unwrap();
+    for args in [&["--host", "x", "doctor", "--json"][..], &["doctor", "--json", "--host=x"]] {
+        let (code, out, err) = go(args, &mut on_local_host(home.path(), r));
+        assert_eq!(code, 3, "{args:?}: {out}{err}");
+        assert_eq!(out, direct, "{args:?}");
+        assert!(json(&out)["problems"].as_array().unwrap().iter().any(|p| p["kind"] == "broken_link" && p["subject"] == "ghost"), "{out}");
+    }
+    // Nothing happened here.
+    assert!(!home.path().join(".claude").exists());
+}
+
+#[test]
+fn host_flag_forwards_stdin_only_for_dash_values() {
+    let remote = remote_with_prism();
+    std::fs::create_dir_all(remote.path().join(".cursor")).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let mut c = on_local_host(home.path(), remote.path());
+    c.stdin = Some(Box::new(std::io::Cursor::new("FIXTURE_STDIN_SECRET\n")));
+    let (code, out, err) = go(&["--host", "x", "mcp", "add", "plata", "--command", "npx", "--env", "TOKEN=-", "--to", "cursor"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    let written = std::fs::read_to_string(remote.path().join(".cursor/mcp.json")).unwrap();
+    assert!(written.contains("\"FIXTURE_STDIN_SECRET\""), "{written}");
+
+    let (mut c, log) = fake_hosts(home.path(), Some(VERSION));
+    c.stdin = Some(Box::new(std::io::Cursor::new("unused")));
+    let (code, out, _) = go(&["--host", "x", "agents", "--json"], &mut c);
+    assert_eq!((code, out.as_str()), (0, "remote out\n"));
+    assert_eq!(log.lock().unwrap().last().unwrap(), "prism agents --json stdin=false");
+}
+
+#[test]
+fn host_flag_takes_an_unsaved_ssh_target() {
+    let home = tempfile::tempdir().unwrap();
+    let (mut c, log) = fake_hosts(home.path(), Some(VERSION));
+    let (code, _, _) = go(&["--host", "me@elsewhere", "agents"], &mut c);
+    assert_eq!(code, 0);
+    assert_eq!(log.lock().unwrap()[0], "runner me@elsewhere me@elsewhere");
+}
+
+/// A host that can't be reached.
+struct Gone;
+
+impl Runner for Gone {
+    fn prism(&self, _: &[String], _: Option<Vec<u8>>) -> Result<Output, String> {
+        Err("Can't reach x: timed out".into())
+    }
+    fn shell(&self, _: &str, _: Option<Vec<u8>>) -> Result<Output, String> {
+        Err("Can't reach x: timed out".into())
+    }
+}
+
+#[test]
+fn an_unreachable_host_exits_1() {
+    let home = tempfile::tempdir().unwrap();
+    let mut c = ctx(home.path());
+    c.make_runner = Arc::new(|_: &crate::hosts::Host| Box::new(Gone) as Box<dyn Runner>);
+    let (code, _, err) = go(&["--host", "x", "agents"], &mut c);
+    assert_eq!(code, 1);
+    assert_eq!(err.trim(), "Can't reach x: timed out");
+    let (code, out, _) = go(&["hosts", "check", "x", "--json"], &mut c);
+    assert_eq!(code, 1);
+    assert_eq!(json(&out)["reachable"], false);
+}
+
+#[test]
+fn hosts_check_reports_health() {
+    let home = tempfile::tempdir().unwrap();
+    let (mut c, _) = fake_hosts(home.path(), Some(VERSION));
+    let (code, out, _) = go(&["hosts", "check", "x", "--json"], &mut c);
+    assert_eq!(code, 0, "{out}");
+    let want = serde_json::json!({ "name": "x", "reachable": true, "health": "ready", "remote_version": VERSION, "os": "linux", "arch": "x86_64" });
+    assert_eq!(json(&out), want);
+
+    let (mut c, _) = fake_hosts(home.path(), Some("0.0.0-other"));
+    let (code, out, _) = go(&["hosts", "check", "x", "--json"], &mut c);
+    assert_eq!(code, 3);
+    assert_eq!(json(&out)["health"], "other_version");
+    assert_eq!(json(&out)["remote_version"], "0.0.0-other");
+
+    let (mut c, _) = fake_hosts(home.path(), None);
+    let (code, out, _) = go(&["hosts", "check", "x"], &mut c);
+    assert_eq!(code, 3);
+    assert!(out.contains("prism on x is missing"), "{out}");
+}
+
+#[test]
+fn hosts_install_uploads_a_binary() {
+    let remote = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    // The upload is a script that prints this version, so the check after it says ready.
+    let binary = home.path().join("prism-build");
+    std::fs::write(&binary, format!("#!/bin/sh\necho \"prism {VERSION}\"\n")).unwrap();
+    let mut c = on_local_host(home.path(), remote.path());
+    let (code, out, err) = go(&["hosts", "install", "x", "--binary", binary.to_str().unwrap(), "--json"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(json(&out), serde_json::json!({ "name": "x", "installed": true, "version": VERSION }));
+    assert!(remote.path().join(".local/bin/prism").exists());
+
+    // An upload that doesn't run as this version is reported.
+    std::fs::write(&binary, "#!/bin/sh\necho \"prism 0.0.0-other\"\n").unwrap();
+    let (code, _, err) = go(&["hosts", "install", "x", "--binary", binary.to_str().unwrap()], &mut c);
+    assert_eq!(code, 1);
+    assert!(err.contains("version 0.0.0-other"), "{err}");
 }

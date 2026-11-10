@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use clap::{Args, Parser, Subcommand};
 
 use crate::agents::{self, Paths, Scope};
+use crate::hosts::runner::{self, MakeRunner};
 use crate::store::{self, Settings};
 
 mod doctor;
@@ -38,13 +39,15 @@ pub struct Ctx {
     pub stdin: Option<Box<dyn Read>>,
     /// `$PATH`, for `setup` to find where `prism` goes. Tests set their own.
     pub path_var: Option<OsString>,
+    /// How `--host` and `prism hosts` reach a machine. Tests hand out their own runners.
+    pub make_runner: MakeRunner,
 }
 
 impl Ctx {
     fn from_env() -> Ctx {
         let paths = Paths::from_env();
         let settings = Settings::load_from(&paths);
-        Ctx { paths, settings, stdin: None, path_var: std::env::var_os("PATH") }
+        Ctx { paths, settings, stdin: None, path_var: std::env::var_os("PATH"), make_runner: runner::make_runner() }
     }
 
     /// The scope `--project` names (any folder, registered or not), else the global one.
@@ -83,7 +86,7 @@ impl Out<'_> {
 const SUBCOMMANDS: &[&str] = &["agents", "targets", "skills", "mcp", "projects", "undo", "doctor", "setup", "hosts"];
 
 /// Whether `args` are a command line: help or the version, or a subcommand, maybe after the
-/// global flags (`--json`, `--project DIR`). Everything else is the window's.
+/// global flags (`--json`, `--project DIR`, `--host NAME`). Everything else is the window's.
 fn is_cli(args: &[&str]) -> bool {
     if matches!(args.first(), Some(&("-h" | "--help" | "-V" | "--version" | "help"))) {
         return true;
@@ -93,7 +96,8 @@ fn is_cli(args: &[&str]) -> bool {
         rest = match rest {
             ["--json", tail @ ..] => tail,
             ["--project", _, tail @ ..] => tail,
-            [flag, tail @ ..] if flag.starts_with("--project=") => tail,
+            ["--host", _, tail @ ..] => tail,
+            [flag, tail @ ..] if flag.starts_with("--project=") || flag.starts_with("--host=") => tail,
             _ => break,
         };
     }
@@ -117,6 +121,9 @@ struct Global {
     /// Print JSON instead of text.
     #[arg(long, global = true)]
     json: bool,
+    /// Run the command on this saved host (or ssh target) instead of this machine.
+    #[arg(long, global = true, value_name = "NAME")]
+    host: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -173,7 +180,7 @@ pub fn run(args: Vec<OsString>) -> Option<i32> {
         Err(code) => return Some(code),
     };
     let mut ctx = Ctx::from_env();
-    Some(execute(cli, &mut ctx, &mut out, &mut err))
+    Some(execute(cli, &argv, &mut ctx, &mut out, &mut err))
 }
 
 /// Runs one command line (without the program name) on `ctx` and returns its exit code; tests
@@ -181,7 +188,7 @@ pub fn run(args: Vec<OsString>) -> Option<i32> {
 #[cfg(test)]
 pub fn run_with(args: &[&str], ctx: &mut Ctx, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     match parse(args, out, err) {
-        Ok(cli) => execute(cli, ctx, out, err),
+        Ok(cli) => execute(cli, args, ctx, out, err),
         Err(code) => code,
     }
 }
@@ -197,8 +204,12 @@ fn parse(args: &[&str], out: &mut dyn Write, err: &mut dyn Write) -> Result<Cli,
     })
 }
 
-fn execute(cli: Cli, ctx: &mut Ctx, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+/// Runs the parsed `cli`; `args` is the line it came from, which `--host` sends on as it is.
+fn execute(cli: Cli, args: &[&str], ctx: &mut Ctx, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     let mut out = Out { json: cli.global.json, out };
+    if let Some(name) = &cli.global.host {
+        return hosts::forward(name, args, ctx, &mut out, err);
+    }
     let exit = match cli.command {
         Command::Agents => {
             agents_cmd(ctx, &mut out);

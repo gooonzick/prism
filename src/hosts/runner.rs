@@ -1,11 +1,9 @@
 //! Running `prism` (or a shell script) on a machine: over ssh for a saved host, in process for tests.
-// The window and the CLI pick these up in later steps.
-#![allow(dead_code)]
 
 use super::Host;
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 
@@ -27,8 +25,33 @@ pub trait Runner: Send + Sync {
 /// How the CLI and the window get a runner for a host; tests hand out `Local` ones.
 pub type MakeRunner = Arc<dyn Fn(&Host) -> Box<dyn Runner> + Send + Sync>;
 
+/// The runner for a host: ssh, or this machine for the reserved name "this".
 pub fn runner_for(host: &Host) -> Box<dyn Runner> {
+    if host.name == "this" {
+        return Box::new(Here);
+    }
     Box::new(Ssh { name: host.name.clone(), target: host.ssh.clone() })
+}
+
+/// What the CLI and the window use outside tests: [`runner_for`].
+pub fn make_runner() -> MakeRunner {
+    Arc::new(runner_for)
+}
+
+/// For tests that reach no host: asking for a runner is a bug in the test.
+#[cfg(test)]
+pub fn no_runner() -> MakeRunner {
+    Arc::new(|h: &Host| panic!("this test reaches no host, yet asked for {}", h.name))
+}
+
+/// For tests: each named host is a [`Local`] folder; any other name is a bug in the test.
+#[cfg(test)]
+pub fn local_runners(homes: &[(&str, &Path)]) -> MakeRunner {
+    let homes: Vec<(String, PathBuf)> = homes.iter().map(|(n, h)| (n.to_string(), h.to_path_buf())).collect();
+    Arc::new(move |h: &Host| {
+        let home = homes.iter().find(|(n, _)| *n == h.name).unwrap_or_else(|| panic!("no local folder for host {}", h.name)).1.clone();
+        Box::new(Local { name: h.name.clone(), home }) as Box<dyn Runner>
+    })
 }
 
 /// POSIX single-quoting: safe to paste into `sh` as one word.
@@ -99,21 +122,36 @@ impl Ssh {
         v
     }
 
-    fn run(&self, remote_command: &str, stdin: Option<Vec<u8>>) -> Result<Output, String> {
-        let unreachable = |why: &str| {
-            let last = why.lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or("no answer");
-            format!("Can't reach {}: {last}", self.name)
-        };
-        // macOS limits a socket path to 104 bytes, so the sockets live under /tmp.
-        ensure_control_dir().map_err(|e| unreachable(&e))?;
+    fn unreachable(&self, why: &str) -> String {
+        let last = why.lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or("no answer");
+        format!("Can't reach {}: {last}", self.name)
+    }
+
+    /// The `ssh` process for `remote_command`; `Err` for a target ssh would read as an option.
+    fn command(&self, remote_command: &str) -> Result<Command, String> {
+        // A hand-edited settings file could hold `-oProxyCommand=…`: never pass it to ssh.
+        if self.target.starts_with('-') {
+            return Err(self.unreachable(&format!("the ssh target {:?} starts with '-'", self.target)));
+        }
         let argv = self.argv(remote_command);
         let mut cmd = Command::new(&argv[0]);
         cmd.args(&argv[1..]);
+        Ok(cmd)
+    }
+
+    fn exec(&self, cmd: Command, stdin: Option<Vec<u8>>) -> Result<Output, String> {
         match finish(spawn(cmd, stdin)) {
-            Ok(out) if out.code == 255 => Err(unreachable(&out.stderr)),
+            Ok(out) if out.code == 255 => Err(self.unreachable(&out.stderr)),
             Ok(out) => Ok(out),
-            Err((_, why)) => Err(unreachable(&why)),
+            Err((_, why)) => Err(self.unreachable(&why)),
         }
+    }
+
+    fn run(&self, remote_command: &str, stdin: Option<Vec<u8>>) -> Result<Output, String> {
+        let cmd = self.command(remote_command)?;
+        // macOS limits a socket path to 104 bytes, so the sockets live under /tmp.
+        ensure_private_dir(&control_dir_path()).map_err(|e| self.unreachable(&e))?;
+        self.exec(cmd, stdin)
     }
 }
 
@@ -131,16 +169,16 @@ fn control_dir_path() -> PathBuf {
     PathBuf::from(format!("/tmp/prism-ssh-{}", unsafe { libc::getuid() }))
 }
 
-/// Creates the control directory (0700) or checks that the one there is ours and private.
-fn ensure_control_dir() -> Result<(), String> {
-    let dir = control_dir_path();
-    if let Err(e) = std::fs::DirBuilder::new().mode(0o700).create(&dir)
+/// Creates `dir` (0700) or checks that the one there is ours and private: the ssh control
+/// sockets live in it, and another user's directory there could hijack them.
+fn ensure_private_dir(dir: &Path) -> Result<(), String> {
+    if let Err(e) = std::fs::DirBuilder::new().mode(0o700).create(dir)
         && e.kind() != std::io::ErrorKind::AlreadyExists
     {
         return Err(format!("can't create {}: {e}", dir.display()));
     }
     // symlink_metadata: a symlink planted at the path is not our directory.
-    let meta = std::fs::symlink_metadata(&dir).map_err(|e| format!("can't inspect {}: {e}", dir.display()))?;
+    let meta = std::fs::symlink_metadata(dir).map_err(|e| format!("can't inspect {}: {e}", dir.display()))?;
     // SAFETY: as above.
     let uid = unsafe { libc::getuid() };
     if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o777 != 0o700 {
@@ -182,7 +220,7 @@ impl Runner for Local {
         let paths = Paths::isolated(&self.home);
         let settings = Settings::load_from(&paths);
         let stdin: Option<Box<dyn Read>> = stdin.map(|d| Box::new(std::io::Cursor::new(d)) as Box<dyn Read>);
-        let mut ctx = Ctx { paths, settings, stdin, path_var: None };
+        let mut ctx = Ctx { paths, settings, stdin, path_var: None, make_runner: no_runner() };
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let code = run_with(&args, &mut ctx, &mut out, &mut err);
@@ -222,16 +260,63 @@ mod tests {
 
     #[test]
     fn secret_never_in_argv() {
+        use std::os::unix::fs::PermissionsExt;
         const FIXTURE_SECRET: &str = "FIXTURE_SECRET";
+        // A stand-in `ssh` first on PATH that records what it was given.
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("ssh");
+        let (argv_file, stdin_file) = (dir.path().join("argv"), dir.path().join("stdin"));
+        std::fs::write(&fake, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ncat > '{}'\n", argv_file.display(), stdin_file.display())).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
         let ssh = Ssh { name: "laptop".into(), target: "george@laptop".into() };
         let args = ["mcp".to_string(), "add".to_string(), "KEY=-".to_string()];
-        let argv = ssh.argv(&prism_command(&args));
-        assert!(argv.iter().all(|a| !a.contains(FIXTURE_SECRET)));
-        // And the data really goes through stdin of the process.
-        let mut cmd = Command::new("cat");
-        cmd.arg("-");
-        let (code, stdout, _) = spawn(cmd, Some(FIXTURE_SECRET.as_bytes().to_vec())).unwrap();
-        assert_eq!((code, stdout), (0, FIXTURE_SECRET.as_bytes().to_vec()));
+        let mut cmd = ssh.command(&prism_command(&args)).unwrap();
+        cmd.env("PATH", format!("{}:{}", dir.path().display(), std::env::var("PATH").unwrap_or_default()));
+        let out = ssh.exec(cmd, Some(FIXTURE_SECRET.as_bytes().to_vec())).unwrap();
+        assert_eq!(out.code, 0, "{}", out.stderr);
+
+        let argv = std::fs::read_to_string(&argv_file).unwrap();
+        assert!(argv.contains("george@laptop") && argv.contains("'KEY=-'"), "the fake ssh ran: {argv}");
+        assert!(!argv.contains(FIXTURE_SECRET), "{argv}");
+        assert_eq!(std::fs::read_to_string(&stdin_file).unwrap(), FIXTURE_SECRET);
+    }
+
+    #[test]
+    fn a_target_starting_with_a_dash_is_refused() {
+        let ssh = Ssh { name: "evil".into(), target: "-oProxyCommand=touch /tmp/pwned".into() };
+        let err = ssh.shell("true", None).unwrap_err();
+        assert!(err.starts_with("Can't reach evil: ") && err.contains("starts with '-'"), "{err}");
+    }
+
+    #[test]
+    fn private_dir_is_created_0700() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("sockets");
+        ensure_private_dir(&dir).unwrap();
+        assert_eq!(std::fs::metadata(&dir).unwrap().mode() & 0o777, 0o700);
+        // And accepted the second time.
+        ensure_private_dir(&dir).unwrap();
+    }
+
+    #[test]
+    fn private_dir_refuses_an_open_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("sockets");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(ensure_private_dir(&dir).unwrap_err().contains("not a private directory"));
+    }
+
+    #[test]
+    fn private_dir_refuses_a_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        ensure_private_dir(&real).unwrap();
+        let link = tmp.path().join("sockets");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(ensure_private_dir(&link).unwrap_err().contains("not a private directory"));
     }
 
     #[test]

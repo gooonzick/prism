@@ -199,7 +199,7 @@ mod tests {
         let mut app = App::new(paths.clone(), Settings::load_from(&paths));
         watching(&mut app);
 
-        let mut cli = crate::cli::Ctx { paths: paths.clone(), settings: Settings::load_from(&paths), stdin: None, path_var: None };
+        let mut cli = crate::cli::Ctx { paths: paths.clone(), settings: Settings::load_from(&paths), stdin: None, path_var: None, make_runner: crate::hosts::runner::no_runner() };
         let (mut out, mut err) = (Vec::new(), Vec::new());
         assert_eq!(crate::cli::run_with(&["projects", "add", new.to_str().unwrap()], &mut cli, &mut out, &mut err), 0);
         poll_until(&mut app, "the project the CLI added", |a| a.settings.projects.contains(&new));
