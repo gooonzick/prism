@@ -93,4 +93,5 @@ snap sync.png --scene sync --theme light
 snap browse.png --scene browse --theme light
 snap project.png --theme light "$PROJECT"
 snap mcp.png --scene mcp --theme light
+snap remote.png --scene env-remote --theme light
 echo "Screenshots in $OUT, demo home in $DEMO"

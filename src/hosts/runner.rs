@@ -30,7 +30,7 @@ pub fn runner_for(host: &Host) -> Box<dyn Runner> {
     if matches!(host.name.as_str(), "this" | "local") {
         return Box::new(Here);
     }
-    Box::new(Ssh { name: host.name.clone(), target: host.ssh.clone() })
+    Box::new(Ssh { name: host.name.clone(), target: host.ssh.clone(), config: None })
 }
 
 /// What the CLI and the window use outside tests: [`runner_for`].
@@ -107,12 +107,18 @@ fn finish(res: std::io::Result<(i32, Vec<u8>, String)>) -> Result<Output, (i32, 
 pub struct Ssh {
     pub name: String,
     pub target: String,
+    /// An ssh config file in place of the user's (`ssh -F`). Only the end-to-end tests set it.
+    pub config: Option<PathBuf>,
 }
 
 impl Ssh {
     pub fn argv(&self, remote_command: &str) -> Vec<String> {
         let control = control_dir_path().join("%C");
-        let mut v: Vec<String> = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ControlMaster=auto"].map(String::from).into();
+        let mut v = vec!["ssh".to_string()];
+        if let Some(config) = &self.config {
+            v.extend(["-F".into(), config.to_string_lossy().into_owned()]);
+        }
+        v.extend(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ControlMaster=auto"].map(String::from));
         v.push("-o".into());
         v.push(format!("ControlPath={}", control.display()));
         v.extend(["-o", "ControlPersist=60"].map(String::from));
@@ -247,7 +253,7 @@ mod tests {
 
     #[test]
     fn ssh_argv_is_non_interactive() {
-        let ssh = Ssh { name: "laptop".into(), target: "george@laptop".into() };
+        let ssh = Ssh { name: "laptop".into(), target: "george@laptop".into(), config: None };
         let uid = unsafe { libc::getuid() };
         let want: Vec<String> = [
             "ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ControlMaster=auto", "-o",
@@ -256,6 +262,14 @@ mod tests {
         .map(String::from)
         .into();
         assert_eq!(ssh.argv("true"), want);
+    }
+
+    #[test]
+    fn a_config_file_comes_first() {
+        let ssh = Ssh { name: "box".into(), target: "box".into(), config: Some("/tmp/e2e/ssh_config".into()) };
+        let argv = ssh.argv("true");
+        assert_eq!(argv[..4], ["ssh", "-F", "/tmp/e2e/ssh_config", "-T"]);
+        assert_eq!(argv[argv.len() - 3..], ["box", "--", "true"]);
     }
 
     #[test]
@@ -269,7 +283,7 @@ mod tests {
         std::fs::write(&fake, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ncat > '{}'\n", argv_file.display(), stdin_file.display())).unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let ssh = Ssh { name: "laptop".into(), target: "george@laptop".into() };
+        let ssh = Ssh { name: "laptop".into(), target: "george@laptop".into(), config: None };
         let args = ["mcp".to_string(), "add".to_string(), "KEY=-".to_string()];
         let mut cmd = ssh.command(&prism_command(&args)).unwrap();
         cmd.env("PATH", format!("{}:{}", dir.path().display(), std::env::var("PATH").unwrap_or_default()));
@@ -284,7 +298,7 @@ mod tests {
 
     #[test]
     fn a_target_starting_with_a_dash_is_refused() {
-        let ssh = Ssh { name: "evil".into(), target: "-oProxyCommand=touch /tmp/pwned".into() };
+        let ssh = Ssh { name: "evil".into(), target: "-oProxyCommand=touch /tmp/pwned".into(), config: None };
         let err = ssh.shell("true", None).unwrap_err();
         assert!(err.starts_with("Can't reach evil: ") && err.contains("starts with '-'"), "{err}");
     }
@@ -348,7 +362,7 @@ mod tests {
 
     #[test]
     fn an_unreachable_host_is_an_error_naming_it() {
-        let ssh = Ssh { name: "ghost".into(), target: "nobody@127.0.0.1:1".into() };
+        let ssh = Ssh { name: "ghost".into(), target: "nobody@127.0.0.1:1".into(), config: None };
         // ssh to a bad target exits 255; with no ssh at all the spawn fails: both are Err.
         let err = ssh.shell("true", None).unwrap_err();
         assert!(err.starts_with("Can't reach ghost: "), "{err}");

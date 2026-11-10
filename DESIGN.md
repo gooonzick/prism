@@ -40,8 +40,13 @@ anything not listed here does not exist in this app and is a bug if you add it.
   Use these before writing a new element; add a new helper here, not in a page file, when two
   pages need it.
 - `src/ui/installed.rs`: `tag()` and `placement_color()`.
+- `src/ui/hosts.rs`: the environment switcher (`switcher`, the `Select` that heads the
+  sidebar: this machine, the saved hosts, "Add host…"), what the main pane shows while a host
+  connects, needs prism or can't be reached (`pending`), and the Add host and host Add
+  project… dialogs. The machine in view is `App::env`; its name is `s.env_label()`, which
+  dialogs and toasts use instead of spelling "This Mac".
 - Page files (`installed.rs`, `browse.rs`, `mcp.rs`) and dialog files (`dialogs.rs`,
-  `mcp_dialogs.rs`) compose the helpers; they do not define new styles.
+  `mcp_dialogs.rs`, `hosts.rs`) compose the helpers; they do not define new styles.
 
 ## Checking a change
 

@@ -158,9 +158,35 @@ prism undo                                # takes back the last change, from her
 
 Add `--json` to any command for output a script or an agent can read. Secrets print as `***` unless you ask for `--show-secrets`; pass them in with `KEY=@file` or `KEY=-` (stdin) to keep them out of your shell history. Several `KEY=-` share stdin, their values apart by NUL bytes (`--env` ones first, then `--header` ones).
 
-### Other machines
+## Other machines
 
-Each release also carries a CLI-only build, without the window, for servers and other machines you reach over ssh: `prism-cli-X.Y.Z-linux-x86_64.tar.gz`, `prism-cli-X.Y.Z-linux-arm64.tar.gz` and `prism-cli-X.Y.Z-macos-arm64.tar.gz`, each holding one file, `prism`, and all listed in `SHA256SUMS`. You rarely need to fetch them yourself: save the machine with `prism hosts add dev-box --ssh me@dev-box`, then `prism hosts install dev-box` downloads the matching archive on that machine, checks it against `SHA256SUMS` and puts `prism` in `~/.local/bin`. Use `--binary PATH` to upload a build of your own instead.
+Prism also works on the machines you reach over ssh: a dev box, a server, your other laptop. It connects with your own ssh setup (keys, agent, `~/.ssh/config`), never a password, and runs `prism` there.
+
+<img src="docs/remote.png" alt="Prism showing the global skills of devbox, picked in the machine switcher above the scopes">
+
+**Hosts.** Save a machine under a name, with what follows `ssh`:
+
+```bash
+prism hosts add devbox --ssh me@devbox.lan   # or an alias from ~/.ssh/config
+prism hosts check devbox                     # reachable, and running this version of prism?
+prism hosts install devbox                   # put this version in ~/.local/bin there
+prism hosts list
+```
+
+The host needs the same version of `prism` as this machine. Each release carries a CLI-only build, without the window, for that: `prism-cli-X.Y.Z-linux-x86_64.tar.gz`, `prism-cli-X.Y.Z-linux-arm64.tar.gz` and `prism-cli-X.Y.Z-macos-arm64.tar.gz`, each holding one file, `prism`, and all listed in `SHA256SUMS`. `prism hosts install` downloads the matching archive on the host, checks it against `SHA256SUMS` and puts `prism` in `~/.local/bin`; nothing else there changes. Use `--binary PATH` to upload a build of your own instead.
+
+**The switcher.** The machine menu above the scopes lists this machine, your saved hosts and *Add host…*. Pick a host and the window shows its skills, projects and MCP servers, and every action (sync, link, remove, edit a server, undo) acts there. A host without this version of `prism` offers *Install prism*; one that doesn't answer says why and offers *Retry*. skills.sh installs always land on this machine; copy them across afterwards.
+
+**Copy across.** *Copy to…* on skills, and on an MCP server, lists your other machines next to the scopes of this one, so a skill or a server goes from this Mac to a host, from a host back here, or between two hosts. Each copy shows its plan first, as every change does, and the plan says what will need fixing there, such as a command path that only exists here. Secrets travel inside ssh on stdin, never in a command line. From the terminal:
+
+```bash
+prism skills copy pdf emil-animations --to-host devbox --to-global
+prism skills copy pdf --to-host devbox --to-project /home/me/site --apply
+prism mcp copy mobbin --to-host devbox --to claude codex
+prism mcp copy github --to-host devbox --to claude --to-project /home/me/site --claude-scope project
+```
+
+**`--host`.** Any command runs on a host with `--host NAME`, its output and exit code as the host gives them: `prism --host devbox doctor`, `prism --host devbox mcp list --json`. A copy to a host is one change there, so `prism --host devbox undo` takes it back.
 
 ## Keyboard
 
@@ -184,8 +210,15 @@ On Linux, ⌘ is Ctrl.
 
 ```bash
 cargo test                    # core and UI tests, headless, on a throwaway $HOME
-cargo test -- --ignored       # also hit skills.sh and GitHub
+cargo test -- --ignored       # also hit skills.sh and GitHub; the e2e_ ones need the container below
 ./scripts/demo-home.sh        # rebuild the screenshots in docs/ from a demo home
+```
+
+The end to end tests reach a Linux container over a real ssh. `scripts/e2e-ssh.sh` starts it (Docker, or Colima on macOS), with a throwaway key and the CLI-only Linux build of `prism`; it keeps everything in `~/.cache/prism-e2e` and never touches your `~/.ssh`:
+
+```bash
+./scripts/e2e-ssh.sh && cargo test -- --ignored e2e_
+./scripts/e2e-ssh.sh --down   # stop the container and delete ~/.cache/prism-e2e
 ```
 
 Any screen renders without a window, which is handy for checking layout:
@@ -194,7 +227,7 @@ Any screen renders without a window, which is handy for checking layout:
 ./target/debug/prism --snap out.png --scene sync --theme dark
 ```
 
-Scenes: `detail`, `sync`, `remove`, `bulk`, `bulk-remove`, `updates`, `copy`, `new-skill`, `browse`, `repo`, `notice`, `mcp`, `mcp-add`, `mcp-copy`.
+Scenes: `detail`, `sync`, `remove`, `bulk`, `bulk-remove`, `updates`, `copy`, `copy-to-host`, `new-skill`, `browse`, `repo`, `notice`, `found`, `mcp`, `mcp-add`, `mcp-copy`, `env-remote`, `env-unreachable`.
 
 | Path | What it does |
 | --- | --- |
@@ -205,6 +238,7 @@ Scenes: `detail`, `sync`, `remove`, `bulk`, `bulk-remove`, `updates`, `copy`, `n
 | `src/remote.rs` | skills.sh search, previews from GitHub, the `skills` CLI |
 | `src/mcp/` | MCP servers: each agent's config format, scans, plans and edits |
 | `src/cli/` | the `prism` command line and `prism setup` |
+| `src/hosts/` | saved hosts, running `prism` over ssh, installing it there, copies between machines |
 | `src/app/` | app state and actions |
 | `src/ui/` | the screens, built with rune-kit |
 

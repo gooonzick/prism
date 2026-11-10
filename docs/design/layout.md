@@ -4,6 +4,30 @@ The window is a `SplitView`: sidebar (scopes and projects), main pane (toolbar, 
 inspector (the selected item). Every page fills these three; a new page never adds a fourth
 column or a second toolbar.
 
+## Environment switcher
+
+The sidebar's first header is the machine in view: a `Select` (`hosts::switcher`,
+`src/ui/hosts.rs`) listing `this_machine()` ("This Mac", "This computer" on Linux), each saved
+host by name, then "Add host…", which opens the Add host dialog instead of switching. Picking a
+host makes it the environment: the scopes, projects, pages and every action are that
+machine's, and `s.env_label()` names it wherever a machine is named: plans ("Asking devbox
+for the plan…"), the Copy to… dialogs and toasts. Nothing else marks a remote environment;
+no banner, no tint. On skills.sh a caption says installs land on this machine (`browse_note`).
+
+Until a host's state is in, `hosts::pending` replaces the main pane of the Skills and MCP
+pages (the toolbar keeps its tabs and the host's name; the inspector is empty):
+
+- Connecting: `Spinner` plus "Connecting to devbox…" (`small`, `text_muted`), or "Installing
+  prism 0.1.0 on devbox…" while an install runs.
+- Needs install: `empty("prism 0.1.0 isn't on devbox", detail)`, the detail saying what
+  Install does ("Install puts it in ~/.local/bin on devbox; nothing else there changes.") or
+  why it can't (no release for that system: use `prism hosts install --binary`), then
+  "Install prism" (`Contrast`, disabled when unsupported).
+- Unreachable: `empty("Can't reach devbox", why)`, the why being ssh's last line without the
+  "Can't reach devbox: " prefix, then "Retry" (`Ghost`).
+
+Scenes: `env-remote` (a host in view) and `env-unreachable`.
+
 ## Toolbar
 
 `Toolbar::new().leading(page_tabs(…)).title(scope_title(…)).trailing(row().gap(6.0)…)`.

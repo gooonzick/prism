@@ -1,6 +1,8 @@
 //! Saved remote hosts: a name Prism shows and the ssh target it connects to.
 
 pub mod copy;
+#[cfg(test)]
+mod e2e;
 pub mod install;
 pub mod runner;
 
