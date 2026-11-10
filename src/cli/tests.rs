@@ -584,6 +584,156 @@ fn changing_targets_changes_the_copy_plan_id() {
     assert_eq!(code, 4);
 }
 
+/// A skill folder with a nested file, a hidden file and a relative symlink, as another
+/// machine would send it.
+fn sent_skill(h: &std::path::Path) -> std::path::PathBuf {
+    let src = h.join("elsewhere/pdf");
+    write_skill(&h.join("elsewhere"), "pdf", "Reads PDFs");
+    std::fs::create_dir_all(src.join("sub")).unwrap();
+    std::fs::write(src.join("sub/a.md"), "nested").unwrap();
+    std::fs::write(src.join(".hidden"), "dot").unwrap();
+    std::os::unix::fs::symlink("sub/a.md", src.join("link")).unwrap();
+    src
+}
+
+/// The tar the sender streams: `tar -C <dir> -cf - .`.
+fn tar_of(dir: &std::path::Path) -> Vec<u8> {
+    let out = std::process::Command::new("tar").env("COPYFILE_DISABLE", "1").arg("-C").arg(dir).args(["-cf", "-", "."]).output().unwrap();
+    assert!(out.status.success());
+    out.stdout
+}
+
+/// A ctx for home `h` linking into Codex, with `pdf`'s tar ready on stdin.
+fn receiving(h: &std::path::Path) -> Ctx {
+    std::fs::create_dir_all(h.join(".codex")).unwrap();
+    let mut c = ctx(h);
+    c.settings.targets = Some(vec!["codex".into()]);
+    c
+}
+
+fn receive_args<'a>(hash: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
+    let mut args = vec!["skills", "receive", "pdf", "--to-global", "--source-hash", hash, "--from", "laptop", "--json"];
+    args.extend_from_slice(extra);
+    args
+}
+
+/// Plans a receive of `pdf` and applies it with the tar of `src` on stdin.
+fn receive_pdf(c: &mut Ctx, src: &std::path::Path) -> (i32, String, String) {
+    let id = json(&go(&receive_args("7", &[]), c).1)["plan_id"].as_str().unwrap().to_string();
+    c.stdin = Some(Box::new(std::io::Cursor::new(tar_of(src))));
+    go(&receive_args("7", &["--apply", "--plan-id", &id]), c)
+}
+
+fn leftovers(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with(".prism-incoming")).collect()
+}
+
+#[test]
+fn receive_keeps_tree_and_refuses_clash() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let src = sent_skill(h);
+    let mut c = receiving(h);
+
+    let (code, out, _) = go(&receive_args("7", &[]), &mut c);
+    assert_eq!(code, 0);
+    let plan = json(&out);
+    assert_eq!(plan["actions"], serde_json::json!(["Copy pdf from laptop to Global (~) (link into Codex)"]));
+    assert!(!h.join(".agents/skills/pdf").exists(), "a plan changes nothing");
+
+    let (code, out, err) = receive_pdf(&mut c, &src);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(json(&out)["applied"], true);
+    let got = h.join(".agents/skills/pdf");
+    assert_eq!(std::fs::read_to_string(got.join("SKILL.md")).unwrap(), std::fs::read_to_string(src.join("SKILL.md")).unwrap());
+    assert_eq!(std::fs::read_to_string(got.join("sub/a.md")).unwrap(), "nested");
+    assert_eq!(std::fs::read_to_string(got.join(".hidden")).unwrap(), "dot");
+    assert_eq!(std::fs::read_link(got.join("link")).unwrap(), std::path::Path::new("sub/a.md"), "relative links arrive as links");
+    assert_eq!(crate::planid::tree_hash(&got), crate::planid::tree_hash(&src));
+    assert!(std::fs::symlink_metadata(h.join(".codex/skills/pdf")).unwrap().file_type().is_symlink());
+    assert!(leftovers(&h.join(".agents/skills")).is_empty());
+    assert_eq!(store::load_last_change(&c.paths).unwrap().label, "copy pdf from laptop");
+
+    // The same name again is a conflict, and the first copy stays as it is.
+    std::fs::write(src.join("SKILL.md"), "changed").unwrap();
+    let plan = json(&go(&receive_args("8", &[]), &mut c).1);
+    assert_eq!(plan["actions"], serde_json::json!([]));
+    assert_eq!(plan["conflicts"], serde_json::json!([{ "skill": "pdf", "reason": "already in Global (~)" }]));
+    let id = plan["plan_id"].as_str().unwrap().to_string();
+    c.stdin = Some(Box::new(std::io::Cursor::new(tar_of(&src))));
+    assert_eq!(go(&receive_args("8", &["--apply", "--plan-id", &id]), &mut c).0, 0);
+    assert_ne!(std::fs::read_to_string(got.join("SKILL.md")).unwrap(), "changed");
+    assert!(leftovers(&h.join(".agents/skills")).is_empty());
+}
+
+#[test]
+fn receive_refuses_a_name_that_is_a_path() {
+    let home = tempfile::tempdir().unwrap();
+    let mut c = receiving(home.path());
+    for name in ["../evil", "a/b", ".", "..", ""] {
+        let (code, _, err) = go(&["skills", "receive", name, "--to-global", "--source-hash", "1", "--from", "laptop"], &mut c);
+        assert_eq!(code, 2, "{name}: {err}");
+    }
+    assert!(!home.path().join(".agents").exists());
+}
+
+#[test]
+fn receive_plan_id_covers_hash() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let src = sent_skill(h);
+    let mut c = receiving(h);
+    let id = |c: &mut Ctx, hash: &str| json(&go(&receive_args(hash, &[]), c).1)["plan_id"].as_str().unwrap().to_string();
+    let (one, two) = (id(&mut c, "1"), id(&mut c, "2"));
+    assert_ne!(one, two);
+    c.stdin = Some(Box::new(std::io::Cursor::new(tar_of(&src))));
+    let (code, out, _) = go(&receive_args("2", &["--apply", "--plan-id", &one]), &mut c);
+    assert_eq!(code, 4);
+    assert_eq!(json(&out)["plan_changed"], true);
+    assert!(!h.join(".agents/skills/pdf").exists());
+}
+
+#[test]
+fn receive_then_undo_removes_it() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let src = sent_skill(h);
+    let mut c = receiving(h);
+    assert_eq!(receive_pdf(&mut c, &src).0, 0);
+    assert!(h.join(".agents/skills/pdf/SKILL.md").is_file());
+    let (code, out, _) = go(&["undo"], &mut c);
+    assert_eq!(code, 0, "{out}");
+    assert!(std::fs::symlink_metadata(h.join(".agents/skills/pdf")).is_err());
+    assert!(std::fs::symlink_metadata(h.join(".codex/skills/pdf")).is_err());
+}
+
+#[test]
+fn skills_trash_moves_copy() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    write_skill(&h.join(".claude/skills"), "own", "d");
+    let mut c = ctx(h);
+    let (code, out, _) = go(&["skills", "trash", "own", "--agent", "claude", "--json"], &mut c);
+    assert_eq!(code, 0);
+    let plan = json(&out);
+    assert_eq!(plan["actions"], serde_json::json!(["Move Claude Code's copy of own to the trash"]));
+    assert!(h.join(".claude/skills/own/SKILL.md").is_file(), "a plan changes nothing");
+    let id = plan["plan_id"].as_str().unwrap().to_string();
+    let (code, out, _) = go(&["skills", "trash", "own", "--agent", "claude", "--apply", "--plan-id", &id], &mut c);
+    assert_eq!(code, 0, "{out}");
+    assert!(std::fs::symlink_metadata(h.join(".claude/skills/own")).is_err());
+    assert_eq!(store::load_last_change(&c.paths).unwrap().label, "trash Claude Code's copy of own");
+    assert_eq!(go(&["undo"], &mut c).0, 0);
+    assert!(h.join(".claude/skills/own/SKILL.md").is_file());
+
+    // A link is not a copy: it is unlinked, not trashed.
+    std::fs::create_dir_all(h.join(".codex/skills")).unwrap();
+    std::os::unix::fs::symlink(h.join(".claude/skills/own"), h.join(".codex/skills/own")).unwrap();
+    let plan = json(&go(&["skills", "trash", "own", "--agent", "codex", "--json"], &mut c).1);
+    assert_eq!(plan["actions"], serde_json::json!([]));
+    assert_eq!(plan["conflicts"][0]["reason"], "Codex has a link, not its own copy; unlink it instead");
+}
+
 #[test]
 fn install_bad_source_is_usage_error() {
     let home = tempfile::tempdir().unwrap();

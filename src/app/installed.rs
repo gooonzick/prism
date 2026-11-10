@@ -207,7 +207,7 @@ impl App {
         let mut j = self.new_journal();
         let result = sync::trash_copy(&self.scope, &self.paths, skill, agent, &mut j)
             .map(|_| format!("Moved {}'s copy of {skill} to the trash", AGENTS[agent].name));
-        self.changed(format!("trash {}'s copy of {skill}", AGENTS[agent].name), j, result);
+        self.changed(sync::label::trash_copy(skill, agent), j, result);
     }
 
     /// Removes every skill in `names`, going on past failures.

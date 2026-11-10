@@ -22,6 +22,8 @@ pub enum Step {
     Trashed { from: PathBuf, to: PathBuf, info: Option<PathBuf> },
     /// A folder was copied here.
     Copied(PathBuf),
+    /// A folder made elsewhere (a skill unpacked from another machine) was put here.
+    Created(PathBuf),
     /// A file was rewritten. `backup` is the original (`None`: it didn't exist), `hash_after`
     /// the hash of what was written, so undo can tell if anything else touched it since.
     Rewrote { path: PathBuf, backup: Option<PathBuf>, hash_after: u64 },
@@ -81,6 +83,16 @@ impl Journal {
         }
         copy_dir(from, to)?;
         self.steps.push(Step::Copied(to.to_path_buf()));
+        Ok(())
+    }
+
+    /// Puts `made`, a folder this change just made, at `at` (which must not exist yet).
+    pub fn place(&mut self, made: &Path, at: &Path) -> io::Result<()> {
+        if fs::symlink_metadata(at).is_ok() {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} already exists", at.display())));
+        }
+        fs::rename(made, at)?;
+        self.steps.push(Step::Created(at.to_path_buf()));
         Ok(())
     }
 
@@ -154,7 +166,7 @@ impl Journal {
                         }
                     }),
                 },
-                Step::Copied(at) => trash(at, paths).map(|_| ()),
+                Step::Copied(at) | Step::Created(at) => trash(at, paths).map(|_| ()),
                 Step::Rewrote { path, backup, hash_after } => match fs::read(path) {
                     Ok(now) if content_hash(&now) == *hash_after => match backup {
                         Some(b) => fs::read(b).and_then(|bytes| write_atomic(path, &bytes)),

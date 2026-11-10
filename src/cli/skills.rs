@@ -1,8 +1,8 @@
 //! `prism skills`: what is installed in a scope, and changing it. Every command that
 //! changes something prints a plan first and acts only with `--apply`.
 
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
@@ -80,6 +80,33 @@ pub enum Cmd {
         #[command(flatten)]
         apply: Apply,
     },
+    /// Move one agent's own copy of a skill to the trash.
+    Trash {
+        name: String,
+        #[arg(long, value_name = "AGENT")]
+        agent: String,
+        #[command(flatten)]
+        apply: Apply,
+    },
+    /// Take a skill another machine sends: with --apply, its folder as a tar on stdin.
+    #[command(hide = true)]
+    Receive {
+        name: String,
+        /// The project folder to copy into.
+        #[arg(long, value_name = "DIR", conflicts_with = "to_global")]
+        to_project: Option<PathBuf>,
+        /// Copy into the global setup.
+        #[arg(long)]
+        to_global: bool,
+        /// The sender's hash of the skill's folder (`wire skill-hash`).
+        #[arg(long, value_name = "HASH")]
+        source_hash: String,
+        /// How plan lines name the sending machine.
+        #[arg(long, value_name = "LABEL")]
+        from: String,
+        #[command(flatten)]
+        apply: Apply,
+    },
     /// Remove every broken link.
     CleanBroken {
         #[command(flatten)]
@@ -122,6 +149,8 @@ struct Planned<'a> {
     /// Skills the plan touches, in the scope they are in: their folders and links in every
     /// agent are hashed into the plan id.
     involved: Vec<(Scope, String)>,
+    /// The sender's hash of a skill coming from another machine, also in the plan id.
+    sent_hash: Option<String>,
     label: String,
     run: Run<'a>,
 }
@@ -135,6 +164,7 @@ impl<'a> Planned<'a> {
             actions: actions.iter().map(Action::describe).collect(),
             conflicts: plan.conflicts,
             involved,
+            sent_hash: None,
             label,
             run: Box::new(move |j| sync::apply(&scope, &ctx.paths, &actions, j)),
         }
@@ -168,7 +198,9 @@ fn id_of(ctx: &Ctx, p: &Planned) -> String {
             }
         }
     }
-    plan_id(&p.actions, &state)
+    let mut lines = p.actions.clone();
+    lines.extend(p.sent_hash.iter().map(|h| format!("sent as {h}")));
+    plan_id(&lines, &state)
 }
 
 fn plan_json(p: &Planned, id: &str, applied: bool) -> Value {
@@ -257,9 +289,18 @@ fn drive(ctx: &Ctx, mut plan: Planned, a: Apply, out: &mut Out, err: &mut dyn Wr
     }
 }
 
-pub fn run(cmd: Cmd, ctx: &Ctx, scope: &Scope, out: &mut Out, err: &mut dyn Write) -> Exit {
+pub fn run(cmd: Cmd, ctx: &mut Ctx, scope: &Scope, out: &mut Out, err: &mut dyn Write) -> Exit {
     // The skills.sh commands work on the CLI's own output, not on the inventory.
     match cmd {
+        Cmd::Receive { name, to_project, to_global, source_hash, from, apply } => {
+            let dest = match dest_scope(ctx, to_project.as_deref(), to_global) {
+                Ok(d) => d,
+                Err(e) => return usage(err, &e),
+            };
+            // Only an apply reads the tar; a plan must not wait on stdin.
+            let tar = if apply.apply { ctx.stdin.take() } else { None };
+            receive(ctx, Received { name, dest, hash: source_hash, from, tar }, apply, out, err)
+        }
         Cmd::Search { query } => search(&query, out, err),
         Cmd::Repo { source } => repo(&source, out, err),
         Cmd::Install { source, skill, to } => install(ctx, scope, &source, skill, to, out, err),
@@ -301,13 +342,9 @@ fn run_local(cmd: Cmd, ctx: &Ctx, scope: &Scope, out: &mut Out, err: &mut dyn Wr
         }
         Cmd::Unlink { name, agent, apply } => unlink(ctx, scope, &inv, &name, &agent, apply, out, err),
         Cmd::Remove { names, apply } => remove(ctx, scope, &inv, names, apply, out, err),
+        Cmd::Trash { name, agent, apply } => trash(ctx, scope, &inv, &name, &agent, apply, out, err),
         Cmd::Copy { names, to_project, to_global, apply } => {
-            let dest = match (to_project.as_deref(), to_global) {
-                (Some(dir), _) => ctx.scope(Some(dir)),
-                (None, true) => Ok(Scope::Global),
-                (None, false) => return usage(err, "say where to copy: --to-project DIR or --to-global"),
-            };
-            let dest = match dest {
+            let dest = match dest_scope(ctx, to_project.as_deref(), to_global) {
                 Ok(d) => d,
                 Err(e) => return usage(err, &e),
             };
@@ -319,13 +356,16 @@ fn run_local(cmd: Cmd, ctx: &Ctx, scope: &Scope, out: &mut Out, err: &mut dyn Wr
             }
             copy(ctx, scope, &inv, names, dest, apply, out, err)
         }
-        Cmd::Search { .. } | Cmd::Repo { .. } | Cmd::Install { .. } | Cmd::Updates | Cmd::Update { .. } => unreachable!("routed in run"),
+        Cmd::Search { .. } | Cmd::Repo { .. } | Cmd::Install { .. } | Cmd::Updates | Cmd::Update { .. } | Cmd::Receive { .. } => {
+            unreachable!("routed in run")
+        }
         Cmd::CleanBroken { apply } => {
             let broken = sync::broken_links(&inv);
             let plan = Planned {
                 actions: broken.iter().map(|(s, a)| format!("Remove {}'s broken link to {s}", AGENTS[*a].name)).collect(),
                 conflicts: vec![],
                 involved: broken.iter().map(|(s, _)| (scope.clone(), s.clone())).collect(),
+                sent_hash: None,
                 label: label::BROKEN.into(),
                 run: Box::new(|j| sync::remove_broken(&inv, &ctx.paths, j).map_err(|e| (0, e))),
             };
@@ -352,6 +392,7 @@ fn remove(ctx: &Ctx, scope: &Scope, inv: &Inventory, names: Vec<String>, apply: 
         actions: names.iter().map(describe).collect(),
         conflicts: vec![],
         involved: names.iter().map(|n| (scope.clone(), n.clone())).collect(),
+        sent_hash: None,
         label: label::remove(&names),
         run: Box::new(|j| {
             for (done, n) in names.iter().enumerate() {
@@ -380,6 +421,7 @@ fn unlink(ctx: &Ctx, scope: &Scope, inv: &Inventory, name: &str, agent: &str, ap
         actions,
         conflicts,
         involved: vec![(scope.clone(), name.to_string())],
+        sent_hash: None,
         label: label::unlink(name, agent),
         run: Box::new(|j| sync::unlink(scope, &ctx.paths, name, agent, j).map(|_| 1).map_err(|e| (0, e))),
     };
@@ -401,13 +443,12 @@ fn copy(ctx: &Ctx, scope: &Scope, inv: &Inventory, names: Vec<String>, dest: Sco
     let targets = ctx.targets();
     let mut involved: Vec<(Scope, String)> = copying.iter().map(|n| (scope.clone(), n.clone())).collect();
     involved.extend(copying.iter().chain(conflicts.iter().map(|c| &c.skill)).map(|n| (dest.clone(), n.clone())));
-    // The links apply makes depend on the targets, so they are part of what the id covers.
-    let linking: Vec<&str> = targets.iter().map(|&t| AGENTS[t].name).collect();
-    let linking = if linking.is_empty() { "no links".to_string() } else { format!("link into {}", linking.join(", ")) };
+    let linking = linking(&targets);
     let plan = Planned {
         actions: copying.iter().map(|n| format!("Copy {n} to {to} ({linking})")).collect(),
         conflicts,
         involved,
+        sent_hash: None,
         label: label::copy(&to),
         run: Box::new(|j| {
             for (done, n) in copying.iter().enumerate() {
@@ -415,6 +456,90 @@ fn copy(ctx: &Ctx, scope: &Scope, inv: &Inventory, names: Vec<String>, dest: Sco
             }
             Ok(copying.len())
         }),
+    };
+    drive(ctx, plan, apply, out, err)
+}
+
+/// Where `--to-project DIR` or `--to-global` says to copy.
+fn dest_scope(ctx: &Ctx, to_project: Option<&Path>, to_global: bool) -> Result<Scope, String> {
+    match (to_project, to_global) {
+        (Some(dir), _) => ctx.scope(Some(dir)),
+        (None, true) => Ok(Scope::Global),
+        (None, false) => Err("say where to copy: --to-project DIR or --to-global".into()),
+    }
+}
+
+/// The links a copy makes, for its plan line. They depend on the targets, so the line
+/// (and with it the plan id) changes when the targets do.
+fn linking(targets: &[usize]) -> String {
+    let names: Vec<&str> = targets.iter().map(|&t| AGENTS[t].name).collect();
+    if names.is_empty() { "no links".to_string() } else { format!("link into {}", names.join(", ")) }
+}
+
+/// A skill another machine sends, and where it goes.
+struct Received {
+    name: String,
+    dest: Scope,
+    hash: String,
+    from: String,
+    /// The tar of its folder; `None` is the process's stdin.
+    tar: Option<Box<dyn Read>>,
+}
+
+/// The receiving end of a copy from another machine: the plan names the sender, and the id
+/// covers the sender's hash of the skill, so a skill changed there since is a changed plan.
+fn receive(ctx: &Ctx, r: Received, apply: Apply, out: &mut Out, err: &mut dyn Write) -> Exit {
+    if let Err(e) = sync::check_folder_name(&r.name) {
+        return usage(err, &e);
+    }
+    let Received { name, dest, hash, from, tar } = r;
+    let to = label::scope(&dest, &ctx.paths);
+    let targets = ctx.targets();
+    let (mut actions, mut conflicts) = (Vec::new(), Vec::new());
+    if std::fs::symlink_metadata(AGENTS[CANONICAL].dir(&dest, &ctx.paths).join(&name)).is_ok() {
+        conflicts.push(Conflict { skill: name.clone(), reason: format!("already in {to}") });
+    } else {
+        actions.push(format!("Copy {name} from {from} to {to} ({})", linking(&targets)));
+    }
+    let plan = Planned {
+        actions,
+        conflicts,
+        involved: vec![(dest.clone(), name.clone())],
+        sent_hash: Some(hash),
+        label: label::receive(&name, &from),
+        run: Box::new(move |j| {
+            let mut tar = tar.unwrap_or_else(|| Box::new(std::io::stdin()));
+            sync::receive(&ctx.paths, &dest, &name, &mut tar, &targets, j).map(|()| 1).map_err(|e| (0, e))
+        }),
+    };
+    drive(ctx, plan, apply, out, err)
+}
+
+/// Moves an agent's own copy of a skill to the trash, as the window's "Move this copy to the
+/// trash" does. Links are not copies: `unlink` takes those.
+#[allow(clippy::too_many_arguments)]
+fn trash(ctx: &Ctx, scope: &Scope, inv: &Inventory, name: &str, agent: &str, apply: Apply, out: &mut Out, err: &mut dyn Write) -> Exit {
+    let agent = match agent_index(agent) {
+        Ok(a) => a,
+        Err(e) => return usage(err, &e),
+    };
+    let Some(s) = inv.get(name) else { return missing_skill(out, err, name, scope) };
+    let who = AGENTS[agent].name;
+    let (mut actions, mut conflicts) = (Vec::new(), Vec::new());
+    let mut conflict = |reason: String| conflicts.push(Conflict { skill: name.into(), reason });
+    match &s.placements[agent] {
+        _ if inv.shares_canonical[agent] => conflict(format!("{who} uses the .agents folder itself; remove the skill instead")),
+        Placement::Dir => actions.push(format!("Move {who}'s copy of {name} to the trash")),
+        Placement::Linked | Placement::Link(_) | Placement::Broken(_) => conflict(format!("{who} has a link, not its own copy; unlink it instead")),
+        Placement::Missing => conflict(format!("{who} has no copy of {name}")),
+    }
+    let plan = Planned {
+        actions,
+        conflicts,
+        involved: vec![(scope.clone(), name.to_string())],
+        sent_hash: None,
+        label: label::trash_copy(name, agent),
+        run: Box::new(|j| sync::trash_copy(scope, &ctx.paths, name, agent, j).map(|_| 1).map_err(|e| (0, e))),
     };
     drive(ctx, plan, apply, out, err)
 }
