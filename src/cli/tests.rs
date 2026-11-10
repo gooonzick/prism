@@ -617,11 +617,18 @@ fn receive_args<'a>(hash: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
     args
 }
 
-/// Plans a receive of `pdf` and applies it with the tar of `src` on stdin.
-fn receive_pdf(c: &mut Ctx, src: &std::path::Path) -> (i32, String, String) {
-    let id = json(&go(&receive_args("7", &[]), c).1)["plan_id"].as_str().unwrap().to_string();
+/// Plans a receive of `pdf` with `hash` as the sender's and applies it with the tar of `src`
+/// on stdin.
+fn receive_pdf_as(c: &mut Ctx, src: &std::path::Path, hash: &str) -> (i32, String, String) {
+    let id = json(&go(&receive_args(hash, &[]), c).1)["plan_id"].as_str().unwrap().to_string();
     c.stdin = Some(Box::new(std::io::Cursor::new(tar_of(src))));
-    go(&receive_args("7", &["--apply", "--plan-id", &id]), c)
+    go(&receive_args(hash, &["--apply", "--plan-id", &id]), c)
+}
+
+/// The same, with `src`'s own hash, as `wire skill-hash` gives it.
+fn receive_pdf(c: &mut Ctx, src: &std::path::Path) -> (i32, String, String) {
+    let hash = crate::planid::tree_hash(src).unwrap().to_string();
+    receive_pdf_as(c, src, &hash)
 }
 
 fn leftovers(dir: &std::path::Path) -> Vec<String> {
@@ -664,6 +671,44 @@ fn receive_keeps_tree_and_refuses_clash() {
     assert_eq!(go(&receive_args("8", &["--apply", "--plan-id", &id]), &mut c).0, 0);
     assert_ne!(std::fs::read_to_string(got.join("SKILL.md")).unwrap(), "changed");
     assert!(leftovers(&h.join(".agents/skills")).is_empty());
+}
+
+#[test]
+fn receive_refuses_what_does_not_match_the_senders_hash() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let src = sent_skill(h);
+    let mut c = receiving(h);
+    let hash = crate::planid::tree_hash(&src).unwrap().to_string();
+    std::fs::write(src.join("sub/a.md"), "tampered").unwrap();
+    let (code, out, _) = receive_pdf_as(&mut c, &src, &hash);
+    assert_eq!(code, 1);
+    assert_eq!(json(&out)["error"], "pdf arrived incomplete or changed; nothing was placed");
+    assert!(std::fs::symlink_metadata(h.join(".agents/skills/pdf")).is_err());
+    assert!(std::fs::symlink_metadata(h.join(".codex/skills/pdf")).is_err());
+    assert!(leftovers(&h.join(".agents/skills")).is_empty());
+    assert_eq!(store::load_last_change(&c.paths), None);
+}
+
+#[test]
+fn a_linked_skill_round_trips_with_the_hash_wire_gives() {
+    // On the sending machine .agents/skills/pdf is a link to a folder elsewhere.
+    let sender = tempfile::tempdir().unwrap();
+    let s = sender.path();
+    let folder = sent_skill(s);
+    std::fs::create_dir_all(s.join(".agents/skills")).unwrap();
+    std::os::unix::fs::symlink(&folder, s.join(".agents/skills/pdf")).unwrap();
+    let mut from = ctx(s);
+    let (code, out, _) = go(&["wire", "skill-hash", "pdf"], &mut from);
+    assert_eq!(code, 0);
+    let hash = json(&out)["hash"].as_u64().unwrap().to_string();
+
+    let receiver = tempfile::tempdir().unwrap();
+    let mut c = receiving(receiver.path());
+    let (code, out, err) = receive_pdf_as(&mut c, &s.join(".agents/skills/pdf"), &hash);
+    assert_eq!(code, 0, "{out}{err}");
+    let got = crate::planid::tree_hash(&receiver.path().join(".agents/skills/pdf")).unwrap();
+    assert_eq!(got.to_string(), hash);
 }
 
 #[test]

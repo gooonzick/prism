@@ -98,9 +98,9 @@ pub enum Cmd {
         /// Copy into the global setup.
         #[arg(long)]
         to_global: bool,
-        /// The sender's hash of the skill's folder (`wire skill-hash`).
+        /// The sender's hash of the skill's folder (`wire skill-hash`); what arrives must match.
         #[arg(long, value_name = "HASH")]
-        source_hash: String,
+        source_hash: u64,
         /// How plan lines name the sending machine.
         #[arg(long, value_name = "LABEL")]
         from: String,
@@ -480,7 +480,7 @@ fn linking(targets: &[usize]) -> String {
 struct Received {
     name: String,
     dest: Scope,
-    hash: String,
+    hash: u64,
     from: String,
     /// The tar of its folder; `None` is the process's stdin.
     tar: Option<Box<dyn Read>>,
@@ -505,11 +505,11 @@ fn receive(ctx: &Ctx, r: Received, apply: Apply, out: &mut Out, err: &mut dyn Wr
         actions,
         conflicts,
         involved: vec![(dest.clone(), name.clone())],
-        sent_hash: Some(hash),
+        sent_hash: Some(hash.to_string()),
         label: label::receive(&name, &from),
         run: Box::new(move |j| {
             let mut tar = tar.unwrap_or_else(|| Box::new(std::io::stdin()));
-            sync::receive(&ctx.paths, &dest, &name, &mut tar, &targets, j).map(|()| 1).map_err(|e| (0, e))
+            sync::receive(&ctx.paths, &dest, &name, &mut tar, hash, &targets, j).map(|()| 1).map_err(|e| (0, e))
         }),
     };
     drive(ctx, plan, apply, out, err)

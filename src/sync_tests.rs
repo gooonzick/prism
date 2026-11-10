@@ -224,6 +224,7 @@ fn link_installed_links_into_targets_only() {
 fn raw_tar(members: &[(&str, &str)]) -> Vec<u8> {
     let mut tar = Vec::new();
     for (name, body) in members {
+        assert!(name.len() < 100, "{name} is too long for a plain ustar name");
         let mut h = [0u8; 512];
         h[..name.len()].copy_from_slice(name.as_bytes());
         h[100..108].copy_from_slice(b"0000644\0");
@@ -250,23 +251,33 @@ fn receive_refuses_an_archive_reaching_outside_the_skill() {
     let f = Fixture::new();
     let store = f.dir("agents");
     let codex = ids(&["codex"]);
-    for bad in ["../evil", "./sub/../../evil", "/tmp/prism-evil-test"] {
+    let absolute = f.paths.home.join("evil-abs");
+    for bad in ["../evil", "./sub/../../evil", absolute.to_str().unwrap()] {
         let tar = raw_tar(&[("./SKILL.md", "ok"), (bad, "pwned")]);
         let mut j = Journal::default();
-        let got = receive(&f.paths, &Scope::Global, "pdf", &mut tar.as_slice(), &codex, &mut j);
+        let got = receive(&f.paths, &Scope::Global, "pdf", &mut tar.as_slice(), 0, &codex, &mut j);
         assert!(got.as_ref().is_err_and(|e| e.contains("reaches outside")), "{bad}: {got:?}");
         assert!(j.is_empty());
         let left: Vec<_> = fs::read_dir(&store).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert!(left.is_empty(), "{bad} left {left:?}");
         assert!(!store.parent().unwrap().join("evil").exists() && !store.join("evil").exists());
-        assert!(!Path::new("/tmp/prism-evil-test").exists());
+        assert!(!absolute.exists());
     }
     // The same archive without the bad member goes in.
     let tar = raw_tar(&[("./SKILL.md", "ok"), ("sub/a.md", "a")]);
     let mut j = Journal::default();
-    receive(&f.paths, &Scope::Global, "pdf", &mut tar.as_slice(), &codex, &mut j).unwrap();
+    receive(&f.paths, &Scope::Global, "pdf", &mut tar.as_slice(), expected_hash(), &codex, &mut j).unwrap();
     assert_eq!(fs::read_to_string(store.join("pdf/sub/a.md")).unwrap(), "a");
     assert!(fs::symlink_metadata(f.dir("codex").join("pdf")).unwrap().file_type().is_symlink());
+}
+
+/// The hash of the tree `raw_tar(&[("./SKILL.md", "ok"), ("sub/a.md", "a")])` unpacks to.
+fn expected_hash() -> u64 {
+    let d = tempfile::tempdir().unwrap();
+    fs::create_dir_all(d.path().join("sub")).unwrap();
+    fs::write(d.path().join("SKILL.md"), "ok").unwrap();
+    fs::write(d.path().join("sub/a.md"), "a").unwrap();
+    crate::planid::tree_hash(d.path()).unwrap()
 }
 
 #[test]
@@ -274,7 +285,31 @@ fn receive_cleans_up_after_a_broken_archive() {
     let f = Fixture::new();
     let store = f.dir("agents");
     let mut j = Journal::default();
-    assert!(receive(&f.paths, &Scope::Global, "pdf", &mut &b"not a tar at all"[..], &[], &mut j).is_err());
+    assert!(receive(&f.paths, &Scope::Global, "pdf", &mut &b"not a tar at all"[..], expected_hash(), &[], &mut j).is_err());
+    assert!(fs::read_dir(&store).unwrap().next().is_none());
+    assert!(j.is_empty());
+}
+
+#[test]
+fn receive_refuses_an_empty_stream() {
+    let f = Fixture::new();
+    let store = f.dir("agents");
+    let mut j = Journal::default();
+    let got = receive(&f.paths, &Scope::Global, "pdf", &mut &b""[..], expected_hash(), &ids(&["codex"]), &mut j);
+    assert!(got.is_err(), "an empty stream became a skill");
+    assert!(fs::read_dir(&store).unwrap().next().is_none(), "nothing is placed and nothing is left");
+    assert!(fs::symlink_metadata(f.dir("codex").join("pdf")).is_err());
+    assert!(j.is_empty());
+}
+
+#[test]
+fn receive_refuses_a_tampered_archive() {
+    let f = Fixture::new();
+    let store = f.dir("agents");
+    let tar = raw_tar(&[("./SKILL.md", "ok"), ("sub/a.md", "changed on the way")]);
+    let mut j = Journal::default();
+    let got = receive(&f.paths, &Scope::Global, "pdf", &mut tar.as_slice(), expected_hash(), &[], &mut j);
+    assert_eq!(got, Err("pdf arrived incomplete or changed; nothing was placed".to_string()));
     assert!(fs::read_dir(&store).unwrap().next().is_none());
     assert!(j.is_empty());
 }

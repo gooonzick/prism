@@ -328,9 +328,10 @@ pub fn check_folder_name(name: &str) -> Result<(), String> {
 /// `.agents/skills/<name>`, then links it into `targets` there like [`copy_to`]. The tar
 /// comes over the network, so it is saved and listed first: a member with an absolute path
 /// or a `..` refuses the whole archive. It unpacks into a staging folder that becomes the
-/// skill only once all of it is there; on any failure the staging folder and the saved tar
-/// go, and nothing is in the journal.
-pub fn receive(paths: &Paths, dest: &Scope, name: &str, tar: &mut dyn Read, targets: &[usize], j: &mut Journal) -> Result<(), String> {
+/// skill only once all of it is there and its [`tree_hash`](crate::planid::tree_hash) is
+/// `hash`, the sender's hash of the folder (a cut-off or altered stream is refused). On any
+/// failure the staging folder and the saved tar go, and nothing is in the journal.
+pub fn receive(paths: &Paths, dest: &Scope, name: &str, tar: &mut dyn Read, hash: u64, targets: &[usize], j: &mut Journal) -> Result<(), String> {
     check_folder_name(name)?;
     let store = AGENTS[CANONICAL].dir(dest, paths);
     let dst = store.join(name);
@@ -341,7 +342,10 @@ pub fn receive(paths: &Paths, dest: &Scope, name: &str, tar: &mut dyn Read, targ
     // Hidden names: a scan of the store never shows them as skills.
     let incoming = format!(".prism-incoming-{}-{name}", std::process::id());
     let (archive, staging) = (store.join(format!("{incoming}.tar")), store.join(&incoming));
-    let unpacked = unpack(tar, &archive, &staging);
+    let unpacked = unpack(tar, &archive, &staging).and_then(|()| match crate::planid::tree_hash(&staging) {
+        Some(got) if got == hash => Ok(()),
+        _ => Err(format!("{name} arrived incomplete or changed; nothing was placed")),
+    });
     let _ = fs::remove_file(&archive);
     let placed = unpacked.and_then(|()| j.place(&staging, &dst).map_err(|e| format!("{}: {e}", dst.display())));
     if let Err(e) = placed {

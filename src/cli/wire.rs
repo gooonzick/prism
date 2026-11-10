@@ -19,7 +19,8 @@ pub enum Cmd {
     Server { name: String },
     /// A skill's SKILL.md body, as the inspector previews it.
     SkillMd { name: String },
-    /// The hash of a skill's folder, for copies.
+    /// The hash of a skill's folder, for copies: of the folder it resolves to, as a receiver
+    /// unpacking its contents sees it.
     SkillHash { name: String },
 }
 
@@ -35,7 +36,10 @@ pub fn run(cmd: Cmd, ctx: &Ctx, scope: &Scope, out: &mut Out, err: &mut dyn Writ
             None => failed(out, err, &format!("No skill named {name}")),
         },
         Cmd::SkillHash { name } => match scan::scan(scope, &ctx.paths).get(&name) {
-            Some(skill) => print(out, &json!({ "hash": skill.source.as_deref().and_then(planid::tree_hash) })),
+            Some(skill) => {
+                let folder = skill.source.as_deref().and_then(|p| std::fs::canonicalize(p).ok());
+                print(out, &json!({ "hash": folder.as_deref().and_then(planid::tree_hash) }))
+            }
             None => failed(out, err, &format!("No skill named {name}")),
         },
     }
