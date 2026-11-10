@@ -1,10 +1,10 @@
 //! The list page: filter, status line, a scrolling list of rows (or an empty state), all on one
 //! content edge. Plus the row that goes in the list.
 
-use rune::{El, Icon, ScrollSpec, Tx, col, icon, row};
+use rune::{Cursor, El, Icon, ScrollSpec, Tx, col, icon, row};
 use rune_kit::{Checkbox, Kit, Spinner, glyphs};
 
-use super::{Place, color, icon_button, motion, radius, size, space, text};
+use super::{color, motion, radius, size, space, text, ty};
 
 /// A list page. The filter, the segments, the count (or selection line), the notices and the
 /// footer stay put; the rows scroll and take the remaining height.
@@ -114,7 +114,7 @@ impl Page {
         // `S2` wider than the content on each side and pads that back; the rows own their edge.
         let list = col()
             .key("list")
-            .w_full()
+            .self_stretch()
             .min_h(0.0)
             .grow(1.0)
             .mx(-space::S2)
@@ -215,7 +215,20 @@ impl<S: 'static> Selection<S> {
         let danger = self.danger.map(|d| row().grow(1.0).justify_end().center_y().child(d));
         let rest = match self.picked {
             Some((n, on_clear)) => {
-                let clear = icon_button(&glyphs::CLOSE, "Clear selection", Place::List).help(self.clear_help).on_press(on_clear).build(k).key("bulk-clear");
+                // "N selected ×" is one target: pressing the words clears too.
+                let clear = row()
+                    .key("bulk-clear")
+                    .role("button")
+                    .label("Clear selection")
+                    .help(self.clear_help)
+                    .focusable(true)
+                    .cursor(Cursor::Pointer)
+                    .h(size::ROW_1)
+                    .gap(space::S1)
+                    .center_y()
+                    .on_press(on_clear)
+                    .child(text::name(k, format!("{n} selected")))
+                    .child(icon(&glyphs::CLOSE, size::ICON).color(color::text_muted(k)));
                 // Wraps when the buttons don't fit; the danger button keeps to the right.
                 row()
                     .key("bulk-bar")
@@ -224,7 +237,7 @@ impl<S: 'static> Selection<S> {
                     .gap(space::S2)
                     .center_y()
                     .flex_wrap()
-                    .child(row().h(size::ROW_1).gap(space::S1).center_y().child(text::name(k, format!("{n} selected"))).child(clear))
+                    .child(clear)
                     .children(self.actions)
                     .children(danger)
             }
@@ -396,7 +409,9 @@ pub fn empty_action(k: &Kit, title: impl Into<String>, detail: impl Into<String>
     empty(k, title, detail).child(row().pt(space::S2).child(action))
 }
 
-/// Something under way: a spinner and a Label saying what, on one line. Never a spinner alone.
+/// Something under way: a spinner and what is happening, in the Label style but wrapping; the
+/// spinner sits on the first line. Never a spinner alone.
 pub fn loading(k: &Kit, s: impl Into<String>) -> El {
-    row().gap(space::S2).center_y().child(Spinner::new().size(size::ICON).color(color::text_muted(k)).build(k)).child(text::label(k, s))
+    let line = rune::text(s.into()).font(ty::label(k)).color(color::text_muted(k)).wrap().shrink();
+    row().gap(space::S2).items_start().child(Spinner::new().size(size::ICON).color(color::text_muted(k)).build(k)).child(line)
 }

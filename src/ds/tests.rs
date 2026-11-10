@@ -700,17 +700,102 @@ mod page_additions {
 
     fn states(_: &(), _: &mut Cx<()>) -> El {
         let k = Kit::neutral(false);
-        col()
-            .w_full()
-            .child(loading(&k, "Reading the repository…").key("loading"))
-            .child(empty_action(&k, "Can't reach work", "Timed out", button("Retry", Place::List).build(&k).key("retry")).key("empty"))
+        // The runtime sizes the root to the window, so the narrow column goes one level down.
+        col().w_full().child(
+            col()
+                .w(160.0)
+                .child(loading(&k, "Reading the repository…").key("short"))
+            .child(loading(&k, "Installing find-skills into ~/.agents/skills on work…").key("long"))
+                .child(empty_action(&k, "Can't reach work", "Timed out", button("Retry", Place::List).build(&k).key("retry")).key("empty")),
+        )
     }
 
     #[test]
-    fn loading_is_one_line_and_empty_keeps_its_action() {
+    fn loading_wraps_and_empty_keeps_its_action() {
         let rt = run((), states, (400.0, 600.0));
-        assert!(rect(&rt, "loading")[3] <= 20.0, "loading is {} high", rect(&rt, "loading")[3]);
+        let line = ty::label(&Kit::neutral(false)).line_height;
+        assert!(rect(&rt, "short")[3] <= line + 0.5, "a short loading line is {} high", rect(&rt, "short")[3]);
+        let long = rect(&rt, "long");
+        assert!(long[3] > line + 0.5, "the long loading text did not wrap: {} high", long[3]);
+        assert!(long[0] + long[2] <= 160.0 + 0.5, "the long loading text ends at {}", long[0] + long[2]);
+        let text = rt.elements().into_iter().find(|e| e.text.as_deref().is_some_and(|t| t.starts_with("Installing"))).expect("no loading text");
+        assert!(text.rect[0] + text.rect[2] <= 160.0 + 0.5, "the text ends at {}", text.rect[0] + text.rect[2]);
         let (e, b) = (rect(&rt, "empty"), rect(&rt, "retry"));
         assert!(b[1] >= e[1] && b[1] + b[3] <= e[1] + e[3], "the button sits in the empty state");
+    }
+
+    fn edges(_: &(), _: &mut Cx<()>) -> El {
+        let k = Kit::neutral(false);
+        let edit = TextEdit::new("");
+        Page::new("page")
+            .filter(filter(&edit, "Filter").build(&k).key("filter"))
+            .rows([ListRow::new("row", "work").trailing(status(&k, Tone::Ok, "Reachable")).build(&k, |_: &mut ()| {})])
+            .build(&k)
+    }
+
+    #[test]
+    fn trailing_ends_on_the_filter_edge() {
+        let rt = run((), edges, (400.0, 600.0));
+        let (t, f) = (rect(&rt, "row-trailing"), rect(&rt, "filter"));
+        assert!((t[0] + t[2] - (f[0] + f[2])).abs() <= 0.5, "the trailing column ends at {}, the filter at {}", t[0] + t[2], f[0] + f[2]);
+        // The highlight reaches `S2` past the content edge on both sides.
+        let row = rect(&rt, "row");
+        assert!((row[0] - (f[0] - space::S2)).abs() <= 0.5 && (row[0] + row[2] - (f[0] + f[2] + space::S2)).abs() <= 0.5, "row spans {}..{}", row[0], row[0] + row[2]);
+    }
+
+    #[derive(Default)]
+    struct Toggles {
+        all: u32,
+        cleared: u32,
+    }
+
+    fn line(enabled: bool, partial: bool, picked: bool) -> El {
+        let k = Kit::neutral(false);
+        let mut sel = Selection::new(false, partial, enabled, |s: &mut Toggles| s.all += 1).summary("3 hosts");
+        if picked {
+            sel = sel.picked(3, |s: &mut Toggles| s.cleared += 1).clear_help("Clear selection (Esc)");
+        }
+        col().w_full().padding(16.0).child(sel.build(&k))
+    }
+
+    fn find_key<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+        if v["key"] == key {
+            return Some(v);
+        }
+        v["children"].as_array()?.iter().find_map(|c| find_key(c, key))
+    }
+
+    #[test]
+    fn partial_selection_is_mixed_with_a_dash() {
+        let mut rt = run(Toggles::default(), |_, _| line(true, true, true), (640.0, 200.0));
+        let tree = rt.accessibility_json();
+        let all = find_key(&tree, "check-all").expect("no check-all in the tree");
+        assert!(all["states"].as_array().is_some_and(|s| s.iter().any(|x| x == "mixed")), "check-all is not mixed: {all}");
+        // The kit draws its own check at 10 points and a given mark (the dash) at 14.
+        let mark = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("mark")).expect("no mark");
+        assert_eq!((mark.rect[2], mark.opacity), (14.0, 1.0), "the mark is not the dash: {:?}", mark.rect);
+        click(&mut rt, "check-all");
+        assert_eq!(rt.state.all, 1, "toggling a partial selection does nothing");
+    }
+
+    #[test]
+    fn disabled_select_all_does_nothing() {
+        let mut rt = run(Toggles::default(), |_, _| line(false, false, false), (640.0, 200.0));
+        click(&mut rt, "check-all");
+        assert_eq!(rt.state.all, 0);
+    }
+
+    #[test]
+    fn pressing_the_count_clears() {
+        let mut rt = run(Toggles::default(), |_, _| line(true, true, true), (640.0, 200.0));
+        let words = rt.elements().into_iter().find(|e| e.text.as_deref() == Some("3 selected")).expect("no count");
+        let (x, y) = (words.rect[0] + words.rect[2] * 0.5, words.rect[1] + words.rect[3] * 0.5);
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.0);
+        assert_eq!(rt.state.cleared, 1, "pressing the words did not clear");
+        let clear = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("bulk-clear")).expect("no bulk-clear");
+        assert_eq!((clear.role, clear.label.as_deref(), clear.help.as_deref(), clear.focusable), ("button", Some("Clear selection"), Some("Clear selection (Esc)"), true));
     }
 }
