@@ -72,9 +72,29 @@ pub fn run(cmd: Cmd, ctx: &mut Ctx, out: &mut Out, err: &mut dyn Write) -> Exit 
             out.emit(if removed { format!("Removed {name}") } else { format!("{name} was not saved") }, json!({ "name": name, "removed": removed }));
             Exit::Ok
         }
+        Cmd::Check { name } | Cmd::Install { name, .. } if hosts::reserved(&name) => {
+            usage(err, &format!("{name} is this machine; hosts check and install reach another one"))
+        }
         Cmd::Check { name } => check(ctx, &name, out, err),
         Cmd::Install { name, binary, force } => install(ctx, &name, binary.as_deref(), force, out, err),
     }
+}
+
+/// `--to-host NAME`: another machine, never this one.
+pub(super) fn other_machine(name: &str) -> Result<(), String> {
+    if hosts::reserved(name) {
+        return Err(format!("{name} is this machine; copy here with --to-project or --to-global, without --to-host"));
+    }
+    Ok(())
+}
+
+/// A folder on another machine: a full path, since a relative one would be taken from wherever
+/// the shell there starts.
+pub(super) fn remote_folder(dir: &Path) -> Result<(), String> {
+    if dir.is_absolute() {
+        return Ok(());
+    }
+    Err(format!("{} is a relative path; on another machine give the folder's full path, starting with /", dir.display()))
 }
 
 /// A saved host by name, else `name` taken as an ssh target.

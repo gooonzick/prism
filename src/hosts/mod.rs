@@ -19,12 +19,17 @@ pub fn find<'a>(hosts: &'a [Host], name: &str) -> Option<&'a Host> {
     hosts.iter().find(|h| h.name == name)
 }
 
+/// "this" and "local" name this machine, never a saved host.
+pub fn reserved(name: &str) -> bool {
+    matches!(name, "this" | "local")
+}
+
 /// 1-32 characters of letters, digits, `.`, `_` and `-`; "local" and "this" mean this machine.
 pub fn valid_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name.len() > 32 || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
         return Err(format!("{name:?} is not a host name: use 1-32 letters, digits, '.', '_' or '-'"));
     }
-    if matches!(name, "local" | "this") {
+    if reserved(name) {
         return Err(format!("{name:?} is reserved for this machine"));
     }
     Ok(())

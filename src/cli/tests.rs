@@ -2482,3 +2482,50 @@ fn mcp_copy_to_a_host_project() {
 fn agents_of_opt(out: &str, name: &str) -> Option<serde_json::Value> {
     json(out)["servers"].as_array().unwrap().iter().find(|s| s["name"] == name).cloned()
 }
+
+#[test]
+fn reserved_names_are_not_other_machines() {
+    let home = tempfile::tempdir().unwrap();
+    write_skill(&home.path().join(".agents/skills"), "pdf", "Reads PDFs");
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    std::fs::write(home.path().join(".claude.json"), r#"{"mcpServers":{"srv":{"command":"srv"}}}"#).unwrap();
+    // Any runner asked for is a bug: each of these is refused before it reaches one.
+    let mut c = ctx(home.path());
+    for name in ["this", "local"] {
+        for args in [
+            &["hosts", "check", name][..],
+            &["hosts", "install", name],
+            &["skills", "copy", "pdf", "--to-host", name, "--to-global"],
+            &["mcp", "copy", "srv", "--to", "cursor", "--to-host", name],
+        ] {
+            let (code, out, err) = go(args, &mut c);
+            assert_eq!(code, 2, "{args:?}: {out}{err}");
+            assert!(err.contains(&format!("{name} is this machine")), "{args:?}: {err}");
+        }
+    }
+}
+
+#[test]
+fn relative_folders_for_another_machine_are_refused() {
+    let home = tempfile::tempdir().unwrap();
+    write_skill(&home.path().join(".agents/skills"), "pdf", "Reads PDFs");
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    std::fs::write(home.path().join(".claude.json"), r#"{"mcpServers":{"srv":{"command":"srv"}}}"#).unwrap();
+    let mut c = ctx(home.path());
+    c.settings.hosts.push(crate::hosts::Host { name: "x".into(), ssh: "me@x".into() });
+    // No runner is reached: the paths are refused first.
+    for args in [
+        &["--host", "x", "--project", "site", "skills", "list"][..],
+        &["--host=x", "skills", "list", "--project=./site"],
+        &["--host", "x", "skills", "copy", "pdf", "--to-project", "site"],
+        &["skills", "copy", "pdf", "--to-host", "x", "--to-project", "site"],
+        &["mcp", "copy", "srv", "--to", "claude", "--to-host", "x", "--to-project", "../site"],
+    ] {
+        let (code, out, err) = go(args, &mut c);
+        assert_eq!(code, 2, "{args:?}: {out}{err}");
+        assert!(err.contains("full path") && err.contains("site"), "{args:?}: {err}");
+    }
+    // On this machine ("this" too) a relative folder is the working folder's.
+    let (_, _, err) = go(&["--host", "this", "--project", "no-such-site", "skills", "list"], &mut c);
+    assert_eq!(err.trim(), "no-such-site is not a folder");
+}

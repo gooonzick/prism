@@ -366,6 +366,10 @@ fn run_local(cmd: Cmd, ctx: &Ctx, scope: &Scope, out: &mut Out, err: &mut dyn Wr
         Cmd::Remove { names, apply } => remove(ctx, scope, &inv, names, apply, out, err),
         Cmd::Trash { name, agent, apply } => trash(ctx, scope, &inv, &name, &agent, apply, out, err),
         Cmd::Copy { names, to_project, to_global, to_host: Some(host), apply } => {
+            let checked = super::hosts::other_machine(&host).and_then(|()| to_project.as_deref().map_or(Ok(()), super::hosts::remote_folder));
+            if let Err(e) = checked {
+                return usage(err, &e);
+            }
             let dest = match (to_project, to_global) {
                 // A folder on the host: the host resolves it.
                 (Some(dir), _) => Scope::Project(dir),

@@ -174,6 +174,16 @@ enum Command {
     },
 }
 
+impl Command {
+    /// The folder a copy goes into, for the commands that take `--to-project`.
+    fn to_project(&self) -> Option<&Path> {
+        match self {
+            Command::Skills { command: skills::Cmd::Copy { to_project, .. } } | Command::Mcp { command: mcp::Cmd::Copy { to_project, .. } } => to_project.as_deref(),
+            _ => None,
+        }
+    }
+}
+
 /// `None` when `args` aren't a command line (see [`is_cli`]), so the caller opens the window.
 pub fn run(args: Vec<OsString>) -> Option<i32> {
     let argv: Vec<&str> = args.iter().map(|a| a.to_str().unwrap_or("")).collect();
@@ -215,7 +225,13 @@ fn parse(args: &[&str], out: &mut dyn Write, err: &mut dyn Write) -> Result<Cli,
 fn execute(cli: Cli, args: &[&str], ctx: &mut Ctx, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     let mut out = Out { json: cli.global.json, out };
     // "this" and "local" name this machine: run here, with no remote to check.
-    if let Some(name) = cli.global.host.as_ref().filter(|n| !matches!(n.as_str(), "this" | "local")) {
+    if let Some(name) = cli.global.host.as_ref().filter(|n| !crate::hosts::reserved(n)) {
+        // A relative folder would be taken from where the host's shell starts, not from here.
+        for dir in [cli.global.project.as_deref(), cli.command.to_project()].into_iter().flatten() {
+            if let Err(e) = hosts::remote_folder(dir) {
+                return usage(err, &e) as i32;
+            }
+        }
         return hosts::forward(name, args, ctx, &mut out, err);
     }
     let exit = match cli.command {

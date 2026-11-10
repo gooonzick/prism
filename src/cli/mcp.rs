@@ -190,6 +190,10 @@ pub fn run(cmd: Cmd, ctx: &mut Ctx, scope: &Scope, out: &mut Out, err: &mut dyn 
             }
         }
         Cmd::Copy { name, to, from, to_host: Some(host), to_project, claude_scope, apply } => {
+            let checked = super::hosts::other_machine(&host).and_then(|()| to_project.as_deref().map_or(Ok(()), super::hosts::remote_folder));
+            if let Err(e) = checked {
+                return usage(err, &e);
+            }
             let dest = to_project.map_or(Scope::Global, Scope::Project);
             let claude_scope = if claude_scope.as_deref() == Some("project") { ClaudeScope::Project } else { ClaudeScope::Local };
             let there = Destination { host, dest, claude_scope };

@@ -27,8 +27,8 @@ pub type MakeRunner = Arc<dyn Fn(&Host) -> Box<dyn Runner> + Send + Sync>;
 
 /// The runner for a host: ssh, or this machine for the reserved names "this" and "local".
 pub fn runner_for(host: &Host) -> Box<dyn Runner> {
-    if matches!(host.name.as_str(), "this" | "local") {
-        return Box::new(Here);
+    if super::reserved(&host.name) {
+        return Box::new(Here::default());
     }
     Box::new(Ssh { name: host.name.clone(), target: host.ssh.clone(), config: None })
 }
@@ -194,11 +194,26 @@ fn ensure_private_dir(dir: &Path) -> Result<(), String> {
 }
 
 /// This machine, for copies between "this" and a remote one.
-pub struct Here;
+#[derive(Default)]
+pub struct Here {
+    /// The `prism` to run; `None` is the one running now.
+    exe: Option<PathBuf>,
+}
+
+impl Here {
+    /// This machine, with the `prism` at `exe` in place of the one running now.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn with_exe(exe: impl Into<PathBuf>) -> Here {
+        Here { exe: Some(exe.into()) }
+    }
+}
 
 impl Runner for Here {
     fn prism(&self, args: &[String], stdin: Option<Vec<u8>>) -> Result<Output, String> {
-        let exe = std::env::current_exe().map_err(|e| format!("Can't run prism here: {e}"))?;
+        let exe = match &self.exe {
+            Some(exe) => exe.clone(),
+            None => std::env::current_exe().map_err(|e| format!("Can't run prism here: {e}"))?,
+        };
         let mut cmd = Command::new(exe);
         cmd.args(args);
         finish(spawn(cmd, stdin)).map_err(|(_, why)| format!("Can't run prism here: {why}"))
@@ -341,6 +356,28 @@ mod tests {
             let out = runner.shell("printf here", None).unwrap();
             assert_eq!(out.stdout, b"here", "{name}");
         }
+    }
+
+    /// The `prism` cargo builds beside this test binary (`target/<profile>/deps/prism-…`):
+    /// `cargo test` builds it for `tests/cli.rs`, the only place `CARGO_BIN_EXE_prism` is set.
+    fn built_prism() -> PathBuf {
+        let test = std::env::current_exe().unwrap();
+        let exe = test.parent().and_then(Path::parent).expect("target/<profile>/deps").join("prism");
+        assert!(exe.is_file(), "{} isn't built: plain `cargo test` builds it for tests/cli.rs", exe.display());
+        exe
+    }
+
+    #[test]
+    fn here_runs_this_build_and_its_shell() {
+        let here = Here::with_exe(built_prism());
+        let out = here.prism(&["agents".into(), "--json".into()], None).unwrap();
+        assert_eq!(out.code, 0, "{}", out.stderr);
+        let agents: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON on stdout");
+        assert!(agents.as_array().is_some_and(|a| a.iter().any(|x| x["id"] == "claude")), "{agents}");
+        let out = here.shell("printf %s \"$0\"; cat", Some(b" and stdin".to_vec())).unwrap();
+        assert_eq!(out.stdout, b"sh and stdin");
+        let gone = Here::with_exe("/nowhere/prism").prism(&[], None).unwrap_err();
+        assert!(gone.starts_with("Can't run prism here: "), "{gone}");
     }
 
     #[test]
