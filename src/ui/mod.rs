@@ -3,13 +3,14 @@
 
 mod browse;
 mod dialogs;
+mod hosts;
 mod inspector;
 mod installed;
 mod mcp;
 mod mcp_dialogs;
 
 use rune::{Chrome, Color, Cx, El, Icon, KeyEvent, ScrollSpec, Spring, TextStyle, Tx, col, el, row, text};
-use rune_kit::shell::{self, PaneMotion, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView};
+use rune_kit::shell::{self, PaneMotion, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar};
 use rune_kit::{ControlSize, Kit, Markdown, MarkdownStyle, Toast, ToastRegion, glyphs};
 
 use crate::agents::{Scope, tilde};
@@ -54,10 +55,12 @@ pub fn chrome() -> Chrome {
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     let k = Kit::neutral(cx.system_dark());
     let mut layer = Vec::new();
-    let (main, toolbar, inspector) = match s.page {
-        Page::Installed => installed::page(s, &k, &mut layer),
-        Page::Mcp => mcp::page(s, &k, &mut layer),
-        Page::Browse => browse::page(s, &k, &mut layer),
+    let (main, toolbar, inspector) = match (s.page.clone(), hosts::pending(s, &k)) {
+        // A host whose state isn't in yet: what is happening with it, in place of the page.
+        (Page::Installed | Page::Mcp, Some(pane)) => (pane, Toolbar::new().leading(page_tabs(s, &k)).title(s.env_label()), inspector_body(&k)),
+        (Page::Installed, None) => installed::page(s, &k, &mut layer),
+        (Page::Mcp, None) => mcp::page(s, &k, &mut layer),
+        (Page::Browse, _) => browse::page(s, &k, &mut layer),
     };
     dialogs::sync(s, &k, &mut layer);
     dialogs::remove(s, &k, &mut layer);
@@ -66,6 +69,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     dialogs::found(s, &k, &mut layer);
     mcp_dialogs::form(s, &k, &mut layer);
     mcp_dialogs::plan(s, &k, &mut layer);
+    hosts::add_host(s, &k, &mut layer);
     if let Some(n) = &s.notice {
         let mut toast = Toast::new("notice", n.title.clone()).closable().on_close(|s: &mut App| s.notice = None);
         if !n.detail.is_empty() {
@@ -78,7 +82,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         layer.push(ToastRegion::new().toast(toast.build(&k)).build(&k));
     }
     let split = SplitView::new(main)
-        .sidebar(&s.sidebar, |s: &mut App| &mut s.sidebar, sidebar(s, &k))
+        .sidebar(&s.sidebar, |s: &mut App| &mut s.sidebar, sidebar(s, &k, &mut layer))
         .inspector(&s.inspector, |s: &mut App| &mut s.inspector, scroll_pane("inspector-scroll", inspector))
         .toolbar(toolbar)
         .titlebar_inset(cx.titlebar_inset())
@@ -92,7 +96,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     rune_kit::root(split, layer)
 }
 
-fn sidebar(s: &App, k: &Kit) -> El {
+fn sidebar(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let installed = s.page != Page::Browse;
     // The badge counts what needs attention: skills not linked into every target.
     let counted = |row: SidebarRow, scope: &Scope| {
@@ -114,7 +118,7 @@ fn sidebar(s: &App, k: &Kit) -> El {
         .key("browse");
     let projects = s.settings.projects.iter().enumerate().map(|(i, p)| {
         let (open, forget) = (p.clone(), p.clone());
-        counted(SidebarRow::new(Scope::Project(p.clone()).title()), &Scope::Project(p.clone()))
+        let row = counted(SidebarRow::new(Scope::Project(p.clone()).title()), &Scope::Project(p.clone()))
             .icon(&glyphs::FOLDER)
             .subtitle({
                 let n = s.stats.get(&Scope::Project(p.clone())).map_or(0, |x| x.total);
@@ -122,10 +126,10 @@ fn sidebar(s: &App, k: &Kit) -> El {
             })
             .height(40.0)
             .selected(installed && s.scope == Scope::Project(p.clone()))
-            .on_select(move |s: &mut App, _| s.open_scope(Scope::Project(open.clone())))
-            .on_close(move |s: &mut App, _| s.forget_project(&forget))
-            .build(k)
-            .key(format!("project-{i}"))
+            .on_select(move |s: &mut App, _| s.open_scope(Scope::Project(open.clone())));
+        // A host's projects stay listed there until window actions reach hosts.
+        let row = if s.is_remote() { row } else { row.on_close(move |s: &mut App, _| s.forget_project(&forget)) };
+        row.build(k).key(format!("project-{i}"))
     });
     let add = SidebarRow::new(if s.discovering { "Looking for projects…" } else { "Add project…" })
         .icon(&PLUS)
@@ -148,15 +152,21 @@ fn sidebar(s: &App, k: &Kit) -> El {
         })
         .build(k)
         .key("add-project");
+    let mut section = SidebarSection::new("Projects").key("projects").count(s.settings.projects.len()).rows(projects);
+    // Projects on a host are added there for now: no folder picker reaches it.
+    if !s.is_remote() {
+        section = section.row(add);
+    }
     Sidebar::new()
         .label("Scopes")
         .inset(0.0)
         .header_gap(4.0)
         .header_padding(0.0, 12.0)
         .row_gap(2.0)
+        .header(hosts::switcher(s, k, layer))
         .header(global)
         .header(browse)
-        .section(SidebarSection::new("Projects").key("projects").count(s.settings.projects.len()).rows(projects).row(add))
+        .section(section)
         .build(k)
 }
 

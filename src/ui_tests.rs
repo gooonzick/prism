@@ -1046,3 +1046,171 @@ fn refused_add_keeps_the_last_change_undoable() {
     key(&mut h, rune::Key::Command('z'), rune::Mods { cmd: true, ..rune::Mods::default() });
     assert_eq!((read(&claude), read(&cursor)), before, "the remove still undoes byte for byte");
 }
+
+// Environments.
+
+/// A host's home whose `prism` reports `version`, with Claude Code installed.
+fn host_home(version: &str) -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let bin = home.path().join(".local/bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(bin.join("prism"), format!("#!/bin/sh\necho \"prism {version}\"\n")).unwrap();
+    fs::set_permissions(bin.join("prism"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::create_dir_all(home.path().join(".claude")).unwrap();
+    home
+}
+
+/// A host that can't be reached.
+struct Down;
+
+impl crate::hosts::runner::Runner for Down {
+    fn prism(&self, _: &[String], _: Option<Vec<u8>>) -> Result<crate::hosts::runner::Output, String> {
+        Err("Can't reach box: ssh: connect to host box port 22: Connection refused".into())
+    }
+    fn shell(&self, _: &str, _: Option<Vec<u8>>) -> Result<crate::hosts::runner::Output, String> {
+        Err("Can't reach box: ssh: connect to host box port 22: Connection refused".into())
+    }
+}
+
+impl Harness {
+    /// Saves host `box` (in memory) and hands out `runners` for it.
+    fn with_host(&mut self, runners: crate::hosts::runner::MakeRunner) {
+        self.rt.update(move |s, _| {
+            s.settings.hosts.push(crate::hosts::Host { name: "box".into(), ssh: "me@box".into() });
+            s.make_runner = runners;
+        });
+        self.settle();
+    }
+
+    /// Waits for the host's answer, then lands it with one poll.
+    fn land_remote(&mut self) {
+        let start = std::time::Instant::now();
+        while self.rt.state.remote_load.is_pending() || self.rt.state.remote_preview.is_pending() {
+            assert!(start.elapsed().as_secs() < 10, "the host never answered");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        self.rt.update(|s, _| {
+            s.poll();
+        });
+        self.settle();
+    }
+
+    fn remote_state(&self) -> Option<crate::app::RemoteState> {
+        match &self.rt.state.env {
+            crate::app::Env::Remote { state, .. } => Some(state.clone()),
+            crate::app::Env::Local => None,
+        }
+    }
+}
+
+#[test]
+fn switching_to_host_shows_its_skills() {
+    let mut h = Harness::project();
+    let remote = host_home(crate::hosts::install::VERSION);
+    skill(&remote.path().join(".agents/skills"), "far");
+    h.with_host(crate::hosts::runner::local_runners(&[("box", remote.path())]));
+    let project = h.project_dir();
+
+    h.rt.update(|s, _| s.switch_env(Some("box")));
+    assert_eq!(h.remote_state(), Some(crate::app::RemoteState::Connecting));
+    assert!(h.rt.state.inv.get("review").is_none(), "this machine's skills are stashed");
+    h.land_remote();
+    assert_eq!(h.remote_state(), Some(crate::app::RemoteState::Ready));
+    assert_eq!(h.rt.state.scope, Scope::Global);
+    assert!(h.rt.state.inv.get("far").is_some());
+    assert!(h.rt.find("skill-far").is_some());
+    assert!(h.texts().contains("box"), "the switcher names the host");
+    assert_eq!(h.rt.state.local.as_ref().unwrap().scope, Scope::Project(project.clone()));
+    assert!(h.rt.state.local.as_ref().unwrap().inv.get("review").is_some());
+    assert!(h.rt.state.detected(index_of("claude").unwrap()), "the host's agents, from its state");
+
+    // The preview comes from the host too.
+    h.click("skill-far");
+    h.land_remote();
+    assert!(h.rt.state.preview.as_deref().is_some_and(|md| md.contains("# far")), "{:?}", h.rt.state.preview);
+
+    // Nothing writes while the host is in view.
+    let link = remote.path().join(".claude/skills/far");
+    h.rt.update(|s, _| s.toggle_link("far", index_of("claude").unwrap()));
+    assert!(fs::symlink_metadata(&link).is_err(), "no link on the host");
+
+    h.rt.update(|s, _| s.switch_env(None));
+    h.settle();
+    assert!(h.rt.state.local.is_none() && !h.rt.state.is_remote());
+    assert_eq!(h.rt.state.scope, Scope::Project(project));
+    assert!(h.rt.state.inv.get("review").is_some() && h.rt.state.inv.get("far").is_none());
+    assert!(h.rt.find("skill-review").is_some());
+}
+
+#[test]
+fn unreachable_host_shows_retry() {
+    let mut h = Harness::project();
+    h.with_host(std::sync::Arc::new(|_: &crate::hosts::Host| Box::new(Down) as Box<dyn crate::hosts::runner::Runner>));
+    h.rt.update(|s, _| s.switch_env(Some("box")));
+    h.land_remote();
+    assert!(matches!(h.remote_state(), Some(crate::app::RemoteState::Unreachable(e)) if e.contains("Connection refused")));
+    assert!(h.texts().contains("Can't reach box"));
+    assert!(h.rt.find("env-retry").is_some());
+    assert!(h.rt.find("skills").is_none(), "no list in place of the host's");
+
+    h.click("env-retry");
+    assert_eq!(h.remote_state(), Some(crate::app::RemoteState::Connecting));
+    h.land_remote();
+    assert!(h.rt.find("env-retry").is_some());
+}
+
+#[test]
+fn needs_install_offers_install() {
+    let mut h = Harness::project();
+    let remote = host_home("0.0.1");
+    h.with_host(crate::hosts::runner::local_runners(&[("box", remote.path())]));
+    h.rt.update(|s, _| s.switch_env(Some("box")));
+    h.land_remote();
+    assert_eq!(h.remote_state(), Some(crate::app::RemoteState::NeedsInstall(crate::hosts::install::Health::OtherVersion("0.0.1".into()))));
+    let version = crate::hosts::install::VERSION;
+    assert!(h.texts().contains(&format!("prism {version} isn't on box")), "{}", h.texts());
+    assert!(h.rt.find("env-install").is_some());
+}
+
+#[test]
+fn add_host_saves_it_and_connects() {
+    let mut h = Harness::project();
+    let remote = host_home(crate::hosts::install::VERSION);
+    h.rt.update(|s, _| s.make_runner = crate::hosts::runner::local_runners(&[("box", remote.path())]));
+    // From the switcher's menu.
+    h.click("env-switch-trigger");
+    assert!(h.rt.state.env_menu);
+    let option = h.rt.elements().into_iter().find(|e| e.role == "option" && e.label.as_deref() == Some("Add host…")).expect("the menu offers Add host…");
+    let r = option.rect;
+    h.rt.pointer_down(r[0] + r[2] * 0.5, r[1] + r[3] * 0.5);
+    h.rt.pointer_up(r[0] + r[2] * 0.5, r[1] + r[3] * 0.5);
+    h.settle();
+    assert!(h.rt.find("host-add").is_some());
+    h.rt.update(|s, _| {
+        let f = s.add_host.as_mut().unwrap();
+        f.name = rune::TextEdit::new("box");
+        f.ssh = rune::TextEdit::new("-oProxyCommand=x");
+    });
+    h.click("host-add");
+    assert!(h.rt.state.add_host.as_ref().unwrap().error.is_some(), "a target ssh reads as an option is refused");
+    h.rt.update(|s, _| s.add_host.as_mut().unwrap().ssh = rune::TextEdit::new("me@box"));
+    h.click("host-add");
+    assert!(h.rt.state.add_host.is_none());
+    assert_eq!(h.rt.state.local_settings().hosts, vec![crate::hosts::Host { name: "box".into(), ssh: "me@box".into() }]);
+    h.land_remote();
+    assert_eq!(h.remote_state(), Some(crate::app::RemoteState::Ready));
+}
+
+#[test]
+fn browse_on_a_host_installs_here() {
+    let mut h = Harness::project();
+    let remote = host_home(crate::hosts::install::VERSION);
+    h.with_host(crate::hosts::runner::local_runners(&[("box", remote.path())]));
+    h.rt.update(|s, _| s.switch_env(Some("box")));
+    h.land_remote();
+    h.click("browse");
+    let here = if cfg!(target_os = "macos") { "this Mac" } else { "this computer" };
+    assert!(h.texts().contains(&format!("skills.sh installs go to {here}; copy them to box afterwards")), "{}", h.texts());
+    assert_eq!(h.rt.state.local_scope(), &Scope::Project(h.project_dir()), "installs go to this machine's scope");
+}

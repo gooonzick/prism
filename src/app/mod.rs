@@ -2,6 +2,7 @@
 //! submodule owns one capability's state changes.
 
 mod discover;
+mod env;
 mod installed;
 mod mcp;
 mod mcp_edit;
@@ -17,14 +18,16 @@ use std::time::Duration;
 use rune::{Latest, TextEdit, Waker};
 use rune_kit::shell::PaneState;
 
-use crate::agents::{self, Paths, Scope};
+use crate::agents::{self, AGENTS, CANONICAL, Paths, Scope};
 use crate::fsops::Journal;
+use crate::hosts::runner::{self as host_runner, MakeRunner};
 use crate::mcp::scan::{self as mcp_scan, McpInventory};
 use crate::remote::RemoteSkill;
 use crate::scan::{self, Inventory, ScopeStats};
 use crate::store::{self, LastChange, Settings};
 use crate::sync::Plan;
 
+pub use env::{AddHost, Env, PreviewAnswer, RemoteAnswer, RemoteState, Stash};
 pub use installed::{open_path, reveal_path};
 pub use mcp::McpFilter;
 pub use mcp_edit::{McpChange, McpDialog, McpForm};
@@ -134,6 +137,23 @@ pub struct App {
     /// The open plan dialog.
     pub mcp_dialog: Option<McpDialog>,
 
+    // Environments.
+    /// This machine, or the host in view.
+    pub env: Env,
+    /// This machine's state while a host is in view.
+    pub local: Option<Stash>,
+    /// The host's installed agents (skills, MCP), from its state.
+    pub remote_detected: Option<(Vec<bool>, Vec<bool>)>,
+    /// How the window reaches a host; tests hand out `Local` runners.
+    pub make_runner: MakeRunner,
+    pub remote_load: Latest<RemoteAnswer>,
+    pub remote_preview: Latest<PreviewAnswer>,
+    /// The connect in flight installs prism first.
+    pub installing_prism: bool,
+    /// The environment menu is open.
+    pub env_menu: bool,
+    pub add_host: Option<AddHost>,
+
     // Watching the scope's folders.
     waker: Option<Waker>,
     watcher: Option<notify::RecommendedWatcher>,
@@ -209,6 +229,15 @@ impl App {
             mcp_revealed: HashSet::new(),
             mcp_form: None,
             mcp_dialog: None,
+            env: Env::Local,
+            local: None,
+            remote_detected: None,
+            make_runner: host_runner::make_runner(),
+            remote_load: Latest::default(),
+            remote_preview: Latest::default(),
+            installing_prism: false,
+            env_menu: false,
+            add_host: None,
             waker: None,
             watcher: None,
             dirty: Arc::new(AtomicBool::new(false)),
@@ -248,7 +277,7 @@ impl App {
     /// Starts the background work a window needs: answers wake it, and the scope's folders
     /// are watched. Tests never call this, so they touch neither the network nor FSEvents.
     pub fn set_waker(&mut self, waker: Waker) {
-        for w in [&self.search as &dyn SetWaker, &self.remote_fetch, &self.install, &self.update_check, &self.update_run, &self.discover, &self.repo_fetch, &self.cli_tool] {
+        for w in [&self.search as &dyn SetWaker, &self.remote_fetch, &self.install, &self.update_check, &self.update_run, &self.discover, &self.repo_fetch, &self.cli_tool, &self.remote_load, &self.remote_preview] {
             w.set(waker.clone());
         }
         self.waker = Some(waker);
@@ -259,7 +288,8 @@ impl App {
     /// Lands background answers. True when something visible changed.
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
-        if self.take_dirty() {
+        // A host in view has no watcher; this machine is looked at again on the way back.
+        if !self.is_remote() && self.take_dirty() {
             // Watch first: a file replaced by a rename, or a folder that appeared, needs a new
             // watch, and the rescan after it sees anything that landed in between.
             self.watch();
@@ -306,6 +336,14 @@ impl App {
             self.notify(title, detail, failed);
             changed = true;
         }
+        if let Some((host, result, install_error)) = self.remote_load.take() {
+            self.land_remote(&host, result, install_error);
+            changed = true;
+        }
+        if let Some((name, body)) = self.remote_preview.take() {
+            self.land_remote_preview(name, body);
+            changed = true;
+        }
         changed
     }
 
@@ -334,21 +372,31 @@ impl App {
         if self.page == Page::Browse {
             self.page = Page::Installed;
         }
+        if self.is_remote() {
+            // The scope changes when the host's state for it lands.
+            self.load_remote(scope, false);
+            return;
+        }
         if scope != self.scope {
             self.scope = scope;
-            self.selected = None;
-            self.preview = None;
-            self.checked.clear();
-            self.anchor = None;
-            self.status_filter = Filter::All;
-            self.filter = TextEdit::new("");
-            self.mcp_selected = None;
-            self.mcp_filter = McpFilter::All;
-            self.mcp_revealed.clear();
+            self.reset_view();
             self.watch();
             self.check_updates_once();
         }
         self.rescan();
+    }
+
+    /// Clears the selections and filters, for another scope or machine.
+    fn reset_view(&mut self) {
+        self.selected = None;
+        self.preview = None;
+        self.checked.clear();
+        self.anchor = None;
+        self.status_filter = Filter::All;
+        self.filter = TextEdit::new("");
+        self.mcp_selected = None;
+        self.mcp_filter = McpFilter::All;
+        self.mcp_revealed.clear();
     }
 
     /// The settings as on disk, where the CLI may have changed them. Settings built in memory
@@ -373,12 +421,18 @@ impl App {
     }
 
     pub fn add_project(&mut self, dir: PathBuf) {
+        if self.is_remote() {
+            return;
+        }
         self.edit_settings(|s| s.add_project(dir.clone()));
         self.open_scope(Scope::Project(dir));
         self.refresh_stats();
     }
 
     pub fn forget_project(&mut self, dir: &PathBuf) {
+        if self.is_remote() {
+            return;
+        }
         self.edit_settings(|s| s.projects.retain(|p| p != dir));
         self.stats.remove(&Scope::Project(dir.clone()));
         if self.scope == Scope::Project(dir.clone()) {
@@ -386,7 +440,12 @@ impl App {
         }
     }
 
+    /// Reads the scope again: from disk, or from the host in view.
     pub fn rescan(&mut self) {
+        if self.is_remote() {
+            self.load_remote(self.scope.clone(), false);
+            return;
+        }
         self.inv = scan::scan(&self.scope, &self.paths);
         if self.selected.as_deref().is_some_and(|n| self.inv.get(n).is_none()) {
             self.selected = None;
@@ -408,6 +467,10 @@ impl App {
 
     /// Scans every known scope for the sidebar's counts.
     pub fn refresh_stats(&mut self) {
+        // A host's counts come with its state.
+        if self.is_remote() {
+            return;
+        }
         let mut scopes = vec![Scope::Global];
         scopes.extend(self.settings.projects.iter().cloned().map(Scope::Project));
         for scope in scopes {
@@ -420,9 +483,12 @@ impl App {
         }
     }
 
-    /// Agent indices a sync links into.
+    /// Agent indices a sync links into: the chosen ones, or those installed on the machine in view.
     pub fn targets(&self) -> Vec<usize> {
-        agents::target_indices(self.settings.targets.as_deref(), &self.paths)
+        match self.settings.targets.as_deref() {
+            Some(ids) => agents::target_indices(Some(ids), &self.paths),
+            None => (0..AGENTS.len()).filter(|&a| a != CANONICAL && self.detected(a)).collect(),
+        }
     }
 
     pub fn scope_label(&self, scope: &Scope) -> String {
@@ -481,6 +547,9 @@ impl App {
     }
 
     pub fn undo(&mut self) {
+        if self.is_remote() {
+            return;
+        }
         // From disk: the CLI may have undone it, or made a newer change, since this window did.
         self.last_change = store::load_last_change(&self.paths);
         let Some(LastChange { label, journal }) = self.last_change.take() else { return };

@@ -9,17 +9,18 @@ use crate::agents::Scope;
 use crate::app::{App, RepoListing};
 use crate::remote::RemoteSkill;
 
-/// The scopes installs can go to, as labels: global first, then the projects.
+/// The scopes installs can go to, as labels: global first, then the projects. They are this
+/// machine's, whichever machine is in view.
 fn scope_options(s: &App) -> Vec<(String, Scope)> {
-    let mut v = vec![(s.scope_label(&Scope::Global), Scope::Global)];
-    v.extend(s.settings.projects.iter().map(|p| (s.scope_label(&Scope::Project(p.clone())), Scope::Project(p.clone()))));
+    let mut v = vec![(s.install_label(&Scope::Global), Scope::Global)];
+    v.extend(s.local_settings().projects.iter().map(|p| (s.install_label(&Scope::Project(p.clone())), Scope::Project(p.clone()))));
     v
 }
 
 pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>) -> (El, Toolbar, El) {
     let options = scope_options(s);
     let labels: Vec<String> = options.iter().map(|(l, _)| l.clone()).collect();
-    let current = s.scope_label(&s.scope);
+    let current = s.install_label(s.local_scope());
     let scope_select = Select::new("install-scope", &labels)
         .current(Some(&current))
         .label("Install into")
@@ -29,9 +30,7 @@ pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>) -> (El, Toolbar, El) {
         .on_choose(|s: &mut App, v: &str, _: &mut Tx| {
             s.scope_menu = false;
             if let Some((_, scope)) = scope_options(s).into_iter().find(|(l, _)| l == v) {
-                s.scope = scope;
-                s.selected = None;
-                s.rescan();
+                s.set_install_scope(scope);
             }
         })
         .build(k, layer)
@@ -100,13 +99,11 @@ pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>) -> (El, Toolbar, El) {
                 .key("install-source"),
         );
 
-    let main = col()
-        .key("browse-page")
-        .w_full()
-        .h_full()
-        .min_h(0.0)
-        .padding(16.0)
-        .gap(12.0)
+    let mut main = col().key("browse-page").w_full().h_full().min_h(0.0).padding(16.0).gap(12.0);
+    if let Some(note) = super::hosts::browse_note(s, k) {
+        main = main.child(note);
+    }
+    let main = main
         .child(search)
         .child(scroll_pane("results-scroll", list).grow(1.0))
         .child(Divider::horizontal().build(k))
@@ -161,7 +158,7 @@ fn details(s: &App, k: &Kit) -> El {
             row_gap()
                 .key("installing")
                 .child(Spinner::new().build(k))
-                .child(text(format!("Installing {} into {}…", job.label, s.scope_label(&job.scope))).font(k.ty.small).color(k.c.text_muted).wrap()),
+                .child(text(format!("Installing {} into {}…", job.label, s.install_label(&job.scope))).font(k.ty.small).color(k.c.text_muted).wrap()),
         );
     }
     if let Some(log) = &s.install_log {
@@ -193,7 +190,7 @@ fn details(s: &App, k: &Kit) -> El {
                         .variant(if s.installing.is_some() { ButtonVariant::Loading } else { ButtonVariant::Contrast })
                         .control_size(ControlSize::Regular)
                         .disabled(s.installing.is_some())
-                        .help(format!("Install into {}", s.scope_label(&s.scope)))
+                        .help(format!("Install into {}", s.install_label(s.local_scope())))
                         .on_press(|s: &mut App| s.install_remote())
                         .build(k)
                         .key("install"),
@@ -211,7 +208,7 @@ fn details(s: &App, k: &Kit) -> El {
         .child(
             text(format!(
                 "Installs into {} and links it into your sync targets.",
-                crate::agents::tilde(&crate::agents::AGENTS[crate::agents::CANONICAL].dir(&s.scope, &s.paths), &s.paths)
+                crate::agents::tilde(&crate::agents::AGENTS[crate::agents::CANONICAL].dir(s.local_scope(), s.local_paths()), s.local_paths())
             ))
                 .font(k.ty.caption())
                 .color(k.c.text_faint)
@@ -250,7 +247,7 @@ fn repo_listing(s: &App, repo: &RepoListing, k: &Kit) -> El {
                 .variant(if s.installing.is_some() { ButtonVariant::Loading } else { ButtonVariant::Contrast })
                 .control_size(ControlSize::Regular)
                 .disabled(picked == 0 || s.installing.is_some())
-                .help(format!("Install into {}", s.scope_label(&s.scope)))
+                .help(format!("Install into {}", s.install_label(s.local_scope())))
                 .on_press(|s: &mut App| s.install_repo_ticked())
                 .build(k)
                 .key("install-ticked"),

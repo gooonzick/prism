@@ -60,7 +60,7 @@ pub fn sync(s: &App, k: &Kit, layer: &mut Vec<El>) {
             .on_toggle(move |s: &mut App| s.toggle_target(a));
         if s.inv.shares_canonical[a] {
             cb = cb.description("same folder as .agents").disabled(true);
-        } else if !agent.detected(&s.paths) {
+        } else if !s.detected(a) {
             cb = cb.label(format!("{} (not found)", agent.name));
         }
         agents = agents.child(cb.build(k).key(format!("target-{}", agent.id)));
@@ -190,11 +190,11 @@ pub fn remove(s: &App, k: &Kit, layer: &mut Vec<El>) {
 
 const SYNC_NOTE: &str = "Skills live once in .agents/skills and every agent gets a link. A skill only one agent has moves into .agents first. Folders that differ are skipped, and replaced copies go to the trash.";
 
-fn dialog_body() -> El {
+pub(super) fn dialog_body() -> El {
     col().w_full().px(16.0).pb(16.0).gap(16.0)
 }
 
-fn note(t: &str, k: &Kit) -> El {
+pub(super) fn note(t: &str, k: &Kit) -> El {
     text(t.to_string()).font(k.ty.ui).color(k.c.text_muted).wrap()
 }
 
@@ -208,7 +208,7 @@ pub fn copy(s: &App, k: &Kit, layer: &mut Vec<El>) {
     let mut scopes = col().key("copy-scopes").w_full().gap(4.0);
     for (i, scope) in s.other_scopes().into_iter().enumerate() {
         let stats = s.stats.get(&scope).copied().unwrap_or_default();
-        let clashes: Vec<&String> = names.iter().filter(|n| crate::agents::AGENTS[CANONICAL].dir(&scope, &s.paths).join(n).exists()).collect();
+        let clashes: Vec<&String> = names.iter().filter(|n| s.skill_in(&scope, n)).collect();
         let detail = if clashes.is_empty() {
             format!("{} skill{} there", stats.total, if stats.total == 1 { "" } else { "s" })
         } else {
@@ -301,7 +301,7 @@ pub fn new_skill(s: &App, k: &Kit, layer: &mut Vec<El>) {
         .build(k, layer);
 }
 
-fn field_block(label: &str, input: El, k: &Kit) -> El {
+pub(super) fn field_block(label: &str, input: El, k: &Kit) -> El {
     col().w_full().gap(6.0).child(text(label.to_string()).font(k.ty.small_medium).color(k.c.text_base)).child(input)
 }
 

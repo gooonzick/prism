@@ -20,6 +20,8 @@ pub fn page(s: &App, k: &Kit, _layer: &mut Vec<El>) -> (El, Toolbar, El) {
 
 fn toolbar(s: &App, unsynced: usize, k: &Kit) -> Toolbar {
     let checking = s.checking.contains(&s.scope);
+    // Changes on a host come later; until then its view only reads.
+    let remote = s.is_remote();
     let check_label = if checking { "Checking for updates…" } else { "Check skills.sh for updates" };
     Toolbar::new().leading(page_tabs(s, k)).title(scope_title(&s.scope, "skills")).trailing(
         row()
@@ -31,6 +33,7 @@ fn toolbar(s: &App, unsynced: usize, k: &Kit) -> Toolbar {
                     .label("New skill")
                     .help("New skill")
                     .shortcut("cmd+n")
+                    .disabled(remote)
                     .on_press(|s: &mut App| s.open_new_skill())
                     .build(k)
                     .key("new-skill"),
@@ -40,7 +43,7 @@ fn toolbar(s: &App, unsynced: usize, k: &Kit) -> Toolbar {
                     .variant(IconButtonVariant::GhostMuted)
                     .label(check_label)
                     .help(check_label)
-                    .disabled(checking)
+                    .disabled(checking || remote)
                     .on_press(|s: &mut App| s.check_updates())
                     .build(k)
                     .key("check-updates"),
@@ -63,8 +66,9 @@ fn toolbar(s: &App, unsynced: usize, k: &Kit) -> Toolbar {
                 })
                 .icon(&SYNC)
                 // The one primary action, unless skills are ticked: then the bulk bar's is.
-                .variant(if unsynced == 0 || !s.checked.is_empty() { ButtonVariant::Ghost } else { ButtonVariant::Contrast })
+                .variant(if unsynced == 0 || !s.checked.is_empty() || remote { ButtonVariant::Ghost } else { ButtonVariant::Contrast })
                 .control_size(ControlSize::Regular)
+                .disabled(remote)
                 .help("Link every skill from .agents into your sync targets")
                 .on_press(|s: &mut App| s.open_sync())
                 .build(k)
@@ -85,7 +89,11 @@ fn main(s: &App, visible: &[usize], targets: &[usize], k: &Kit) -> El {
         .key("filter");
     let mut list = col().key("skills").w_full().gap(2.0);
     if s.inv.skills.is_empty() {
-        list = list.child(empty("No skills here yet", &format!("Install one from skills.sh, or make one with New skill ({}).", crate::ui::key_label("N")), k));
+        let hint = match s.host() {
+            Some(h) => format!("Install one from skills.sh, then copy it to {} with prism skills copy --to-host {}.", h.name, h.name),
+            None => format!("Install one from skills.sh, or make one with New skill ({}).", crate::ui::key_label("N")),
+        };
+        list = list.child(empty("No skills here yet", &hint, k));
     } else if visible.is_empty() {
         let hint = match s.status_filter {
             Filter::All => "Try another word.",
@@ -159,7 +167,7 @@ fn list_header(s: &App, visible: &[usize], k: &Kit) -> El {
         let summary = format!("{total} skill{} in {root} · {} to pick several", if total == 1 { "" } else { "s" }, crate::ui::pick_hint());
         let mut r = row().grow(1.0).min_w(0.0).gap(12.0).center_y().child(text(summary).font(k.ty.small).color(k.c.text_faint).grow(1.0).min_w(0.0).truncate());
         let broken = crate::sync::broken_links(&s.inv).len();
-        if broken > 0 {
+        if broken > 0 && !s.is_remote() {
             r = r.child(
                 Button::new(format!("Clean up {broken} broken link{}", if broken == 1 { "" } else { "s" }))
                     .variant(ButtonVariant::GhostMuted)
@@ -178,6 +186,7 @@ fn list_header(s: &App, visible: &[usize], k: &Kit) -> El {
 }
 
 fn bulk_bar(s: &App, n: usize, k: &Kit) -> El {
+    let remote = s.is_remote();
     let with_updates: Vec<String> = s.checked.iter().filter(|x| s.has_update(x)).cloned().collect();
     let mut bar = row()
         .key("bulk-bar")
@@ -205,6 +214,7 @@ fn bulk_bar(s: &App, n: usize, k: &Kit) -> El {
                 .variant(ButtonVariant::Contrast)
                 .control_size(ControlSize::Small)
                 .help("Sync only the selected skills")
+                .disabled(remote)
                 .on_press(|s: &mut App| s.open_sync_checked())
                 .build(k)
                 .key("bulk-sync"),
@@ -228,6 +238,7 @@ fn bulk_bar(s: &App, n: usize, k: &Kit) -> El {
                 .variant(ButtonVariant::Outline)
                 .control_size(ControlSize::Small)
                 .help("Copy the selected skills into another scope")
+                .disabled(remote)
                 .on_press(|s: &mut App| s.open_copy(s.checked.clone()))
                 .build(k)
                 .key("bulk-copy"),
@@ -237,6 +248,7 @@ fn bulk_bar(s: &App, n: usize, k: &Kit) -> El {
         Button::new("Remove…")
             .variant(ButtonVariant::Danger)
             .control_size(ControlSize::Small)
+            .disabled(remote)
             .on_press(|s: &mut App| s.confirm_remove_checked())
             .build(k)
             .key("bulk-remove"),

@@ -186,7 +186,7 @@ fn agents(s: &App, f: &McpForm, k: &Kit) -> El {
     let boxes: Vec<El> = (0..MCP_AGENTS.len())
         .map(|a| {
             let agent = &MCP_AGENTS[a];
-            let (detected, holds) = (agent.detected(&s.paths), s.mcp_can_hold(a));
+            let (detected, holds) = (s.mcp_detected(a), s.mcp_can_hold(a));
             let detail = match (detected, holds) {
                 (false, _) => "not found".to_string(),
                 (true, false) => "no project config".to_string(),
@@ -312,7 +312,7 @@ fn picks(s: &App, change: &McpChange, k: &Kit) -> Option<El> {
                 c = c.child(heading("Copy from", k)).child(note(if server.inherited { "The copies differ; new copies get the one you pick." } else { "The copies differ; the one you pick also overwrites the others." }, k)).child(sources);
             }
             let mut targets = col().gap(6.0);
-            let free: Vec<usize> = (0..MCP_AGENTS.len()).filter(|&a| MCP_AGENTS[a].detected(&s.paths) && s.mcp_can_hold(a) && !server.copies.iter().any(|x| x.agent == a)).collect();
+            let free: Vec<usize> = (0..MCP_AGENTS.len()).filter(|&a| s.mcp_detected(a) && s.mcp_can_hold(a) && !server.copies.iter().any(|x| x.agent == a)).collect();
             if free.is_empty() {
                 targets = targets.child(note("Every installed agent has it.", k));
             }

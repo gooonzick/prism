@@ -28,6 +28,12 @@ pub fn valid_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// What may follow `ssh`: not empty, no whitespace, and not starting with '-' (ssh would read
+/// it as an option).
+pub fn valid_target(ssh: &str) -> bool {
+    !ssh.is_empty() && !ssh.starts_with('-') && !ssh.chars().any(char::is_whitespace)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -38,6 +44,12 @@ mod tests {
         assert!(valid_name("a b").is_err());
         assert!(valid_name("this").is_err());
         assert!(valid_name(&"x".repeat(33)).is_err());
+    }
+
+    #[test]
+    fn targets_are_checked() {
+        assert!(valid_target("me@box") && valid_target("box-alias"));
+        assert!(!valid_target("") && !valid_target("-oProxyCommand=x") && !valid_target("me @box"));
     }
 
     #[test]

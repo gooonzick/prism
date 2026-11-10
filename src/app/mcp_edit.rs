@@ -270,13 +270,16 @@ impl App {
 
     /// The agent can hold a server in this scope: it has a config here (OpenCode makes one).
     pub fn mcp_can_hold(&self, agent: usize) -> bool {
+        if self.is_remote() {
+            return self.remote_can_hold(agent);
+        }
         let a = &MCP_AGENTS[agent];
         a.flavor == Flavor::OpenCode || !a.files(&self.scope, &self.paths).is_empty()
     }
 
     /// The sync targets that are MCP agents, installed and able to hold a server here.
     fn mcp_defaults(&self) -> Vec<usize> {
-        let mut out: Vec<usize> = self.targets().iter().filter_map(|&i| index_of(AGENTS[i].id)).filter(|&a| MCP_AGENTS[a].detected(&self.paths) && self.mcp_can_hold(a)).collect();
+        let mut out: Vec<usize> = self.targets().iter().filter_map(|&i| index_of(AGENTS[i].id)).filter(|&a| self.mcp_detected(a) && self.mcp_can_hold(a)).collect();
         out.sort();
         out
     }
@@ -291,6 +294,9 @@ impl App {
     // The Add and Edit dialog.
 
     pub fn open_mcp_add(&mut self) {
+        if self.is_remote() {
+            return;
+        }
         let mut name = TextEdit::new("");
         name.focused = true;
         self.mcp_form = Some(McpForm {
@@ -312,6 +318,9 @@ impl App {
 
     /// The Add dialog filled from the server's first editable copy; values stay masked.
     pub fn open_mcp_edit(&mut self, name: &str) {
+        if self.is_remote() {
+            return;
+        }
         let Some(copy) = self.mcp.get(name).and_then(|s| s.copies.iter().find(|c| c.read_only.is_none())) else { return };
         let t = copy.server.transport.clone();
         let pairs = |m: &BTreeMap<String, EnvValue>| m.iter().map(|(k, v)| McpPair::new(k, &v.written())).collect::<Vec<_>>();
@@ -394,6 +403,9 @@ impl App {
 
     /// Add writes at once, as in the CLI; Edit shows its plan first.
     pub fn save_mcp_form(&mut self) {
+        if self.is_remote() {
+            return;
+        }
         let Some(form) = &mut self.mcp_form else { return };
         form.error = None;
         if let Some((name, old)) = &form.editing {
@@ -446,6 +458,9 @@ impl App {
     /// Writes a planned Add and reports it. A file that changed since the plan keeps the form
     /// open, before the last change's backups go.
     pub fn write_mcp_add(&mut self, name: &str, plan: McpPlan) {
+        if self.is_remote() {
+            return;
+        }
         if plan::verify(&plan).is_err() {
             if let Some(f) = &mut self.mcp_form {
                 f.error = Some("The files changed; try again".into());
@@ -469,6 +484,9 @@ impl App {
 
     /// Copies to the agents without a copy; when the copies differ, waits for a source.
     pub fn open_mcp_copy(&mut self, name: &str) {
+        if self.is_remote() {
+            return;
+        }
         let Some(s) = self.mcp.get(name) else { return };
         let to = self.mcp_defaults().into_iter().filter(|a| !s.copies.iter().any(|c| c.agent == *a)).collect();
         self.open_mcp_plan(McpChange::Copy { name: name.into(), to, from: None });
@@ -476,6 +494,9 @@ impl App {
 
     /// Removes from every agent with a copy here, unless some are unticked.
     pub fn confirm_mcp_remove(&mut self, name: &str) {
+        if self.is_remote() {
+            return;
+        }
         let Some(s) = self.mcp.get(name) else { return };
         let from = self.mcp_own_agents(s);
         self.open_mcp_plan(McpChange::Remove { name: name.into(), from });
@@ -483,6 +504,9 @@ impl App {
 
     /// Enables a server some agent skips in this project, else disables it.
     pub fn toggle_mcp_disabled(&mut self, name: &str) {
+        if self.is_remote() {
+            return;
+        }
         let Some(s) = self.mcp.get(name) else { return };
         let disabled = s.disabled_for.is_empty();
         self.open_mcp_plan(McpChange::Switch { name: name.into(), disabled });
@@ -490,6 +514,9 @@ impl App {
 
     /// Merges the servers into the first one's name, unless another is typed.
     pub fn open_mcp_merge(&mut self, names: Vec<String>) {
+        if self.is_remote() {
+            return;
+        }
         if names.is_empty() {
             return;
         }
@@ -546,6 +573,9 @@ impl App {
     /// Writes the dialog's plan. A plan whose files changed since is planned again and shown
     /// with a notice, before the last change's backups go.
     pub fn apply_mcp_plan(&mut self) {
+        if self.is_remote() {
+            return;
+        }
         let Some(McpDialog { plan: Some(Ok(plan)), .. }) = &self.mcp_dialog else { return };
         if plan.is_empty() {
             return;

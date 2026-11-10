@@ -184,7 +184,25 @@ static SCENES: &[Scene] = &[
         });
         s.inspector.toggle();
     }),
+    // A host in view: its state as this machine's own would read, so no host is reached.
+    ("env-remote", |s| {
+        let state = wire::state(&s.scope, &s.paths, &s.settings);
+        s.show_remote(devbox(), Ok(Box::new(state)));
+        if let Some(name) = s.inv.skills.first().map(|x| x.name.clone()) {
+            s.select(&name);
+        }
+    }),
+    ("env-unreachable", |s| {
+        let why = "Can't reach devbox: ssh: connect to host devbox.lan port 22: Connection refused".to_string();
+        s.show_remote(devbox(), Err(app::RemoteState::Unreachable(why)));
+    }),
 ];
+
+/// The host the environment scenes show.
+#[cfg(feature = "gui")]
+fn devbox() -> hosts::Host {
+    hosts::Host { name: "devbox".into(), ssh: "me@devbox.lan".into() }
+}
 
 fn main() {
     if let Some(code) = cli::run(std::env::args_os().skip(1).collect()) {

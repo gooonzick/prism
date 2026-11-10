@@ -10,6 +10,9 @@ impl App {
     /// when it has none, and adds it as is when nothing inside has skills either. A folder already
     /// listed just opens.
     pub fn add_folder(&mut self, dir: PathBuf) {
+        if self.is_remote() {
+            return;
+        }
         let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
         if self.settings.projects.contains(&dir) {
             self.open_scope(Scope::Project(dir));
@@ -29,6 +32,9 @@ impl App {
 
     pub(super) fn land_discovery(&mut self, root: PathBuf, found: Vec<(PathBuf, usize)>) {
         self.discovering = false;
+        if self.is_remote() {
+            return;
+        }
         // The folder has skills of its own: it is the project.
         if found.iter().any(|(p, _)| *p == root) {
             self.add_project(root);
@@ -67,6 +73,9 @@ impl App {
     }
 
     pub fn add_found(&mut self) {
+        if self.is_remote() {
+            return;
+        }
         let Some(found) = self.found.take() else { return };
         let picked: Vec<PathBuf> = found.projects.into_iter().filter(|p| p.2).map(|p| p.0).collect();
         self.edit_settings(|s| {

@@ -39,6 +39,8 @@ fn toolbar(s: &App, k: &Kit) -> Toolbar {
                     .control_size(ControlSize::Regular)
                     .help("Add an MCP server to your agents")
                     .shortcut("cmd+n")
+                    // Changes on a host come later; until then its view only reads.
+                    .disabled(s.is_remote())
                     .on_press(|s: &mut App| s.open_mcp_add())
                     .build(k)
                     .key("mcp-add"),
@@ -107,6 +109,7 @@ fn main(s: &App, k: &Kit) -> El {
                         .variant(ButtonVariant::Outline)
                         .control_size(ControlSize::Small)
                         .help("Rename the copies to one name")
+                        .disabled(s.is_remote())
                         .on_press(move |s: &mut App| s.open_mcp_merge(names.clone()))
                         .build(k)
                         .key(format!("mcp-merge-{i}")),
@@ -268,7 +271,7 @@ fn inspector(s: &App, k: &Kit) -> El {
     if let Some(actions) = actions(s, server, k) {
         body = body.child(actions);
     }
-    body = body.child(Divider::horizontal().build(k)).child(values(server, revealed, k));
+    body = body.child(Divider::horizontal().build(k)).child(values(server, revealed, s.is_remote(), k));
     body = body.child(Divider::horizontal().build(k)).child(copies(s, server, k));
     if !server.diffs.is_empty() {
         body = body.child(Divider::horizontal().build(k)).child(diffs(server, revealed, k));
@@ -288,7 +291,8 @@ fn differ_line(server: &McpServer) -> String {
 }
 
 /// The transport and its values, as the first copy has them.
-fn values(server: &McpServer, revealed: bool, k: &Kit) -> El {
+/// A host's values come masked: there is nothing to show until window actions reach hosts.
+fn values(server: &McpServer, revealed: bool, remote: bool, k: &Kit) -> El {
     let first = &server.copies[0];
     let t = &first.server.transport;
     let name = server.name.clone();
@@ -297,6 +301,7 @@ fn values(server: &McpServer, revealed: bool, k: &Kit) -> El {
         .variant(ButtonVariant::Ghost)
         .control_size(ControlSize::Small)
         .help("Env and header values, args and the URL may hold secrets")
+        .disabled(remote)
         .on_press(move |s: &mut App| s.toggle_reveal(&name))
         .build(k)
         .key("mcp-reveal");
@@ -342,7 +347,8 @@ fn actions(s: &App, server: &McpServer, k: &Kit) -> Option<El> {
     if server.status == Status::ReadOnly {
         return None;
     }
-    let small = |label: &str| Button::new(label).variant(ButtonVariant::Outline).control_size(ControlSize::Small);
+    let remote = s.is_remote();
+    let small = |label: &str| Button::new(label).variant(ButtonVariant::Outline).control_size(ControlSize::Small).disabled(remote);
     let (copy, edit, switch, remove) = (server.name.clone(), server.name.clone(), server.name.clone(), server.name.clone());
     let mut left = row().gap(6.0).center_y();
     // A global server seen from a project is copied from the global scope.
@@ -370,6 +376,7 @@ fn actions(s: &App, server: &McpServer, k: &Kit) -> Option<El> {
             Button::new("Remove…")
                 .variant(ButtonVariant::Danger)
                 .control_size(ControlSize::Small)
+                .disabled(remote)
                 .on_press(move |s: &mut App| s.confirm_mcp_remove(&remove))
                 .build(k)
                 .key("mcp-remove"),

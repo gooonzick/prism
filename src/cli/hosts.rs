@@ -50,7 +50,7 @@ pub fn run(cmd: Cmd, ctx: &mut Ctx, out: &mut Out, err: &mut dyn Write) -> Exit 
                 return usage(err, &e);
             }
             let ssh = ssh.trim().to_string();
-            if ssh.is_empty() || ssh.starts_with('-') || ssh.chars().any(char::is_whitespace) {
+            if !hosts::valid_target(&ssh) {
                 return usage(err, "--ssh needs a target like user@host, with no spaces and not starting with '-'");
             }
             if hosts::find(&ctx.settings.hosts, &name).is_some() {

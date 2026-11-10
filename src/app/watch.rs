@@ -15,8 +15,12 @@ impl App {
     /// Watches what the current scope shows, replacing the previous watch. Things that don't
     /// exist yet are watched through their nearest existing parent, so creating them is seen too.
     /// Home itself is never watched as a folder: that would stream every change under it.
+    /// Off while a host is in view: its folders aren't on this machine.
     pub(super) fn watch(&mut self) {
         self.watcher = None;
+        if self.is_remote() {
+            return;
+        }
         let Some(waker) = self.waker.clone() else { return };
         let dirty = self.dirty.clone();
         let (folders, files) = self.watch_targets();

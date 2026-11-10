@@ -60,6 +60,10 @@ impl App {
     }
 
     pub(super) fn load_preview(&mut self) {
+        if self.is_remote() {
+            self.load_remote_preview();
+            return;
+        }
         self.preview = self.selected.as_deref().and_then(|n| self.inv.get(n)).and_then(|s| s.manifest()).map(|m| m.body);
     }
 
@@ -165,6 +169,9 @@ impl App {
     }
 
     pub fn confirm_remove_checked(&mut self) {
+        if self.is_remote() {
+            return;
+        }
         if !self.checked.is_empty() {
             self.confirm_remove = Some(self.checked.clone());
         }
@@ -174,6 +181,9 @@ impl App {
 
     /// Links or unlinks `skill` for `agent`, from its switch.
     pub fn toggle_link(&mut self, skill: &str, agent: usize) {
+        if self.is_remote() {
+            return;
+        }
         let Some(s) = self.inv.get(skill) else { return };
         let mut j = self.new_journal();
         let (label, result) = match &s.placements[agent] {
@@ -194,6 +204,9 @@ impl App {
 
     /// Replaces `agent`'s own copy with a link to `.agents` (adopting it if `.agents` lacks it).
     pub fn replace_with_link(&mut self, skill: &str, agent: usize) {
+        if self.is_remote() {
+            return;
+        }
         let plan = sync::plan_one(&self.inv, skill, &[agent], &self.paths);
         let mut j = self.new_journal();
         let result = match plan.conflicts.first() {
@@ -204,6 +217,9 @@ impl App {
     }
 
     pub fn trash_copy(&mut self, skill: &str, agent: usize) {
+        if self.is_remote() {
+            return;
+        }
         let mut j = self.new_journal();
         let result = sync::trash_copy(&self.scope, &self.paths, skill, agent, &mut j)
             .map(|_| format!("Moved {}'s copy of {skill} to the trash", AGENTS[agent].name));
@@ -212,6 +228,9 @@ impl App {
 
     /// Removes every skill in `names`, going on past failures.
     pub fn remove(&mut self, names: &[String]) {
+        if self.is_remote() {
+            return;
+        }
         self.confirm_remove = None;
         let mut j = self.new_journal();
         let mut failed = Vec::new();
@@ -231,6 +250,9 @@ impl App {
     }
 
     pub fn remove_broken(&mut self) {
+        if self.is_remote() {
+            return;
+        }
         let mut j = self.new_journal();
         let result = sync::remove_broken(&self.inv, &self.paths, &mut j).map(|n| format!("Removed {}", plural(n, "broken link", "broken links")));
         if self.status_filter == Filter::Broken {
@@ -252,6 +274,9 @@ impl App {
     }
 
     fn open_sync_for(&mut self, only: Option<Vec<String>>) {
+        if self.is_remote() {
+            return;
+        }
         self.rescan();
         let targets = self.targets();
         self.sync_plan = Some(match &only {
@@ -267,6 +292,9 @@ impl App {
     }
 
     pub fn toggle_target(&mut self, agent: usize) {
+        if self.is_remote() {
+            return;
+        }
         let paths = self.paths.clone();
         self.edit_settings(|s| {
             // From the targets on disk: the CLI may have set them since.
@@ -286,6 +314,9 @@ impl App {
     }
 
     pub fn apply_sync(&mut self) {
+        if self.is_remote() {
+            return;
+        }
         let Some(plan) = self.sync_plan.take() else { return };
         let only = self.sync_only.take();
         let n = plan.actions.len();
@@ -302,12 +333,18 @@ impl App {
     // Copying to another scope.
 
     pub fn open_copy(&mut self, names: Vec<String>) {
+        if self.is_remote() {
+            return;
+        }
         if !names.is_empty() {
             self.copy_dialog = Some(names);
         }
     }
 
     pub fn copy_to(&mut self, dest: Scope) {
+        if self.is_remote() {
+            return;
+        }
         let Some(names) = self.copy_dialog.take() else { return };
         let targets = self.targets();
         let mut j = self.new_journal();
@@ -331,6 +368,9 @@ impl App {
     // A new skill.
 
     pub fn open_new_skill(&mut self) {
+        if self.is_remote() {
+            return;
+        }
         let mut name = TextEdit::new("");
         name.focused = true;
         self.new_skill = Some(NewSkill { name, description: TextEdit::new(""), error: None });
@@ -338,6 +378,9 @@ impl App {
 
     /// Writes `.agents/skills/<name>/SKILL.md`, links it into the targets and opens it.
     pub fn create_skill(&mut self) {
+        if self.is_remote() {
+            return;
+        }
         let Some(form) = &mut self.new_skill else { return };
         let name = form.name.text.trim().to_string();
         let description = form.description.text.clone();
