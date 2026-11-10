@@ -158,6 +158,10 @@ prism undo                                # takes back the last change, from her
 
 Add `--json` to any command for output a script or an agent can read. Secrets print as `***` unless you ask for `--show-secrets`; pass them in with `KEY=@file` or `KEY=-` (stdin) to keep them out of your shell history.
 
+### Other machines
+
+Each release also carries a CLI-only build, without the window, for servers and other machines you reach over ssh: `prism-cli-X.Y.Z-linux-x86_64.tar.gz`, `prism-cli-X.Y.Z-linux-arm64.tar.gz` and `prism-cli-X.Y.Z-macos-arm64.tar.gz`, each holding one file, `prism`, and all listed in `SHA256SUMS`. You rarely need to fetch them yourself: save the machine with `prism hosts add dev-box --ssh me@dev-box`, then `prism hosts install dev-box` downloads the matching archive on that machine, checks it against `SHA256SUMS` and puts `prism` in `~/.local/bin`. Use `--binary PATH` to upload a build of your own instead.
+
 ## Keyboard
 
 On Linux, ⌘ is Ctrl.
