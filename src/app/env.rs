@@ -260,8 +260,13 @@ impl App {
     }
 
     /// Asks the host in view for `scope`'s state, off the UI thread.
+    /// While an install runs on it, nothing else is asked: a newer request would replace the
+    /// install's, and its answer would never land.
     pub(super) fn load_remote(&mut self, scope: Scope, install_first: bool) {
         let Env::Remote { host, .. } = &self.env else { return };
+        if self.installing_prism && !install_first {
+            return;
+        }
         let (host, make) = (host.clone(), self.make_runner.clone());
         self.remote_load.request((host, scope, install_first), move |(host, scope, install_first)| {
             let runner = make(&host);
@@ -306,9 +311,8 @@ impl App {
             return;
         }
         let host = host.name.clone();
-        if installed {
-            self.installing_prism = false;
-        }
+        // Whatever this answer was for, nothing runs on the host in view any more.
+        self.installing_prism = false;
         match result {
             Ok(w) => {
                 *state = RemoteState::Ready;

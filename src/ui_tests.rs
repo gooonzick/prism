@@ -1271,3 +1271,45 @@ fn an_install_on_one_host_never_reports_on_another() {
     assert!(h.rt.state.notice.is_none());
     assert_eq!(h.rt.state.host().map(|x| x.name.as_str()), Some("b"));
 }
+
+/// A host that answers slowly, then can't be reached.
+struct Slow;
+
+impl crate::hosts::runner::Runner for Slow {
+    fn prism(&self, _: &[String], _: Option<Vec<u8>>) -> Result<crate::hosts::runner::Output, String> {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        Err("Can't reach box: timed out".into())
+    }
+    fn shell(&self, _: &str, _: Option<Vec<u8>>) -> Result<crate::hosts::runner::Output, String> {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        Err("Can't reach box: timed out".into())
+    }
+}
+
+#[test]
+fn a_reload_during_an_install_never_strands_it() {
+    let mut h = Harness::project();
+    h.with_host(std::sync::Arc::new(|_: &crate::hosts::Host| Box::new(Slow) as Box<dyn crate::hosts::runner::Runner>));
+    h.rt.update(|s, _| s.switch_env(Some("box")));
+    h.land_remote();
+    h.rt.update(|s, _| s.install_prism());
+    assert!(h.rt.state.installing_prism);
+
+    // A scope click and ⌘R while it runs: the install's answer is still the one that lands.
+    h.click("scope-global");
+    h.rt.update(|s, _| s.rescan());
+    h.land_remote();
+    assert!(!h.rt.state.installing_prism, "the flag clears when the answer lands");
+    assert!(!h.texts().contains("Installing prism"));
+    assert!(matches!(h.remote_state(), Some(crate::app::RemoteState::Unreachable(_))));
+
+    // Install works again; any answer for the host in view clears it.
+    h.rt.update(|s, _| s.install_prism());
+    assert!(h.rt.state.installing_prism);
+    h.rt.update(|s, _| {
+        s.remote_load.cancel();
+        let result = Err(crate::app::RemoteState::Unreachable("Can't reach box: timed out".into()));
+        s.land_remote(crate::app::RemoteAnswer { host: "box".into(), result, installed: false, install_error: None });
+    });
+    assert!(!h.rt.state.installing_prism);
+}
