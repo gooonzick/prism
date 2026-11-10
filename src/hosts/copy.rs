@@ -93,7 +93,7 @@ pub fn copy_server(
     let mut args = strings(&["mcp", "receive", name, "--to"]);
     args.extend(agents.iter().map(|&a| MCP_AGENTS[a].id.to_string()));
     let claude_scope = if claude_scope == ClaudeScope::Project { "project" } else { "local" };
-    args.extend(strings(&["--claude-scope", claude_scope, "--from", from_label, "--source-home", &home, "--json"]));
+    args.extend(strings(&["--claude-scope", claude_scope, "--from", from_label, "--target", to_label, "--source-home", &home, "--json"]));
     args.extend(scope_args(dest));
     if let Some(id) = apply {
         args.extend(strings(&["--apply", "--plan-id", id]));
@@ -185,14 +185,19 @@ fn why(out: &Output) -> String {
     out.stderr.lines().map(str::trim).rfind(|l| !l.is_empty()).map_or_else(|| format!("prism exited with {}", out.code), String::from)
 }
 
-/// Every action line names the machine it acts on.
+/// Every action line and conflict reason names the machine it is about: printed on another
+/// machine, "already in Global (~)" alone would read as that one.
 fn on_machine(plan: &mut Value, label: &str) {
-    if let Some(actions) = plan.get_mut("actions").and_then(Value::as_array_mut) {
-        for line in actions.iter_mut() {
-            if let Some(text) = line.as_str() {
-                *line = Value::from(format!("{text} on {label}"));
-            }
+    let suffix = |v: &mut Value| {
+        if let Some(text) = v.as_str() {
+            *v = Value::from(format!("{text} on {label}"));
         }
+    };
+    if let Some(actions) = plan.get_mut("actions").and_then(Value::as_array_mut) {
+        actions.iter_mut().for_each(suffix);
+    }
+    if let Some(conflicts) = plan.get_mut("conflicts").and_then(Value::as_array_mut) {
+        conflicts.iter_mut().filter_map(|c| c.get_mut("reason")).for_each(suffix);
     }
 }
 
@@ -215,9 +220,10 @@ mod tests {
     }
 
     #[test]
-    fn action_lines_end_with_the_machine() {
-        let mut plan = serde_json::json!({ "actions": ["Add s to Codex"], "warnings": ["w"] });
+    fn lines_and_conflicts_end_with_the_machine() {
+        let mut plan = serde_json::json!({ "actions": ["Add s to Codex"], "conflicts": [{ "skill": "pdf", "reason": "already in Global (~)" }], "warnings": ["w"] });
         on_machine(&mut plan, "laptop");
-        assert_eq!(plan, serde_json::json!({ "actions": ["Add s to Codex on laptop"], "warnings": ["w"] }));
+        let want = serde_json::json!({ "actions": ["Add s to Codex on laptop"], "conflicts": [{ "skill": "pdf", "reason": "already in Global (~) on laptop" }], "warnings": ["w"] });
+        assert_eq!(plan, want);
     }
 }

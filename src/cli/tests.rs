@@ -2141,7 +2141,7 @@ fn skill_copy_to_host_plan_then_apply() {
     assert_eq!(code, 4, "{out}");
     let again = json(&out);
     assert_eq!(again["plan_changed"], true);
-    assert_eq!(again["conflicts"], serde_json::json!([{ "skill": "pdf", "reason": "already in Global (~)" }]));
+    assert_eq!(again["conflicts"], serde_json::json!([{ "skill": "pdf", "reason": "already in Global (~) on laptop" }]));
 }
 
 #[test]
@@ -2188,8 +2188,8 @@ fn mcp_copy_to_host_warns_on_paths() {
     let plan = json(&out);
     assert_eq!(plan["actions"], serde_json::json!(["Add node-srv to Claude Code on laptop"]));
     let warnings: Vec<&str> = plan["warnings"].as_array().unwrap().iter().filter_map(|w| w.as_str()).collect();
-    let portable: Vec<&str> = warnings.iter().copied().filter(|w| w.ends_with("check it exists here") || w.ends_with("set here")).collect();
-    assert_eq!(portable, [format!("command points at /opt/homebrew/bin/node on {this}; check it exists here"), "env.TOKEN needs ${TOKEN} set here".to_string()]);
+    let portable: Vec<&str> = warnings.iter().copied().filter(|w| w.ends_with("check it exists on laptop") || w.ends_with("set on laptop")).collect();
+    assert_eq!(portable, [format!("command points at /opt/homebrew/bin/node on {this}; check it exists on laptop"), "env.TOKEN needs ${TOKEN} set on laptop".to_string()]);
     assert!(!b.join(".claude.json").exists(), "a plan changes nothing");
 
     let id = plan["plan_id"].as_str().unwrap().to_string();
@@ -2213,7 +2213,7 @@ fn mcp_receive_plan_id_covers_the_definition() {
     let home = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(home.path().join(".claude")).unwrap();
     let mut c = ctx(home.path());
-    let args = ["mcp", "receive", "s", "--to", "claude", "--from", "box", "--source-home", "/home/me", "--json"];
+    let args = ["mcp", "receive", "s", "--to", "claude", "--from", "box", "--target", "laptop", "--source-home", "/home/me", "--json"];
     let mut id = |command: &str| {
         let server = crate::mcp::model::Server {
             name: "s".into(),

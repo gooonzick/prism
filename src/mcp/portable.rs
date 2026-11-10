@@ -3,57 +3,67 @@
 
 use std::path::Path;
 
-use crate::mcp::model::{EnvValue, Part, Server, Transport};
+use crate::mcp::model::{EnvValue, Part, Server, Transport, masked_args, masked_url};
 
 /// Folders whose contents are particular to one machine, besides its home.
 const MACHINE_DIRS: [&str; 2] = ["/opt/homebrew", "/usr/local/Cellar"];
 
 /// One heads-up per value that points into `source_home` or a package manager's folder on
-/// `source` (the sending machine's name), and per `${VAR}` an env or header value reads.
-/// Names fields as plans do (`command`, `args`, `env.TOKEN`); a value shows only when it is
-/// such a path.
-pub fn warnings(server: &Server, source_home: &Path, source: &str) -> Vec<String> {
+/// `source` (the sending machine's name), and per `${VAR}` an env or header value reads, each
+/// naming `target`, the machine it goes to. Names fields as plans do (`command`, `args`,
+/// `env.TOKEN`). A command, argument or folder shows masked as local output shows it; an env or
+/// header value never shows, only where it points.
+pub fn warnings(server: &Server, source_home: &Path, source: &str, target: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut push = |line: String| {
         if !out.contains(&line) {
             out.push(line);
         }
     };
-    let mut path = |field: &str, value: &str| {
-        if machine_path(value, source_home) {
-            push(format!("{field} points at {value} on {source}; check it exists here"));
-        }
-    };
     let keyed: Vec<(String, &EnvValue)> = match &server.transport {
         Transport::Stdio { command, args, env, cwd } => {
-            path("command", command);
-            args.iter().for_each(|a| path("args", a));
-            cwd.iter().for_each(|c| path("cwd", c));
+            let shown = masked_args(args);
+            let plain = [("command", command, masked_url(command))].into_iter();
+            let plain = plain.chain(args.iter().zip(shown).map(|(a, m)| ("args", a, m)));
+            let plain = plain.chain(cwd.iter().map(|c| ("cwd", c, masked_url(c))));
+            for (field, value, shown) in plain {
+                if machine_place(value, source_home).is_some() {
+                    push(format!("{field} points at {shown} on {source}; check it exists on {target}"));
+                }
+            }
             env.iter().map(|(k, v)| (format!("env.{k}"), v)).collect()
         }
         Transport::Http { headers, .. } => headers.iter().map(|(k, v)| (format!("headers.{k}"), v)).collect(),
     };
     for (field, value) in &keyed {
-        path(field, &value.written());
+        // The value may be a secret: say only where it points.
+        match machine_place(&value.written(), source_home) {
+            Some(None) => push(format!("{field} points into {source}'s home; check it exists on {target}")),
+            Some(Some(dir)) => push(format!("{field} points into {dir} on {source}; check it exists on {target}")),
+            None => {}
+        }
     }
     for (field, value) in &keyed {
         for part in &value.0 {
             if let Part::Var { name, .. } = part {
-                push(format!("{field} needs ${{{name}}} set here"));
+                push(format!("{field} needs ${{{name}}} set on {target}"));
             }
         }
     }
     out
 }
 
-/// Whether `value` is a path inside `home` (not the root) or one of [`MACHINE_DIRS`].
-fn machine_path(value: &str, home: &Path) -> bool {
+/// Where `value` points if it is a path particular to the sending machine: `Some(None)` inside
+/// `home` (not the root), `Some(Some(dir))` inside one of [`MACHINE_DIRS`].
+fn machine_place(value: &str, home: &Path) -> Option<Option<&'static str>> {
     let value = Path::new(value);
     if !value.is_absolute() {
-        return false;
+        return None;
     }
-    let in_home = home.is_absolute() && home.parent().is_some() && value.starts_with(home);
-    in_home || MACHINE_DIRS.iter().any(|d| value.starts_with(d))
+    if home.is_absolute() && home.parent().is_some() && value.starts_with(home) {
+        return Some(None);
+    }
+    MACHINE_DIRS.iter().find(|d| value.starts_with(d)).map(|d| Some(*d))
 }
 
 #[cfg(test)]
@@ -71,20 +81,31 @@ mod tests {
     fn paths_into_the_senders_machine_are_named() {
         let server = stdio(
             "/opt/homebrew/bin/node",
-            &["/Users/me/mcp/server.js", "--port", "/usr/local/Cellar/x/1/bin/y", "/Users/meg/other.js"],
-            &[("CONFIG", EnvValue::literal("/Users/me/.config/s.json")), ("API_KEY", EnvValue::literal("FIXTURE_SECRET"))],
+            &["/Users/me/mcp/server.js", "--port", "/usr/local/Cellar/x/1/bin/y", "/Users/meg/other.js", "--token", "/Users/me/FIXTURE_ARG_SECRET"],
+            &[
+                ("CONFIG", EnvValue::literal("/Users/me/.config/s.json")),
+                ("BREW", EnvValue::literal("/opt/homebrew/etc/FIXTURE_BREW_SECRET")),
+                ("API_KEY", EnvValue::literal("/Users/me/FIXTURE_ENV_SECRET")),
+            ],
             Some("/Users/me/mcp"),
         );
+        let got = warnings(&server, Path::new("/Users/me"), "box", "laptop");
         assert_eq!(
-            warnings(&server, Path::new("/Users/me"), "box"),
+            got,
             [
-                "command points at /opt/homebrew/bin/node on box; check it exists here",
-                "args points at /Users/me/mcp/server.js on box; check it exists here",
-                "args points at /usr/local/Cellar/x/1/bin/y on box; check it exists here",
-                "cwd points at /Users/me/mcp on box; check it exists here",
-                "env.CONFIG points at /Users/me/.config/s.json on box; check it exists here",
+                "command points at /opt/homebrew/bin/node on box; check it exists on laptop",
+                "args points at /Users/me/mcp/server.js on box; check it exists on laptop",
+                "args points at /usr/local/Cellar/x/1/bin/y on box; check it exists on laptop",
+                "args points at *** on box; check it exists on laptop",
+                "cwd points at /Users/me/mcp on box; check it exists on laptop",
+                "env.API_KEY points into box's home; check it exists on laptop",
+                "env.BREW points into /opt/homebrew on box; check it exists on laptop",
+                "env.CONFIG points into box's home; check it exists on laptop",
             ]
         );
+        for w in &got {
+            assert!(!w.contains("FIXTURE"), "a value leaked: {w}");
+        }
     }
 
     #[test]
@@ -97,13 +118,13 @@ mod tests {
                 sse: false,
             },
         };
-        assert_eq!(warnings(&server, Path::new("/home/me"), "box"), ["headers.Authorization needs ${TOKEN} set here"]);
+        assert_eq!(warnings(&server, Path::new("/home/me"), "box", "laptop"), ["headers.Authorization needs ${TOKEN} set on laptop"]);
     }
 
     #[test]
     fn a_root_or_empty_home_matches_nothing() {
         let server = stdio("/usr/bin/node", &["x"], &[], None);
-        assert!(warnings(&server, Path::new("/"), "box").is_empty());
-        assert!(warnings(&server, Path::new(""), "box").is_empty());
+        assert!(warnings(&server, Path::new("/"), "box", "laptop").is_empty());
+        assert!(warnings(&server, Path::new(""), "box", "laptop").is_empty());
     }
 }

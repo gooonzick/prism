@@ -90,6 +90,9 @@ pub enum Cmd {
         /// How warnings name the sending machine.
         #[arg(long, value_name = "LABEL")]
         from: String,
+        /// How warnings name this machine: the sender's name for it.
+        #[arg(long, value_name = "LABEL")]
+        target: String,
         /// The sending machine's home folder: paths into it may not exist here.
         #[arg(long, value_name = "DIR")]
         source_home: PathBuf,
@@ -175,10 +178,10 @@ pub fn run(cmd: Cmd, ctx: &mut Ctx, scope: &Scope, out: &mut Out, err: &mut dyn 
             let there = Destination { host, dest, claude_scope };
             return copy_to_host(ctx, scope, &name, &to, from.as_deref(), &there, apply, out, err);
         }
-        Cmd::Receive { name, to, claude_scope, from, source_home, apply } => {
+        Cmd::Receive { name, to, claude_scope, from, target, source_home, apply } => {
             let claude_scope = if claude_scope == "project" { ClaudeScope::Project } else { ClaudeScope::Local };
             return match agent_indices(&to) {
-                Ok(to) => receive(ctx, scope, Received { name, to, claude_scope, from, source_home }, apply, out, err),
+                Ok(to) => receive(ctx, scope, Received { name, to, claude_scope, from, target, source_home }, apply, out, err),
                 Err(e) => usage(err, &e),
             };
         }
@@ -237,6 +240,7 @@ struct Received {
     to: Vec<usize>,
     claude_scope: ClaudeScope,
     from: String,
+    target: String,
     source_home: PathBuf,
 }
 
@@ -262,7 +266,7 @@ fn receive(ctx: &mut Ctx, scope: &Scope, r: Received, apply: Apply, out: &mut Ou
     };
     let Request::Add { server, .. } = &request else { unreachable!("built above") };
     plan.sent = serde_json::to_vec(server).ok().map(|b| content_hash(&b));
-    for w in portable::warnings(server, &r.source_home, &r.from) {
+    for w in portable::warnings(server, &r.source_home, &r.from, &r.target) {
         if !plan.warnings.contains(&w) {
             plan.warnings.push(w);
         }
