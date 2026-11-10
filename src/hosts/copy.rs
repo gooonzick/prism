@@ -13,6 +13,23 @@ use crate::mcp::agents::MCP_AGENTS;
 use crate::mcp::plan::ClaudeScope;
 use crate::mcp::scan::{McpServer, Status};
 
+/// Why a copy failed; when the target did part of it before it stopped, that part is its last
+/// change, which one `undo` there takes back.
+#[derive(Debug, PartialEq)]
+pub struct Failed {
+    pub why: String,
+    /// Part of it was done there.
+    pub undoable: bool,
+    /// That change, as `undo` there names it (for `undo --expect`).
+    pub label: Option<String>,
+}
+
+impl From<String> for Failed {
+    fn from(why: String) -> Failed {
+        Failed { why, undoable: false, label: None }
+    }
+}
+
 /// How plans and toasts name this machine.
 pub fn this_machine() -> &'static str {
     if cfg!(target_os = "macos") { "This Mac" } else { "This computer" }
@@ -33,7 +50,7 @@ pub fn copy_skills(
     to_label: &str,
     dest: &Scope,
     apply: Option<&str>,
-) -> Result<Value, String> {
+) -> Result<Value, Failed> {
     let mut args = strings(&["skills", "receive"]);
     match dest {
         Scope::Global => args.push("--to-global".into()),
@@ -78,14 +95,14 @@ pub fn copy_server(
     claude_scope: ClaudeScope,
     agents: &[usize],
     apply: Option<&str>,
-) -> Result<Value, String> {
+) -> Result<Value, Failed> {
     let mut args = strings(&["wire", "server", name, "--json"]);
     args.extend(scope_args(from_scope));
     // serde's errors quote the input, and the input holds secrets: say only what failed.
     let found: McpServer = serde_json::from_value(answer(from.prism(&args, None)?, from_label)?).map_err(|_| format!("{from_label} sent a definition of {name} Prism can't read"))?;
     let copy = match from_agent {
         Some(a) => found.copies.iter().find(|c| c.agent == a).ok_or_else(|| format!("{} has no copy of {name} on {from_label}", MCP_AGENTS[a].name))?,
-        None if found.status == Status::Differs => return Err("copies differ; pick one with --from".into()),
+        None if found.status == Status::Differs => return Err(Failed::from("copies differ; pick one with --from".to_string())),
         None => found.copies.first().ok_or_else(|| format!("No MCP server named {name} on {from_label}"))?,
     };
     let definition = serde_json::to_vec(&copy.server).map_err(|_| format!("can't send {name}"))?;
@@ -158,15 +175,17 @@ fn home_of(from: &dyn Runner, label: &str) -> Result<String, String> {
 }
 
 /// `prism`'s JSON answer: `Ok` for a plan, a result or a changed plan (exit 4), `Err` with its
-/// error, prefixed with the machine, for anything else.
-fn answer(out: Output, label: &str) -> Result<Value, String> {
+/// error, prefixed with the machine, for anything else: undoable when it did part of it.
+fn answer(out: Output, label: &str) -> Result<Value, Failed> {
     let json = parse(&out.stdout);
-    if let Some(e) = json.as_ref().and_then(|v| v.get("error")).and_then(Value::as_str) {
-        return Err(format!("{label}: {e}"));
+    if let Some(v) = json.as_ref().filter(|v| v.get("error").is_some()) {
+        let e = v["error"].as_str().map_or_else(|| why(&out), String::from);
+        let change = v.get("label").and_then(Value::as_str).map(String::from);
+        return Err(Failed { why: format!("{label}: {e}"), undoable: v["undoable"] == true, label: change });
     }
     match json {
         Some(v) if out.code == 0 || out.code == 4 => Ok(v),
-        _ => Err(format!("{label}: {}", why(&out))),
+        _ => Err(Failed::from(format!("{label}: {}", why(&out)))),
     }
 }
 
@@ -214,9 +233,13 @@ mod tests {
     #[test]
     fn an_error_names_the_machine() {
         let out = Output { code: 1, stdout: b"{\"error\": \"No skill named pdf\"}".to_vec(), stderr: String::new() };
-        assert_eq!(answer(out, "laptop").unwrap_err(), "laptop: No skill named pdf");
+        assert_eq!(answer(out, "laptop").unwrap_err(), Failed::from("laptop: No skill named pdf".to_string()));
         let out = Output { code: 2, stdout: vec![], stderr: "bad flag\n".into() };
-        assert_eq!(answer(out, "laptop").unwrap_err(), "laptop: bad flag");
+        assert_eq!(answer(out, "laptop").unwrap_err().why, "laptop: bad flag");
+        // Stopped after doing part of it: that part is there to undo.
+        let out = Output { code: 1, stdout: br#"{"error": "can't link", "done": 1, "undoable": true, "label": "copy pdf from box"}"#.to_vec(), stderr: String::new() };
+        let want = Failed { why: "laptop: can't link".into(), undoable: true, label: Some("copy pdf from box".into()) };
+        assert_eq!(answer(out, "laptop").unwrap_err(), want);
     }
 
     #[test]

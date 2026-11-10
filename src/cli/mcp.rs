@@ -343,12 +343,12 @@ fn copy_to_host(ctx: &Ctx, scope: &Scope, name: &str, to: &[String], from: Optio
         (true, Some(id)) => Some(id),
         (true, None) => match copy(None) {
             Ok(plan) => plan["plan_id"].as_str().map(String::from),
-            Err(e) => return failed(out, err, &e),
+            Err(f) => return super::hosts::copy_failed(out, err, &host.name, f),
         },
     };
     match copy(id.as_deref()) {
         Ok(v) => super::hosts::print_remote(out, v),
-        Err(e) => failed(out, err, &e),
+        Err(f) => super::hosts::copy_failed(out, err, &host.name, f),
     }
 }
 
@@ -484,13 +484,18 @@ fn drive(ctx: &Ctx, plan: McpPlan, label: String, a: Apply, immediate: bool, out
         plan::apply(&plan, &ctx.paths, &mut journal)
     });
     let undoable = !journal.is_empty();
-    if undoable {
-        store::save_last_change(&ctx.paths, Some(&LastChange { label, journal }));
+    // What `undo --expect` checks: still the last change, when a toast's Undo comes.
+    let label = undoable.then_some(label);
+    if let Some(label) = &label {
+        store::save_last_change(&ctx.paths, Some(&LastChange { label: label.clone(), journal }));
     }
     match result {
         Ok(done) => {
             let mut v = plan_json(&plan, &lines, &id, true);
             v["done"] = json!(done);
+            if let Some(label) = label {
+                v["label"] = json!(label);
+            }
             let steps: String = lines.iter().map(|l| format!("\n  - {l}")).collect();
             out.emit(format!("Done:{steps}{}", notes(&plan)), v);
             Exit::Ok
@@ -500,6 +505,10 @@ fn drive(ctx: &Ctx, plan: McpPlan, label: String, a: Apply, immediate: bool, out
                 let mut v = plan_json(&plan, &lines, &id, false);
                 v["done"] = json!(done);
                 v["error"] = json!(e);
+                v["undoable"] = json!(undoable);
+                if let Some(label) = label {
+                    v["label"] = json!(label);
+                }
                 out.emit("", v);
             } else {
                 let _ = writeln!(err, "Stopped after {done} of {} files: {e}{}", plan.files.len(), super::undo_hint(undoable));

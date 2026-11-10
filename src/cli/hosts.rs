@@ -7,6 +7,7 @@ use clap::Subcommand;
 use serde_json::{Value, json};
 
 use super::{Ctx, Exit, Out, failed, usage};
+use crate::hosts::copy::Failed;
 use crate::hosts::install::{self, Health, VERSION};
 use crate::hosts::runner::Runner;
 use crate::hosts::{self, Host};
@@ -163,6 +164,16 @@ pub(super) fn ready(ctx: &Ctx, name: &str) -> Result<(Host, Box<dyn Runner>), St
 /// This machine as a runner: the source of a copy to a host.
 pub(super) fn this(ctx: &Ctx) -> Box<dyn Runner> {
     (ctx.make_runner)(&Host { name: "this".into(), ssh: "this".into() })
+}
+
+/// A copy to `host` that failed: why, and when it did part of it there, how to take that back.
+pub(super) fn copy_failed(out: &mut Out, err: &mut dyn Write, host: &str, f: Failed) -> Exit {
+    let hint = if f.undoable { format!("\nRun prism --host {host} undo to take back what was done.") } else { String::new() };
+    let _ = writeln!(err, "{}{hint}", f.why.trim());
+    if out.json {
+        out.emit("", json!({ "error": f.why.trim(), "undoable": f.undoable }));
+    }
+    Exit::Failed
 }
 
 /// Prints a host's answer to a copy (its plan or result, lines already naming it) the way

@@ -319,3 +319,20 @@ fn receive_refuses_a_tampered_archive() {
     assert!(fs::read_dir(&store).unwrap().next().is_none());
     assert!(j.is_empty());
 }
+
+#[test]
+fn a_link_that_fails_after_placing_counts_what_was_placed() {
+    let f = Fixture::new();
+    let store = f.dir("agents");
+    // Codex's skills folder is a file: the skill is placed, then its link fails.
+    let codex = f.dir("codex");
+    fs::create_dir_all(codex.parent().unwrap()).unwrap();
+    fs::write(&codex, "not a folder").unwrap();
+    let tar = raw_tar(&[("./SKILL.md", "ok"), ("sub/a.md", "a")]);
+    let sent = [("pdf".to_string(), expected_hash())];
+    let mut j = Journal::default();
+    let got = receive_many(&f.paths, &Scope::Global, &Incoming { sent: &sent, named: false, place: &["pdf".to_string()] }, &mut tar.as_slice(), &ids(&["codex"]), &mut j);
+    let (placed, _) = got.expect_err("the link fails");
+    assert_eq!(placed, 1, "the skill was placed before the link failed");
+    assert!(store.join("pdf/SKILL.md").is_file() && !j.is_empty(), "and undo can take it back");
+}

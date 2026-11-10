@@ -2529,3 +2529,74 @@ fn relative_folders_for_another_machine_are_refused() {
     let (_, _, err) = go(&["--host", "this", "--project", "no-such-site", "skills", "list"], &mut c);
     assert_eq!(err.trim(), "no-such-site is not a folder");
 }
+
+#[test]
+fn undo_expect_leaves_a_later_change() {
+    let home = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(home.path()).unwrap();
+    let mut c = ctx(&root);
+    let (src, at) = (root.join("skill"), root.join("links/skill"));
+    std::fs::create_dir_all(&src).unwrap();
+    let mut journal = crate::fsops::Journal::default();
+    journal.link(&at, &src).unwrap();
+    store::save_last_change(&c.paths, Some(&store::LastChange { label: "Link skill".into(), journal }));
+
+    let (code, out, err) = go(&["undo", "--expect", "copy pdf from laptop", "--json"], &mut c);
+    assert_eq!(code, 1, "{out}");
+    assert_eq!(err.trim(), "copy pdf from laptop is no longer the last change; nothing was undone");
+    assert_eq!(json(&out), serde_json::json!({ "undone": null, "error": err.trim(), "stale": true }));
+    assert!(std::fs::symlink_metadata(&at).is_ok(), "the later change stays");
+    assert_eq!(store::load_last_change(&c.paths).map(|l| l.label).as_deref(), Some("Link skill"));
+
+    let (code, out, _) = go(&["undo", "--expect", "Link skill"], &mut c);
+    assert_eq!((code, out.trim()), (0, "Undid: Link skill"));
+    assert!(std::fs::symlink_metadata(&at).is_err());
+    let (code, _, err) = go(&["undo", "--expect", "Link skill"], &mut c);
+    assert_eq!(code, 1, "undone already: nothing to take back twice");
+    assert!(err.contains("no longer the last change"), "{err}");
+}
+
+#[test]
+fn a_receive_that_stops_after_placing_says_undo_takes_it_back() {
+    let home = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(home.path()).unwrap();
+    let src = sent_skill(&root);
+    let mut c = receiving(&root);
+    // Codex can't take the link: its skills folder is a file.
+    std::fs::write(root.join(".codex/skills"), "not a folder").unwrap();
+    let (code, out, err) = receive_pdf(&mut c, &src);
+    assert_eq!(code, 1, "{out}{err}");
+    let v = json(&out);
+    assert!(v["error"].as_str().is_some(), "{v}");
+    assert_eq!((v["done"].clone(), v["undoable"].clone(), v["label"].clone()), (serde_json::json!(1), serde_json::json!(true), serde_json::json!("copy pdf from laptop")), "{v}");
+    assert!(root.join(".agents/skills/pdf/SKILL.md").is_file(), "placed before the link failed");
+
+    let (code, out, err) = go(&["undo", "--expect", "copy pdf from laptop"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(!root.join(".agents/skills/pdf").exists(), "undo takes the placed skill back");
+}
+
+#[test]
+fn a_copy_to_host_that_stops_there_points_at_undo_there() {
+    let (here, there) = (tempfile::tempdir().unwrap(), host_home(VERSION));
+    let (a, b) = (here.path(), there.path());
+    write_skill(&a.join(".agents/skills"), "pdf", "Reads PDFs");
+    std::fs::write(b.join(".claude/skills"), "not a folder").unwrap();
+    let mut c = copying(a, b);
+    let copy = ["skills", "copy", "pdf", "--to-host", "laptop", "--to-global", "--apply"];
+    let (code, out, err) = go(&copy, &mut c);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(err.trim_end().ends_with("Run prism --host laptop undo to take back what was done."), "{err}");
+    assert!(b.join(".agents/skills/pdf").is_dir());
+    std::fs::remove_dir_all(b.join(".agents/skills/pdf")).unwrap();
+    store::save_last_change(&Paths::isolated(b), None);
+
+    let (code, out, _) = go(&[&copy[..], &["--json"]].concat(), &mut c);
+    assert_eq!(code, 1);
+    let v = json(&out);
+    assert!(v["error"].as_str().is_some_and(|e| e.starts_with("laptop: ")), "{v}");
+    assert_eq!(v["undoable"], true, "{v}");
+    let (code, out, err) = go(&["--host", "laptop", "undo", "--json"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(!b.join(".agents/skills/pdf").exists(), "undo there takes the placed skill back");
+}

@@ -104,15 +104,16 @@ pub(super) enum Work {
 /// What the host answered.
 pub(super) enum Outcome {
     Planned(PlanView),
-    Done(PlanView),
+    /// Done, and the change as `undo` there names it, when there is one to undo.
+    Done(PlanView, Option<String>),
     /// The plan changed since its id (exit 4): the new one, nothing done.
     Changed(PlanView),
     /// There was nothing to do.
     Nothing,
     /// A command's JSON and exit code.
     Answer(i32, Value),
-    /// Why it failed; `undoable` when part of it was done.
-    Failed { why: String, undoable: bool },
+    /// Why it failed; `undoable` when part of it was done, `label` that part as `undo` names it.
+    Failed { why: String, undoable: bool, label: Option<String> },
 }
 
 /// What a finished change says in its toast; some count what was done.
@@ -156,6 +157,7 @@ pub(super) enum Then {
     EditForm(String),
     /// The unmasked server, for Show values.
     Reveal(String),
+    /// A toast's Undo or ⌘Z.
     Undo,
 }
 
@@ -202,14 +204,14 @@ fn plan(r: &dyn Runner, host: &str, c: &HostCommand) -> Result<PlanView, String>
 
 fn apply(r: &dyn Runner, host: &str, c: &HostCommand, id: &str) -> Result<Outcome, String> {
     let (code, v) = call(r, c, &["--apply", "--plan-id", id])?;
+    let label = v.get("label").and_then(Value::as_str).map(String::from);
     if let Some(why) = error_of(&v) {
-        let undoable = v.get("done").and_then(Value::as_u64).is_some_and(|n| n > 0);
-        return Ok(Outcome::Failed { why, undoable });
+        return Ok(Outcome::Failed { why, undoable: v["undoable"] == true, label });
     }
     let view = on_host(PlanView::from_json(&v).map_err(|e| format!("{host} sent a result this window can't read: {e}"))?, host);
     Ok(match (code, v["applied"] == true) {
         (4, _) => Outcome::Changed(view),
-        (_, true) => Outcome::Done(view),
+        (_, true) => Outcome::Done(view, label),
         _ => Outcome::Nothing,
     })
 }
@@ -230,11 +232,13 @@ fn work(r: &dyn Runner, host: &str, work: Work) -> Outcome {
             }
         }),
         Work::Run(c) => call(r, &c, &[]).and_then(|(code, v)| match error_of(&v) {
+            // An undo refused because its change is no longer the last: an answer to show.
+            Some(_) if v["stale"] == true => Ok(Outcome::Answer(code, v)),
             Some(e) => Err(e),
             None => Ok(Outcome::Answer(code, v)),
         }),
     };
-    result.unwrap_or_else(|why| Outcome::Failed { why, undoable: false })
+    result.unwrap_or_else(|why| Outcome::Failed { why, undoable: false, label: None })
 }
 
 /// The skipped agents (or skills) and the heads-ups, one per line, for a toast.
@@ -322,23 +326,17 @@ impl App {
         self.load_remote(self.scope.clone(), false);
     }
 
-    /// A finished change's toast: Undo takes it back on the host.
-    fn host_done(&mut self, title: String, detail: String) {
+    /// A finished change's toast: Undo takes back `label` on the host.
+    fn host_done(&mut self, title: String, detail: String, label: Option<String>) {
         self.notify(self.on_host(&title), detail, false);
-        let machine = self.env_label();
-        if let Some(n) = &mut self.notice {
-            n.undo = true;
-            n.machine = Some(machine);
-        }
+        self.offer_undo(self.env_label(), label);
     }
 
-    fn host_failed(&mut self, why: String, undoable: bool) {
+    fn host_failed(&mut self, why: String, undoable: bool, label: Option<String>) {
         let why = if undoable { format!("{why}\nUndo takes back what was done.") } else { why };
         self.notify(self.on_host("Couldn't finish that"), why, true);
-        let machine = self.env_label();
-        if let Some(n) = &mut self.notice {
-            n.undo = undoable;
-            n.machine = undoable.then_some(machine);
+        if undoable {
+            self.offer_undo(self.env_label(), label);
         }
     }
 
@@ -350,9 +348,9 @@ impl App {
         match (then, outcome) {
             (Then::Change(title), outcome) => {
                 match outcome {
-                    Outcome::Done(view) => self.host_done(title.text(view.lines.len()), notes(&view)),
+                    Outcome::Done(view, label) => self.host_done(title.text(view.lines.len()), notes(&view), label),
                     Outcome::Changed(view) => self.plan_changed(&view),
-                    Outcome::Failed { why, undoable } => self.host_failed(why, undoable),
+                    Outcome::Failed { why, undoable, label } => self.host_failed(why, undoable, label),
                     _ => self.notify(self.on_host("Nothing to change"), String::new(), false),
                 }
                 self.reload_host();
@@ -375,16 +373,16 @@ impl App {
                         }
                     }
                     Outcome::Changed(view) => self.plan_changed(&view),
-                    Outcome::Done(view) => {
+                    Outcome::Done(view, label) => {
                         self.close_sync();
                         if only {
                             self.checked.clear();
                         }
-                        self.host_done(Title::Synced.text(view.lines.len()), String::new());
+                        self.host_done(Title::Synced.text(view.lines.len()), String::new(), label);
                     }
-                    Outcome::Failed { why, undoable } => {
+                    Outcome::Failed { why, undoable, label } => {
                         self.close_sync();
-                        self.host_failed(why, undoable);
+                        self.host_failed(why, undoable, label);
                     }
                     _ => self.close_sync(),
                 }
@@ -413,16 +411,16 @@ impl App {
                         }
                     }
                     Outcome::Changed(view) => self.plan_changed(&view),
-                    Outcome::Done(_) => {
+                    Outcome::Done(_, label) => {
                         self.mcp_dialog = None;
-                        self.host_done(done, String::new());
+                        self.host_done(done, String::new(), label);
                         if let Some(name) = select {
                             self.mcp_selected = Some(name);
                         }
                     }
-                    Outcome::Failed { why, undoable } => {
+                    Outcome::Failed { why, undoable, label } => {
                         self.mcp_dialog = None;
-                        self.host_failed(why, undoable);
+                        self.host_failed(why, undoable, label);
                     }
                     _ => self.mcp_dialog = None,
                 }
@@ -432,7 +430,7 @@ impl App {
                 let view = PlanView::from_json(&v).map(|view| on_host(view, &self.env_label())).unwrap_or_default();
                 if v["applied"] == true {
                     self.mcp_form = None;
-                    self.host_done(format!("Added {name}"), notes(&view));
+                    self.host_done(format!("Added {name}"), notes(&view), v["label"].as_str().map(String::from));
                     self.select_mcp(&name);
                     self.reload_host();
                 } else {
@@ -516,6 +514,9 @@ impl App {
             },
             (Then::Undo, outcome) => {
                 match outcome {
+                    Outcome::Answer(_, v) if v["stale"] == true => {
+                        self.notify(self.on_host("Couldn't undo"), v["error"].as_str().unwrap_or_default().to_string(), true);
+                    }
                     Outcome::Answer(_, v) => match v["undone"].as_str() {
                         Some(label) => self.notify(self.on_host(&format!("Undid: {label}")), String::new(), false),
                         None => self.notify(self.on_host("Nothing to undo"), String::new(), false),
@@ -682,8 +683,11 @@ impl App {
         if self.is_remote() { self.host_last_change.is_some() } else { self.last_change.is_some() }
     }
 
-    pub(super) fn host_undo(&mut self) {
-        self.run_on_host(Work::Run(HostCommand::new(vec!["undo".into()], Vec::new())), Then::Undo);
+    /// `prism undo` on the host in view; of `expect` alone, when given (a toast's Undo).
+    pub(super) fn host_undo(&mut self, expect: Option<String>) {
+        let mut args = vec!["undo".to_string()];
+        args.extend(expect.map(|label| format!("--expect={label}")));
+        self.run_on_host(Work::Run(HostCommand::new(args, Vec::new())), Then::Undo);
     }
 
     // MCP servers.

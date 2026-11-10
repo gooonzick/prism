@@ -395,8 +395,9 @@ pub fn receive_many(paths: &Paths, dest: &Scope, incoming: &Incoming, tar: &mut 
     });
     let _ = fs::remove_dir_all(&staging);
     result?;
-    for (done, name) in incoming.place.iter().enumerate() {
-        link_arrived(paths, name, dest, targets, j).map_err(|e| (done, e))?;
+    // Every skill is placed by now: a link that fails leaves all of them for undo to take back.
+    for name in incoming.place {
+        link_arrived(paths, name, dest, targets, j).map_err(|e| (placed, e))?;
     }
     Ok(placed)
 }

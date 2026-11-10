@@ -15,7 +15,7 @@ use super::mcp_edit::{McpChange, McpDialog};
 use super::{App, SetWaker};
 use crate::agents::{Paths, Scope};
 use crate::hosts::Host;
-use crate::hosts::copy::{copy_server, copy_skills, parse, this_machine, why};
+use crate::hosts::copy::{Failed, copy_server, copy_skills, parse, this_machine, why};
 use crate::hosts::runner::{MakeRunner, Runner, quote};
 use crate::mcp::agents::MCP_AGENTS;
 use crate::mcp::plan::ClaudeScope;
@@ -148,22 +148,22 @@ impl Done {
     }
 }
 
-/// A write on another machine: a copy with its plan's id, or a toast's Undo.
+/// A write on another machine: a copy with its plan's id, or a toast's Undo of the change
+/// `expect` names.
 enum Write {
     Copy { job: Box<Job>, id: String, seq: u64, done: Done },
-    Undo { host: Host, machine: String },
+    Undo { host: Host, machine: String, expect: Option<String> },
 }
 
 /// What a write did there.
 pub struct Written {
     machine: String,
     what: Wrote,
-    result: Result<Value, String>,
 }
 
 enum Wrote {
-    Copy { seq: u64, done: Done },
-    Undo,
+    Copy { seq: u64, done: Done, result: Result<Value, Failed> },
+    Undo(Result<Value, String>),
 }
 
 /// Copies to other machines: the open dialog's machines and pick, and the work in flight.
@@ -222,7 +222,7 @@ fn folder_on(r: &dyn Runner, label: &str, dir: &std::path::Path) -> Result<PathB
 }
 
 /// Plans the copy on its target, or with `apply` the plan's id, does it.
-fn run(make: &MakeRunner, job: &Job, apply: Option<&str>) -> Result<Value, String> {
+fn run(make: &MakeRunner, job: &Job, apply: Option<&str>) -> Result<Value, Failed> {
     let (from, to) = (make(&job.from), make(&job.to));
     match &job.what {
         What::Skills(skills) => {
@@ -238,10 +238,16 @@ fn run(make: &MakeRunner, job: &Job, apply: Option<&str>) -> Result<Value, Strin
     }
 }
 
-/// `prism undo` on the machine `r` reaches: its answer, or why it failed.
-fn undo_there(r: &dyn Runner) -> Result<Value, String> {
-    let out = r.prism(&["undo".into(), "--json".into()], None)?;
+/// `prism undo` on the machine `r` reaches (of `expect` alone, when given): its answer, a
+/// refusal when that is no longer the last change there included, or why it failed.
+fn undo_there(r: &dyn Runner, expect: Option<&str>) -> Result<Value, String> {
+    let mut args = vec!["undo".to_string(), "--json".to_string()];
+    if let Some(label) = expect {
+        args.extend(["--expect".to_string(), label.to_string()]);
+    }
+    let out = r.prism(&args, None)?;
     match parse(&out.stdout) {
+        Some(v) if v["stale"] == true => Ok(v),
         Some(v) if v.get("error").is_none() && out.code == 0 => Ok(v),
         Some(v) => Err(v["error"].as_str().map_or_else(|| why(&out), String::from)),
         None => Err(why(&out)),
@@ -346,11 +352,11 @@ impl App {
             self.land_across_plan(seq, result);
             changed = true;
         }
-        if let Some(Written { machine, what, result }) = self.across.write.take() {
+        if let Some(Written { machine, what }) = self.across.write.take() {
             self.across.writing = false;
             match what {
-                Wrote::Copy { seq, done } => self.land_applied(seq, machine, done, result),
-                Wrote::Undo => self.land_undo(machine, result),
+                Wrote::Copy { seq, done, result } => self.land_applied(seq, machine, done, result),
+                Wrote::Undo(result) => self.land_undo(machine, result),
             }
             self.next_write();
             changed = true;
@@ -401,7 +407,7 @@ impl App {
     fn ask_plan(&mut self, job: Job) -> u64 {
         self.across.seq += 1;
         let make = self.make_runner.clone();
-        self.across.plan.request((self.across.seq, job), move |(seq, job)| (seq, run(&make, &job, None)));
+        self.across.plan.request((self.across.seq, job), move |(seq, job)| (seq, run(&make, &job, None).map_err(|f| f.why)));
         self.across.seq
     }
 
@@ -490,33 +496,41 @@ impl App {
         self.across.writing = true;
         let make = self.make_runner.clone();
         self.across.write.request(write, move |write| match write {
-            Write::Copy { job, id, seq, done } => Written { machine: job.to_label.clone(), result: run(&make, &job, Some(&id)), what: Wrote::Copy { seq, done } },
-            Write::Undo { host, machine } => Written { machine, result: undo_there(make(&host).as_ref()), what: Wrote::Undo },
+            Write::Copy { job, id, seq, done } => Written { machine: job.to_label.clone(), what: Wrote::Copy { seq, done, result: run(&make, &job, Some(&id)) } },
+            Write::Undo { host, machine, expect } => Written { machine, what: Wrote::Undo(undo_there(make(&host).as_ref(), expect.as_deref())) },
         });
     }
 
-    /// A copy's answer: a toast whose Undo acts on the target, wherever the window is by then.
-    fn land_applied(&mut self, seq: u64, machine: String, done: Done, result: Result<Value, String>) {
+    /// A copy's answer: a toast whose Undo acts on the target, wherever the window is by then;
+    /// also for a copy that stopped after doing part of it there.
+    fn land_applied(&mut self, seq: u64, machine: String, done: Done, result: Result<Value, Failed>) {
         let open = self.target_for(seq).is_some();
-        let view = result.and_then(|v| Ok((v["applied"] == true, v["plan_changed"] == true, view_of(&v, &machine)?)));
+        let result = match result {
+            Ok(v) => Ok(v),
+            Err(Failed { why, undoable: true, label }) => {
+                self.close_across_dialog(open);
+                self.notify(format!("Couldn't finish that on {machine}"), format!("{why}\nUndo takes back what was done."), true);
+                self.offer_undo(machine.clone(), label);
+                return self.look_again(&machine);
+            }
+            Err(f) => Err(f.why),
+        };
+        let view = result.and_then(|v| Ok((v["applied"] == true, v["plan_changed"] == true, view_of(&v, &machine)?, v["label"].as_str().map(String::from))));
         match view {
-            Ok((_, true, view)) if open => {
+            Ok((_, true, view, _)) if open => {
                 let notice = format!("The files changed on {machine}; here is the new plan");
                 if let Some(t) = self.target_for(seq) {
                     (t.plan, t.applying, t.notice) = (Planned::Done(Ok(view)), false, Some(notice));
                 }
             }
-            Ok((_, true, view)) => self.notify(format!("Nothing was done; the files changed on {machine}"), view.lines.join("\n"), true),
-            Ok((true, _, view)) => {
+            Ok((_, true, view, _)) => self.notify(format!("Nothing was done; the files changed on {machine}"), view.lines.join("\n"), true),
+            Ok((true, _, view, label)) => {
                 self.close_across_dialog(open);
                 self.notify(done.title(view.lines.len(), &machine), super::remote_actions::notes(&view), false);
-                if let Some(n) = &mut self.notice {
-                    n.undo = true;
-                    n.machine = Some(machine.clone());
-                }
+                self.offer_undo(machine.clone(), label);
                 self.look_again(&machine);
             }
-            Ok((false, _, view)) => {
+            Ok((false, _, view, _)) => {
                 self.close_across_dialog(open);
                 self.notify(format!("Nothing to change on {machine}"), super::remote_actions::notes(&view), false);
             }
@@ -666,26 +680,30 @@ impl App {
 
     /// The toast's Undo: on the machine the toast names, wherever the window is.
     /// Once pressed it is gone from the toast, so a second press can't undo a second change.
+    /// It takes back the change it reports only while that is still the machine's last one.
     pub fn undo_toast(&mut self) {
         let Some(n) = self.notice.as_mut().filter(|n| n.undo) else { return };
         n.undo = false;
-        match n.machine.clone() {
-            Some(machine) if machine != self.env_label() => self.undo_on(machine),
-            _ => self.undo(),
+        let (machine, label) = (n.machine.clone(), n.label.clone());
+        match machine {
+            Some(machine) if machine != self.env_label() => self.undo_on(machine, label),
+            _ if self.is_remote() => self.host_undo(label),
+            _ => self.undo_here(label),
         }
     }
 
-    /// Runs `prism undo` on another machine, off the UI thread.
-    fn undo_on(&mut self, machine: String) {
+    /// Runs `prism undo` on another machine, off the UI thread: of `expect` alone, when given.
+    pub(super) fn undo_on(&mut self, machine: String, expect: Option<String>) {
         let Some(host) = self.host_named(&machine) else {
             return self.notify(format!("No saved host named {machine}"), String::new(), true);
         };
-        self.across.writes.push_back(Write::Undo { host, machine });
+        self.across.writes.push_back(Write::Undo { host, machine, expect });
         self.next_write();
     }
 
     fn land_undo(&mut self, machine: String, result: Result<Value, String>) {
         match result {
+            Ok(v) if v["stale"] == true => self.notify(format!("Couldn't undo on {machine}"), v["error"].as_str().unwrap_or_default().to_string(), true),
             Ok(v) => match v["undone"].as_str() {
                 Some(label) => self.notify(format!("Undid: {label} on {machine}"), String::new(), false),
                 None => self.notify(format!("Nothing to undo on {machine}"), String::new(), false),

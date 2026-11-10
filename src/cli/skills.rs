@@ -275,10 +275,15 @@ fn drive(ctx: &Ctx, mut plan: Planned, a: Apply, out: &mut Out, err: &mut dyn Wr
     if undoable {
         store::save_last_change(&ctx.paths, Some(&LastChange { label: plan.label.clone(), journal }));
     }
+    // What `undo --expect` checks: still the last change, when a toast's Undo comes.
+    let label = undoable.then(|| plan.label.clone());
     match result {
         Ok(done) => {
             let mut v = plan_json(&plan, &id, true);
             v["done"] = json!(done);
+            if let Some(label) = label {
+                v["label"] = json!(label);
+            }
             let mut text = format!("Done: {}", sync::plural(done, "change", "changes"));
             if !plan.conflicts.is_empty() {
                 text.push_str(&format!("\n{}", conflicts_text(&plan.conflicts)));
@@ -291,6 +296,10 @@ fn drive(ctx: &Ctx, mut plan: Planned, a: Apply, out: &mut Out, err: &mut dyn Wr
                 let mut v = plan_json(&plan, &id, false);
                 v["done"] = json!(done);
                 v["error"] = json!(e);
+                v["undoable"] = json!(undoable);
+                if let Some(label) = label {
+                    v["label"] = json!(label);
+                }
                 out.emit("", v);
             } else {
                 let _ = writeln!(err, "Stopped after {done} of {n}: {e}{}", super::undo_hint(undoable));
@@ -525,12 +534,12 @@ fn copy_to_host(ctx: &Ctx, scope: &Scope, inv: &Inventory, names: Vec<String>, h
         (true, Some(id)) => Some(id),
         (true, None) => match copy(None) {
             Ok(plan) => plan["plan_id"].as_str().map(String::from),
-            Err(e) => return failed(out, err, &e),
+            Err(f) => return super::hosts::copy_failed(out, err, &host.name, f),
         },
     };
     match copy(id.as_deref()) {
         Ok(v) => super::hosts::print_remote(out, v),
-        Err(e) => failed(out, err, &e),
+        Err(f) => super::hosts::copy_failed(out, err, &host.name, f),
     }
 }
 

@@ -69,6 +69,9 @@ pub struct Notice {
     /// The machine that change was made on: "This Mac" or a host's name. The toast's Undo acts
     /// there, whichever machine is in view; `None` means the one in view.
     pub machine: Option<String>,
+    /// That change, as `undo` names it: the toast's Undo takes it back only while it is still
+    /// that machine's last change.
+    pub label: Option<String>,
 }
 
 pub struct Install {
@@ -543,8 +546,17 @@ impl App {
     // Notices and undo.
 
     pub fn notify(&mut self, title: String, detail: String, error: bool) {
-        self.notice = Some(Notice { title, detail, error, undo: false, machine: None });
+        self.notice = Some(Notice { title, detail, error, undo: false, machine: None, label: None });
         self.notice_at = None;
+    }
+
+    /// The toast up now offers to undo the change `label` on `machine`.
+    pub(super) fn offer_undo(&mut self, machine: String, label: Option<String>) {
+        if let Some(n) = &mut self.notice {
+            n.undo = true;
+            n.machine = Some(machine);
+            n.label = label;
+        }
     }
 
     /// A journal for a new change. The last change's config backups are not needed any more,
@@ -558,7 +570,7 @@ impl App {
     fn changed(&mut self, label: String, j: Journal, result: Result<String, String>) {
         let undoable = !j.is_empty();
         if undoable {
-            self.last_change = Some(LastChange { label, journal: j });
+            self.last_change = Some(LastChange { label: label.clone(), journal: j });
             self.save_last_change();
         }
         match result {
@@ -568,9 +580,8 @@ impl App {
                 self.notify("Couldn't finish that".into(), e, true);
             }
         }
-        if let Some(n) = &mut self.notice {
-            n.undo = undoable;
-            n.machine = undoable.then(|| crate::hosts::copy::this_machine().to_string());
+        if undoable {
+            self.offer_undo(crate::hosts::copy::this_machine().to_string(), Some(label));
         }
         self.rescan();
     }
@@ -582,10 +593,19 @@ impl App {
     /// Takes back the last change of the machine in view.
     pub fn undo(&mut self) {
         if self.is_remote() {
-            return self.host_undo();
+            return self.host_undo(None);
         }
+        self.undo_here(None);
+    }
+
+    /// Takes back this machine's last change, in view; with `expect`, only if it is still that
+    /// change (a toast's Undo).
+    pub(super) fn undo_here(&mut self, expect: Option<String>) {
         // From disk: the CLI may have undone it, or made a newer change, since this window did.
         self.last_change = store::load_last_change(&self.paths);
+        if let Some(want) = expect.filter(|want| self.last_change.as_ref().is_none_or(|c| c.label != *want)) {
+            return self.notify("Couldn't undo".into(), format!("{want} is no longer the last change; nothing was undone"), true);
+        }
         let Some(LastChange { label, journal }) = self.last_change.take() else { return };
         match journal.undo(&self.paths) {
             Ok(_) => {

@@ -1726,6 +1726,28 @@ fn an_answer_in_flight_is_dropped_when_the_machine_changes() {
 }
 
 #[test]
+fn a_host_toast_undo_leaves_a_later_change_there() {
+    let (mut h, remote) = on_host();
+    h.click("skill-far");
+    h.land_remote();
+    h.click("link-claude");
+    h.land_remote();
+    let link = remote.path().join(".claude/skills/far");
+    assert!(fs::symlink_metadata(&link).is_ok());
+    let there = Paths::isolated(remote.path());
+    let mine = crate::store::load_last_change(&there).expect("the link is box's last change").label;
+    assert_eq!(h.rt.state.notice.as_ref().unwrap().label.as_deref(), Some(mine.as_str()), "the toast knows its change");
+    crate::store::save_last_change(&there, Some(&crate::store::LastChange { label: "sync (1 change)".into(), journal: crate::fsops::Journal::default() }));
+
+    h.click_button("Undo");
+    h.land_remote();
+    let notice = h.rt.state.notice.as_ref().expect("a toast");
+    assert_eq!(notice.title, "Couldn't undo on box");
+    assert!(notice.detail.starts_with(&format!("{mine} is no longer the last change")), "{}", notice.detail);
+    assert!(fs::symlink_metadata(&link).is_ok(), "the link stays");
+}
+
+#[test]
 fn remote_actions_in_a_host_project_name_it() {
     let mut h = Harness::project();
     let remote = host_home(crate::hosts::install::VERSION);
@@ -1827,6 +1849,68 @@ fn toast_undo_targets_named_machine() {
     // ⌘Z still means the machine in view.
     key(&mut h, rune::Key::Command('z'), rune::Mods { cmd: true, ..rune::Mods::default() });
     assert!(fs::symlink_metadata(&codex).is_err(), "this machine's change is undone");
+}
+
+#[test]
+fn a_copy_that_stops_after_placing_offers_undo_there() {
+    let mut h = Harness::project();
+    let laptop = host_home(crate::hosts::install::VERSION);
+    // Claude Code there can't take the link: its skills folder is a file.
+    fs::write(laptop.path().join(".claude/skills"), "not a folder").unwrap();
+    h.with_laptop(laptop.path());
+    h.copy_review_to_laptop();
+    let got = laptop.path().join(".agents/skills/review");
+    assert!(got.join("SKILL.md").is_file(), "placed before the link failed");
+    let notice = h.rt.state.notice.as_ref().expect("a toast");
+    assert_eq!(notice.title, "Couldn't finish that on laptop");
+    assert!(notice.error && notice.detail.ends_with("Undo takes back what was done."), "{}", notice.detail);
+    assert!(notice.undo && notice.machine.as_deref() == Some("laptop"), "Undo acts on laptop");
+
+    h.click_button("Undo");
+    h.land_remote();
+    assert!(!got.exists(), "the placed skill is taken back on laptop");
+    assert!(h.rt.state.notice.as_ref().unwrap().title.starts_with("Undid: "), "{}", h.rt.state.notice.as_ref().unwrap().title);
+}
+
+#[test]
+fn a_toast_undo_here_leaves_a_later_change() {
+    let mut h = Harness::project();
+    h.click("skill-review");
+    h.click("link-codex");
+    let codex = h.project_dir().join(".codex/skills/review");
+    assert!(fs::symlink_metadata(&codex).is_ok());
+    let here = Paths::isolated(&h.root);
+    let later = crate::store::LastChange { label: "sync (1 change)".into(), journal: crate::fsops::Journal::default() };
+    crate::store::save_last_change(&here, Some(&later));
+
+    h.click_button("Undo");
+    let notice = h.rt.state.notice.as_ref().expect("a toast");
+    assert_eq!(notice.title, "Couldn't undo");
+    assert!(notice.detail.ends_with("is no longer the last change; nothing was undone"), "{}", notice.detail);
+    assert!(fs::symlink_metadata(&codex).is_ok(), "the link stays");
+    assert_eq!(crate::store::load_last_change(&here), Some(later), "and so does the later change");
+}
+
+#[test]
+fn a_toast_undo_leaves_a_later_change_there() {
+    let mut h = Harness::project();
+    let laptop = host_home(crate::hosts::install::VERSION);
+    h.with_laptop(laptop.path());
+    h.copy_review_to_laptop();
+    let got = laptop.path().join(".agents/skills/review");
+    assert!(got.is_dir());
+    // Another change on laptop since, from its own CLI.
+    let there = Paths::isolated(laptop.path());
+    crate::store::save_last_change(&there, Some(&crate::store::LastChange { label: "sync (1 change)".into(), journal: crate::fsops::Journal::default() }));
+
+    h.click_button("Undo");
+    h.land_remote();
+    let notice = h.rt.state.notice.as_ref().expect("a toast");
+    assert_eq!(notice.title, "Couldn't undo on laptop");
+    let this = crate::hosts::copy::this_machine();
+    assert_eq!(notice.detail, format!("copy review from {this} is no longer the last change; nothing was undone"));
+    assert!(got.is_dir(), "the copy stays");
+    assert_eq!(crate::store::load_last_change(&there).map(|c| c.label).as_deref(), Some("sync (1 change)"), "and so does the later change");
 }
 
 #[test]

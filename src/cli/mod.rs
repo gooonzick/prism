@@ -152,7 +152,12 @@ enum Command {
         command: projects::TargetsCmd,
     },
     /// Take back the last change, from the window or the command line.
-    Undo,
+    Undo {
+        /// Only if the last change is still this one (as `undo` names it): a toast's Undo
+        /// must not take back a later change.
+        #[arg(long, value_name = "LABEL", hide = true)]
+        expect: Option<String>,
+    },
     /// Check a scope for broken links, invalid skills and drifting MCP servers.
     Doctor {
         /// Check the global setup and every project Prism lists.
@@ -239,7 +244,7 @@ fn execute(cli: Cli, args: &[&str], ctx: &mut Ctx, out: &mut dyn Write, err: &mu
             agents_cmd(ctx, &mut out);
             Exit::Ok
         }
-        Command::Undo => undo_cmd(ctx, &mut out, err),
+        Command::Undo { expect } => undo_cmd(ctx, expect.as_deref(), &mut out, err),
         Command::Doctor { all } => match ctx.scope(cli.global.project.as_deref()) {
             Ok(scope) => doctor::run(all, &scope, ctx, &mut out),
             Err(e) => usage(err, &e),
@@ -286,8 +291,17 @@ fn failed(out: &mut Out, err: &mut dyn Write, msg: &str) -> Exit {
     Exit::Failed
 }
 
-fn undo_cmd(ctx: &Ctx, out: &mut Out, err: &mut dyn Write) -> Exit {
-    let Some(change) = store::load_last_change(&ctx.paths) else {
+fn undo_cmd(ctx: &Ctx, expect: Option<&str>, out: &mut Out, err: &mut dyn Write) -> Exit {
+    let last = store::load_last_change(&ctx.paths);
+    if let Some(want) = expect.filter(|want| last.as_ref().is_none_or(|c| c.label != *want)) {
+        let msg = format!("{want} is no longer the last change; nothing was undone");
+        let _ = writeln!(err, "{msg}");
+        if out.json {
+            out.emit("", serde_json::json!({ "undone": null, "error": msg, "stale": true }));
+        }
+        return Exit::Failed;
+    }
+    let Some(change) = last else {
         out.emit("Nothing to undo", serde_json::json!({ "undone": null }));
         return Exit::Ok;
     };
