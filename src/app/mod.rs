@@ -99,6 +99,8 @@ pub struct Found {
 }
 
 pub struct App {
+    /// Show the design system's gallery instead of the app (`--scene ds`).
+    pub gallery: bool,
     pub paths: Paths,
     pub settings: Settings,
     pub sidebar: PaneState,
@@ -224,6 +226,7 @@ impl App {
         let mcp = mcp_scan::scan(&scope, &paths);
         let last_change = store::load_last_change(&paths);
         let mut app = App {
+            gallery: false,
             paths,
             settings,
             sidebar: PaneState::new(248.0).range(180.0, 420.0),

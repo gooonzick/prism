@@ -11,6 +11,9 @@ mod agents;
 #[cfg(feature = "gui")]
 mod app;
 mod cli;
+#[cfg(feature = "gui")]
+#[allow(dead_code, unused_imports)] // Task 11 removes this once every screen is on ds.
+mod ds;
 mod fsops;
 mod hosts;
 mod mcp;
@@ -24,6 +27,8 @@ mod store;
 mod sync;
 #[cfg(feature = "gui")]
 mod ui;
+#[cfg(all(test, feature = "gui"))]
+mod ui_lint;
 #[cfg(all(test, feature = "gui"))]
 mod ui_tests;
 mod wire;
@@ -85,6 +90,7 @@ type Scene = (&'static str, fn(&mut App));
 
 #[cfg(feature = "gui")]
 static SCENES: &[Scene] = &[
+    ("ds", |s| s.gallery = true),
     ("detail", |s| {
         if let Some(name) = s.inv.skills.first().map(|x| x.name.clone()) {
             s.select(&name);

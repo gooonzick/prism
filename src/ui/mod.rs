@@ -55,6 +55,10 @@ pub fn chrome() -> Chrome {
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     let k = Kit::neutral(cx.system_dark());
     let mut layer = Vec::new();
+    if s.gallery {
+        let g = crate::ds::gallery::<App>(&k, &mut layer);
+        return rune_kit::root(g, layer);
+    }
     let (main, toolbar, inspector) = match (s.page.clone(), hosts::pending(s, &k)) {
         // A host whose state isn't in yet: what is happening with it, in place of the page.
         (Page::Installed | Page::Mcp, Some(pane)) => (pane, Toolbar::new().leading(page_tabs(s, &k)).title(s.env_label()), inspector_body(&k)),

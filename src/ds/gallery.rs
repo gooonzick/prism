@@ -1,0 +1,167 @@
+//! Every block once, on one screen (`--scene ds`), so the system can be reviewed in both themes
+//! before the screens use it. Generic over the app's state; every handler does nothing.
+
+use rune::{El, TextEdit, col, row};
+use rune_kit::{Kit, glyphs};
+
+use super::{
+    Card, Inspector, ListRow, MenuAction, Notice, Page, Place, Tone, button, color, copy_button, danger, dot, empty, field, field_pair,
+    filter, icon_button, item_row, overflow, pair_row, plain_row, pressable, primary, quiet, size, space, stacked_row, status, tag, text,
+};
+
+const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGq0e6m3cX9y5Vb8nqE2Yt7kU1dJw4LrP0sZf9hQ3xTa work@laptop";
+
+fn nothing<S>() -> impl Fn(&mut S) + Clone + 'static {
+    |_: &mut S| {}
+}
+
+/// A labelled group of the gallery.
+fn section(k: &Kit, name: &str, body: El) -> El {
+    col().w_full().gap(space::S2).child(text::label(k, name)).child(body)
+}
+
+pub fn gallery<S: 'static>(k: &Kit, layer: &mut Vec<El>) -> El {
+    let blocks = col()
+        .w(300.0)
+        .h_full()
+        .min_h(0.0)
+        .padding(size::PANE_EDGE)
+        .gap(space::S6)
+        .child(section(k, "Type", type_ladder(k)))
+        .child(section(k, "Status", statuses(k)))
+        .child(section(k, "Notices", notices(k)))
+        .child(section(k, "Controls", controls::<S>(k, layer)));
+    let cards = col().w(320.0).h_full().min_h(0.0).padding(size::PANE_EDGE).gap(space::S4).children(cards::<S>(k).into_iter().flatten());
+    col().key("ds-gallery").w_full().h_full().fill(color::pane(k)).child(
+        row().w_full().h_full().items_start().child(blocks).child(cards).child(col().grow(1.0).min_w(0.0).h_full().child(page::<S>(k))).child(
+            col()
+                .w(size::INSPECTOR_MAX)
+                .h_full()
+                .border(1.0, color::hairline(k))
+                .child(inspector::<S>(k, layer)),
+        ),
+    )
+}
+
+fn type_ladder(k: &Kit) -> El {
+    col()
+        .w_full()
+        .gap(space::S1)
+        .child(text::title(k, "Title: work.example.com"))
+        .child(text::value(k, "Value: deploy@10.0.0.5"))
+        .child(text::name(k, "Name: work"))
+        .child(text::code(k, "Code: SHA256:q8Jt0nYxk2c"))
+        .child(text::path(k, "Path: ~/.ssh/config.d/a/very/long/folder/name/work.conf"))
+        .child(text::label(k, "Label: Port"))
+        .child(text::hint(k, "Hint: used when no other key matches"))
+        .child(text::body(k, "Body: a sentence that wraps onto a second line when the column is narrow."))
+}
+
+fn statuses(k: &Kit) -> El {
+    let dots = row().gap(space::S2).center_y().children([Tone::Neutral, Tone::Ok, Tone::Warn, Tone::Bad, Tone::Info].map(|t| dot(k, t)));
+    col()
+        .w_full()
+        .gap(space::S2)
+        .child(dots)
+        .child(row().gap(space::S3).child(status(k, Tone::Ok, "In the agent")).child(status(k, Tone::Bad, "Missing")))
+        .child(row().gap(space::S1).child(tag(k, "ed25519", None, "Key type")).child(tag(k, "agent", Some(Tone::Ok), "In the agent")).child(tag(k, "pattern", Some(Tone::Info), "Matches several hosts")))
+}
+
+fn notices(k: &Kit) -> El {
+    col()
+        .w_full()
+        .gap(space::S2)
+        .child(Notice::new(Tone::Warn, "ssh-agent is not running").detail("Keys can't be added until it starts").build(k))
+        .child(Notice::new(Tone::Bad, "Permissions are 644: others can read this key").action(button("Fix", Place::Inspector).build(k)).build(k))
+}
+
+fn controls<S: 'static>(k: &Kit, layer: &mut Vec<El>) -> El {
+    let edit = TextEdit::new("");
+    let more = overflow::<S>(k, "gallery-more", Place::List, false, nothing(), nothing(), vec![MenuAction::new("Move up", nothing())], layer);
+    col()
+        .w_full()
+        .gap(space::S2)
+        .child(
+            row()
+                .w_full()
+                .gap(space::S2)
+                .center_y()
+                .flex_wrap()
+                .child(primary("Add host", Place::Bar).build(k))
+                .child(button("Edit", Place::Bar).build(k))
+                .child(quiet("Fewer", Place::Bar).build(k))
+                .child(danger("Remove…", Place::Bar).build(k)),
+        )
+        .child(
+            row()
+                .gap(space::S2)
+                .center_y()
+                .child(copy_button("Copy", Place::Inspector, false).build(k))
+                .child(copy_button("Copied", Place::Inspector, true).build(k))
+                .child(icon_button(&glyphs::SEARCH, "Search", Place::List).build(k))
+                .child(more),
+        )
+        .child(filter(&edit, "Filter hosts").build(k))
+}
+
+fn cards<S: 'static>(k: &Kit) -> Vec<Option<El>> {
+    let input = |s: &str| text::value(k, s.to_string());
+    vec![
+        Card::new("gallery-pairs")
+            .label("Connection")
+            .row(pair_row(k, "Address", text::value(k, "10.0.0.5")))
+            .row(pair_row(k, "User", text::value(k, "deploy")))
+            .row(pair_row(k, "Jump through", text::value(k, "bastion.example.com.a-very-long-domain.internal")))
+            .build(k),
+        Card::new("gallery-stacked")
+            .label("Public key")
+            .trailing(copy_button("Copy", Place::Inspector, false).build(k))
+            .row(stacked_row(k, "ed25519", text::code(k, KEY)))
+            .build(k),
+        Card::new("gallery-items")
+            .label("Keys")
+            .row(item_row(text::name(k, "id_work"), Some(text::hint(k, "ed25519 · in the agent")), Some(quiet("Show", Place::Inspector).build(k))))
+            .row(pressable::<S>(k, item_row(text::name(k, "github"), Some(text::hint(k, "Pressable row")), None), "github", false, nothing()))
+            .build(k),
+        Card::new("gallery-fields")
+            .label("Form")
+            .row(field(k, "Name", input("work")))
+            .row(field_pair(field(k, "Address", input("10.0.0.5")), field(k, "Port", input("22")), Some(size::FIELD_SHORT)))
+            .row(plain_row(row().gap(space::S2).child(button("Add option", Place::Inspector).build(k))))
+            .build(k),
+    ]
+}
+
+fn page<S: 'static>(k: &Kit) -> El {
+    let edit = TextEdit::new("");
+    Page::new("gallery-page")
+        .filter(filter(&edit, "Filter hosts").build(k))
+        .count("5 hosts")
+        .notice(Notice::new(Tone::Info, "~/.ssh/config.d/old.conf could not be read").build(k))
+        .rows([
+            ListRow::new("gallery-row1", "work").meta("deploy@10.0.0.5").tags([tag(k, "id_work", None, "Key")]).selected(true).build(k, nothing::<S>()),
+            ListRow::new("gallery-row2", "github").meta("git@github.com").build(k, nothing::<S>()),
+            ListRow::new("gallery-row3", "pi").build(k, nothing::<S>()),
+            ListRow::new("gallery-row4", "*.internal").meta("pattern").dim(true).build(k, nothing::<S>()),
+            ListRow::new("gallery-row5", "id_old").icon(&glyphs::FILE_TEXT).build(k, nothing::<S>()),
+        ])
+        .build(k)
+        .child(empty(k, "No hosts match", "Clear the filter to see every host"))
+}
+
+fn inspector<S: 'static>(k: &Kit, layer: &mut Vec<El>) -> El {
+    let more = overflow::<S>(k, "gallery-inspector-more", Place::Inspector, false, nothing(), nothing(), vec![MenuAction::new("Move up", nothing())], layer);
+    Inspector::new()
+        .subject("gallery")
+        .title("work")
+        .meta("~/.ssh/config · line 12")
+        .status(status(k, Tone::Ok, "Reachable"))
+        .description("Work box behind the office VPN.")
+        .actions(
+            vec![button("Edit", Place::Inspector).build(k), button("Duplicate", Place::Inspector).build(k), more],
+            Some(danger("Remove…", Place::Inspector).build(k)),
+        )
+        .notice(Notice::new(Tone::Warn, "IdentityFile ~/.ssh/id_old is missing").build(k))
+        .card(Card::new("gallery-inspector-card").label("Options").row(pair_row(k, "ServerAliveInterval", text::value(k, "30"))).build(k))
+        .build(k)
+}
