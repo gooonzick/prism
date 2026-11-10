@@ -56,6 +56,21 @@ impl EnvValue {
             .collect()
     }
 
+    /// The value with its secret text replaced, part by part, as [`masked`](Self::masked) prints
+    /// it: references stay references (their defaults `***`), so the result's `masked()` and
+    /// `written()` both give this value's `masked()`.
+    pub fn masked_value(&self) -> EnvValue {
+        if self.is_literal() {
+            return EnvValue::literal("***");
+        }
+        let parts = self.0.iter().enumerate().map(|(i, p)| match p {
+            Part::Text(t) if i == 0 && t.starts_with("Bearer ") => Part::Text(if t.len() == "Bearer ".len() { t.clone() } else { "Bearer ***".into() }),
+            Part::Text(_) => Part::Text("***".into()),
+            Part::Var { name, default } => Part::Var { name: name.clone(), default: default.as_ref().map(|_| "***".into()) },
+        });
+        EnvValue(parts.collect())
+    }
+
     /// For printing: references stay readable (`${GITLAB_TOKEN}`, `Bearer ${TOKEN}`); any other
     /// text shows as `***`, since a secret can sit around a reference too (`https://u:pw@${HOST}`).
     /// Defaults may be secrets, so they are masked.
@@ -329,6 +344,28 @@ mod tests {
         for plain in ["https://mcp.example.com/mcp-server-sequential-thinking/sse", "https://h.example.com/x?page=2&mode=read-only"] {
             assert_eq!(masked_url(plain), plain);
         }
+    }
+
+    #[test]
+    fn masked_value_prints_and_masks_as_the_original_does() {
+        let text = |t: &str| Part::Text(t.into());
+        let var = |n: &str, d: Option<&str>| Part::Var { name: n.into(), default: d.map(String::from) };
+        let values = [
+            EnvValue::literal("fake-secret"),
+            EnvValue::literal("Bearer fake-secret"),
+            EnvValue(vec![var("T", None)]),
+            EnvValue(vec![var("T", Some("fake-secret"))]),
+            EnvValue(vec![text("Bearer "), var("T", None)]),
+            EnvValue(vec![text("Bearer fake-secret-"), var("T", None)]),
+            EnvValue(vec![text("https://u:fake-secret@"), var("HOST", None), text("/x")]),
+        ];
+        for v in values {
+            let m = v.masked_value();
+            assert_eq!(m.masked(), v.masked(), "{v:?}");
+            assert_eq!(m.written(), v.masked(), "{v:?}");
+            assert!(!m.written().contains("fake-secret"), "{v:?}");
+        }
+        assert_eq!(EnvValue(vec![text("Bearer "), var("T", None)]).masked_value(), EnvValue(vec![text("Bearer "), var("T", None)]));
     }
 
     #[test]

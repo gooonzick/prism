@@ -1814,3 +1814,54 @@ fn wire_is_hidden_from_help() {
     assert!(out.contains("skills") && !out.contains("wire"), "{out}");
     assert_eq!(run(vec!["wire".into(), "--help".into()]), Some(0), "wire still routes to the CLI");
 }
+
+#[test]
+fn wire_masked_values_show_as_local() {
+    use crate::mcp::model::{Transport, masked_args, masked_url};
+    let home = mcp_home();
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    std::fs::write(
+        home.path().join(".claude.json"),
+        r#"{"mcpServers":{
+            "def":{"command":"npx","args":["def-mcp","--token","FIXTURE_ARG_SECRET"],"cwd":"/work","env":{"KEY":"${KEY:-FIXTURE_ENV_SECRET}","HOST":"${GITLAB_HOST}"}},
+            "bearer":{"type":"http","url":"https://u:FIXTURE_URL_SECRET@mcp.example.com/mcp","headers":{"Authorization":"Bearer ${TOKEN}","X-Mixed":"Bearer FIXTURE_HEADER_SECRET-${T}"}}}}"#,
+    )
+    .unwrap();
+    let paths = Paths::isolated(home.path());
+    let local = crate::mcp::scan::scan(&Scope::Global, &paths);
+    let remote = crate::mcp::scan::masked(&local);
+    let serialized = serde_json::to_string(&remote).unwrap();
+    for secret in FIXTURES {
+        assert!(!serialized.contains(secret), "{secret} leaked: {serialized}");
+    }
+    let copies = local.servers.iter().flat_map(|s| &s.copies).zip(remote.servers.iter().flat_map(|s| &s.copies));
+    let mut checked = 0;
+    for (here, there) in copies {
+        match (&here.server.transport, &there.server.transport) {
+            (Transport::Stdio { command: c1, args: a1, env: e1, cwd: d1 }, Transport::Stdio { command: c2, args: a2, env: e2, cwd: d2 }) => {
+                assert_eq!(masked_url(c1), masked_url(c2));
+                assert_eq!(masked_args(a1), masked_args(a2));
+                assert_eq!(d1.as_deref().map(masked_url), d2.as_deref().map(masked_url));
+                assert_eq!(e1.keys().collect::<Vec<_>>(), e2.keys().collect::<Vec<_>>());
+                assert!(e1.iter().zip(e2).all(|((_, v1), (_, v2))| v1.masked() == v2.masked()), "{e1:?} vs {e2:?}");
+            }
+            (Transport::Http { url: u1, headers: h1, .. }, Transport::Http { url: u2, headers: h2, .. }) => {
+                assert_eq!(masked_url(u1), masked_url(u2));
+                assert_eq!(h1.keys().collect::<Vec<_>>(), h2.keys().collect::<Vec<_>>());
+                assert!(h1.iter().zip(h2).all(|((_, v1), (_, v2))| v1.masked() == v2.masked()), "{h1:?} vs {h2:?}");
+            }
+            (a, b) => panic!("transport kind changed: {a:?} vs {b:?}"),
+        }
+        checked += 1;
+    }
+    assert_eq!(checked, local.servers.iter().map(|s| s.copies.len()).sum::<usize>());
+    // References survive masking: the window shows them as here.
+    let def = &remote.get("def").unwrap().copies[0].server.transport;
+    let Transport::Stdio { env, .. } = def else { panic!("{def:?}") };
+    assert_eq!(env["HOST"].masked(), "${GITLAB_HOST}");
+    assert_eq!(env["KEY"].masked(), "${KEY:-***}");
+    let bearer = &remote.get("bearer").unwrap().copies[0].server.transport;
+    let Transport::Http { headers, .. } = bearer else { panic!("{bearer:?}") };
+    assert_eq!(headers["Authorization"].masked(), "Bearer ${TOKEN}");
+    assert_eq!(headers["X-Mixed"].masked(), "Bearer ***${T}");
+}

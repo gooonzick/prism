@@ -79,12 +79,12 @@ impl McpInventory {
     }
 }
 
-/// `inv` with nothing secret left in it, for sending elsewhere: env and header values become
-/// their masked text (as literals), args, commands, cwds and URLs are masked, diffs carry their
-/// masked values as the written ones, extras keep their keys only, and read errors their first
-/// line.
+/// `inv` with nothing secret left in it, for sending elsewhere: env and header values are masked
+/// part by part (so they print and mask there as they do here); args, commands, cwds and URLs
+/// are masked; diffs carry their masked values as the written ones; extras keep their keys only,
+/// and read errors their first line.
 pub fn masked(inv: &McpInventory) -> McpInventory {
-    let values = |m: &BTreeMap<String, EnvValue>| m.iter().map(|(k, v)| (k.clone(), EnvValue::literal(&v.masked()))).collect();
+    let values = |m: &BTreeMap<String, EnvValue>| m.iter().map(|(k, v)| (k.clone(), v.masked_value())).collect();
     let transport = |t: &Transport| match t {
         Transport::Stdio { command, args, env, cwd } => {
             Transport::Stdio { command: masked_url(command), args: masked_args(args), env: values(env), cwd: cwd.as_deref().map(masked_url) }
