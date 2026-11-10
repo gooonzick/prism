@@ -25,6 +25,7 @@ mod sync;
 mod ui;
 #[cfg(all(test, feature = "gui"))]
 mod ui_tests;
+mod wire;
 
 #[cfg(feature = "gui")]
 use rune::{AppSpec, Tx, Waker};

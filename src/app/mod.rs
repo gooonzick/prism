@@ -21,7 +21,7 @@ use crate::agents::{self, Paths, Scope};
 use crate::fsops::Journal;
 use crate::mcp::scan::{self as mcp_scan, McpInventory};
 use crate::remote::RemoteSkill;
-use crate::scan::{self, Inventory};
+use crate::scan::{self, Inventory, ScopeStats};
 use crate::store::{self, LastChange, Settings};
 use crate::sync::Plan;
 
@@ -70,13 +70,6 @@ pub type InstallResult = (Vec<String>, Result<String, String>);
 
 /// A repository's skills (name, description), or why they couldn't be read.
 pub type RepoAnswer = (String, Result<Vec<(String, String)>, String>);
-
-/// Per scope, for the sidebar.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct ScopeStats {
-    pub total: usize,
-    pub unsynced: usize,
-}
 
 /// The new-skill dialog's fields.
 pub struct NewSkill {
@@ -410,8 +403,7 @@ impl App {
     }
 
     fn stats_of(&self, inv: &Inventory) -> ScopeStats {
-        let targets = self.targets();
-        ScopeStats { total: inv.skills.len(), unsynced: inv.skills.iter().filter(|s| !s.synced(&targets)).count() }
+        scan::stats_of(inv, &self.targets())
     }
 
     /// Scans every known scope for the sidebar's counts.

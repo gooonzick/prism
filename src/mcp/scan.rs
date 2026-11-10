@@ -5,12 +5,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::agents::{Paths, Scope};
 use crate::mcp::agents::{Flavor, MCP_AGENTS, McpAgent};
 use crate::mcp::formats::{self, Disabled};
 use crate::mcp::model::{self, EnvValue, McpCopy, Place, Transport, masked_args, masked_url};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Status {
     InSync,
     Differs,
@@ -19,7 +21,7 @@ pub enum Status {
 }
 
 /// One field where copies disagree, value by value.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FieldDiff {
     /// `transport kind`, `command`, `args`, `cwd`, `url`, `env.KEY` or `headers.KEY`.
     pub field: String,
@@ -41,7 +43,7 @@ impl FieldDiff {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct McpServer {
     pub name: String,
     /// Sorted by agent, then place.
@@ -55,13 +57,13 @@ pub struct McpServer {
 }
 
 /// Differently named servers that look like one: same URL or same package.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MergeHint {
     pub names: Vec<String>,
     pub reason: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct McpInventory {
     pub scope: Scope,
     /// Sorted by name.
@@ -75,6 +77,33 @@ impl McpInventory {
     pub fn get(&self, name: &str) -> Option<&McpServer> {
         self.servers.iter().find(|s| s.name == name)
     }
+}
+
+/// `inv` with nothing secret left in it, for sending elsewhere: env and header values become
+/// their masked text (as literals), args, commands, cwds and URLs are masked, diffs carry their
+/// masked values as the written ones, extras keep their keys only, and read errors their first
+/// line.
+pub fn masked(inv: &McpInventory) -> McpInventory {
+    let values = |m: &BTreeMap<String, EnvValue>| m.iter().map(|(k, v)| (k.clone(), EnvValue::literal(&v.masked()))).collect();
+    let transport = |t: &Transport| match t {
+        Transport::Stdio { command, args, env, cwd } => {
+            Transport::Stdio { command: masked_url(command), args: masked_args(args), env: values(env), cwd: cwd.as_deref().map(masked_url) }
+        }
+        Transport::Http { url, headers, sse } => Transport::Http { url: masked_url(url), headers: values(headers), sse: *sse },
+    };
+    let copy = |c: &McpCopy| McpCopy {
+        server: model::Server { name: c.server.name.clone(), transport: transport(&c.server.transport) },
+        extras: c.extras.keys().map(|k| (k.clone(), serde_json::Value::Null)).collect(),
+        ..c.clone()
+    };
+    let diff = |d: &FieldDiff| FieldDiff { written: d.values.iter().map(|(_, v)| v.clone()).collect(), ..d.clone() };
+    let servers = inv
+        .servers
+        .iter()
+        .map(|s| McpServer { copies: s.copies.iter().map(copy).collect(), diffs: s.diffs.iter().map(diff).collect(), ..s.clone() })
+        .collect();
+    let errors = inv.errors.iter().map(|(f, e)| (f.clone(), safe_error(e).to_string())).collect();
+    McpInventory { servers, errors, ..inv.clone() }
 }
 
 /// A read error's first line, safe to show. TOML errors go on to quote the offending line of the

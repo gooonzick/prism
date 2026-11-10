@@ -1695,3 +1695,122 @@ fn hosts_install_uploads_a_binary() {
     assert!(err.contains("not prism"), "{err}");
     assert!(std::fs::read_to_string(remote.path().join(".local/bin/prism")).unwrap().contains(VERSION));
 }
+
+/// `mcp_home()` plus skills in every placement, a registered project, a saved host and a last
+/// change: everything the window's state holds.
+fn wire_home() -> (tempfile::TempDir, Ctx) {
+    let home = mcp_home();
+    let root = std::fs::canonicalize(home.path()).unwrap();
+    let agents = root.join(".agents/skills");
+    let claude = root.join(".claude/skills");
+    let codex = root.join(".codex/skills");
+    write_skill(&agents, "alpha", "In .agents");
+    write_skill(&root.join("elsewhere"), "beta", "Linked from elsewhere");
+    std::fs::create_dir_all(&claude).unwrap();
+    std::fs::create_dir_all(&codex).unwrap();
+    std::os::unix::fs::symlink(agents.join("alpha"), claude.join("alpha")).unwrap();
+    std::os::unix::fs::symlink(root.join("elsewhere/beta"), codex.join("beta")).unwrap();
+    std::os::unix::fs::symlink("/nowhere/gamma", claude.join("gamma")).unwrap();
+    let project = root.join("work/app");
+    write_skill(&project.join(".agents/skills"), "local", "Project skill");
+    let mut c = ctx(&root);
+    c.settings.projects = vec![project];
+    c.settings.hosts = vec![crate::hosts::Host { name: "box".into(), ssh: "me@box".into() }];
+    store::save_last_change(&c.paths, Some(&store::LastChange { label: "Sync 2 skills".into(), journal: Default::default() }));
+    (home, c)
+}
+
+#[test]
+fn wire_state_round_trips() {
+    use crate::scan::Placement;
+    let (_home, mut c) = wire_home();
+    let (code, out, err) = go(&["wire", "state"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    let got: crate::wire::WireState = serde_json::from_str(&out).unwrap();
+    let want = crate::wire::state(&Scope::Global, &c.paths, &c.settings);
+    assert_eq!(got.version, want.version);
+    assert_eq!(got.version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(got.paths, want.paths);
+    assert_eq!(got.settings, want.settings);
+    assert!(got.settings.hosts.is_empty(), "hosts stay on this machine");
+    assert_eq!(got.settings.projects, c.settings.projects);
+    assert_eq!(got.scope, want.scope);
+    assert_eq!(got.inv, want.inv);
+    assert_eq!(got.mcp, want.mcp);
+    assert_eq!(got.stats, want.stats);
+    assert_eq!(got.last_change, want.last_change);
+    assert_eq!(got.last_change.as_deref(), Some("Sync 2 skills"));
+    assert_eq!(got.detected, want.detected);
+    assert_eq!(got.mcp_detected, want.mcp_detected);
+
+    // The fixture covers every placement, and both scopes' counts.
+    let placements: Vec<&Placement> = got.inv.skills.iter().flat_map(|s| &s.placements).collect();
+    assert!(placements.contains(&&Placement::Dir) && placements.contains(&&Placement::Linked) && placements.contains(&&Placement::Missing));
+    assert!(placements.iter().any(|p| matches!(p, Placement::Link(_))) && placements.iter().any(|p| matches!(p, Placement::Broken(_))));
+    assert!(got.inv.get("alpha").unwrap().source.is_some());
+    assert_eq!(got.stats.len(), 2);
+    assert_eq!(got.stats[0].0, Scope::Global);
+    assert_eq!(got.stats[0].1.total, 3);
+    assert_eq!(got.stats[1].1.total, 1);
+    assert!(got.mcp.get("gl").is_some() && got.mcp.get("web").is_some());
+    assert_eq!(got.detected.len(), crate::agents::AGENTS.len());
+    assert_eq!(got.mcp_detected.len(), crate::mcp::agents::MCP_AGENTS.len());
+}
+
+#[test]
+fn wire_state_masks_everything() {
+    let home = mcp_home();
+    let (code, out, _) = go(&["wire", "state"], &mut ctx(home.path()));
+    assert_eq!(code, 0);
+    for secret in FIXTURES {
+        assert!(!out.contains(secret), "{secret} leaked: {out}");
+    }
+    let state: crate::wire::WireState = serde_json::from_str(&out).unwrap();
+    let gl = state.mcp.get("gl").unwrap();
+    assert!(!gl.diffs.is_empty(), "the args differ, so their written values are in the state");
+    let cursor = gl.copies.iter().find(|c| c.extras.contains_key("extraSecret")).unwrap();
+    assert_eq!(cursor.extras["extraSecret"], serde_json::Value::Null, "extras travel as names only");
+}
+
+#[test]
+fn wire_server_is_unmasked() {
+    let home = mcp_home();
+    let mut c = ctx(home.path());
+    let (code, out, _) = go(&["wire", "server", "gl"], &mut c);
+    assert_eq!(code, 0);
+    assert!(out.contains("FIXTURE_ENV_SECRET") && out.contains("FIXTURE_ARG_SECRET"), "{out}");
+    assert!(!out.contains("FIXTURE_EXTRA_SECRET"), "extras travel as names only");
+    let server: crate::mcp::scan::McpServer = serde_json::from_str(&out).unwrap();
+    assert_eq!(server.name, "gl");
+    let (code, _, err) = go(&["wire", "server", "nope"], &mut c);
+    assert_eq!(code, 1);
+    assert!(err.contains("nope"), "{err}");
+}
+
+#[test]
+fn wire_skill_md_and_hash_read_the_skill_folder() {
+    let (_home, mut c) = wire_home();
+    let (code, out, _) = go(&["wire", "skill-md", "alpha"], &mut c);
+    assert_eq!(code, 0);
+    assert_eq!(json(&out), serde_json::json!({ "body": "line one\nline two" }));
+    let (code, out, _) = go(&["wire", "skill-hash", "alpha"], &mut c);
+    assert_eq!(code, 0);
+    let hash = crate::planid::tree_hash(&c.paths.home.join(".agents/skills/alpha")).unwrap();
+    assert_eq!(json(&out), serde_json::json!({ "hash": hash }));
+    let project = c.settings.projects[0].to_str().unwrap().to_string();
+    let (code, out, _) = go(&["--project", &project, "wire", "skill-md", "local"], &mut c);
+    assert_eq!(code, 0);
+    assert_eq!(json(&out)["body"], "line one\nline two");
+    let (code, _, err) = go(&["wire", "skill-md", "nope"], &mut c);
+    assert_eq!(code, 1);
+    assert!(err.contains("nope"), "{err}");
+}
+
+#[test]
+fn wire_is_hidden_from_help() {
+    let home = tempfile::tempdir().unwrap();
+    let (code, out, _) = go(&["--help"], &mut ctx(home.path()));
+    assert_eq!(code, 0);
+    assert!(out.contains("skills") && !out.contains("wire"), "{out}");
+    assert_eq!(run(vec!["wire".into(), "--help".into()]), Some(0), "wire still routes to the CLI");
+}

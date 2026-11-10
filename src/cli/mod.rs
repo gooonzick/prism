@@ -20,6 +20,7 @@ pub mod setup;
 mod skills;
 #[cfg(test)]
 mod tests;
+mod wire;
 
 /// Process exit codes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,7 +84,7 @@ impl Out<'_> {
 }
 
 /// Words that route to the CLI. Anything else (a folder, Rune's `--snap`) opens the window.
-const SUBCOMMANDS: &[&str] = &["agents", "targets", "skills", "mcp", "projects", "undo", "doctor", "setup", "hosts"];
+const SUBCOMMANDS: &[&str] = &["agents", "targets", "skills", "mcp", "projects", "undo", "doctor", "setup", "hosts", "wire"];
 
 /// Whether `args` are a command line: help or the version, or a subcommand, maybe after the
 /// global flags (`--json`, `--project DIR`, `--host NAME`). Everything else is the window's.
@@ -165,6 +166,12 @@ enum Command {
         #[command(subcommand)]
         command: hosts::Cmd,
     },
+    /// The window's view of this machine, as JSON, for a window on another one.
+    #[command(hide = true)]
+    Wire {
+        #[command(subcommand)]
+        command: wire::Cmd,
+    },
 }
 
 /// `None` when `args` aren't a command line (see [`is_cli`]), so the caller opens the window.
@@ -235,6 +242,10 @@ fn execute(cli: Cli, args: &[&str], ctx: &mut Ctx, out: &mut dyn Write, err: &mu
         Command::Setup => setup::run(ctx, &mut out),
         Command::Hosts { .. } if cli.global.project.is_some() => usage(err, "hosts are Prism's own settings; drop --project"),
         Command::Hosts { command } => hosts::run(command, ctx, &mut out, err),
+        Command::Wire { command } => match ctx.scope(cli.global.project.as_deref()) {
+            Ok(scope) => wire::run(command, ctx, &scope, &mut out, err),
+            Err(e) => usage(err, &e),
+        },
     };
     exit as i32
 }

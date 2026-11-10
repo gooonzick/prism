@@ -3,8 +3,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 /// A piece of an env or header value: literal text or a reference to an environment variable.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Part {
     Text(String),
     Var { name: String, default: Option<String> },
@@ -12,7 +14,7 @@ pub enum Part {
 
 /// An env or header value in agent-neutral form: `Bearer ${TOKEN}` is `[Text("Bearer "), Var(TOKEN)]`,
 /// whatever syntax the agent wrote it in.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvValue(pub Vec<Part>);
 
 impl EnvValue {
@@ -74,21 +76,21 @@ impl EnvValue {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Transport {
     Stdio { command: String, args: Vec<String>, env: BTreeMap<String, EnvValue>, cwd: Option<String> },
     /// `sse` where the agent tells SSE apart from streamable HTTP.
     Http { url: String, headers: BTreeMap<String, EnvValue>, sse: bool },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Server {
     pub name: String,
     pub transport: Transport,
 }
 
 /// Where a copy lives, as Prism shows it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Place {
     Global,
     /// Claude Code's local scope: `projects[<path>].mcpServers` in `~/.claude.json`. Belongs to that project.
@@ -102,17 +104,34 @@ pub enum Place {
 pub type Extras = serde_json::Map<String, serde_json::Value>;
 
 /// One agent's copy of a server. (Not `Copy`: that would shadow the trait.)
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct McpCopy {
     /// Index into `mcp::agents::MCP_AGENTS`.
     pub agent: usize,
     pub file: PathBuf,
     pub place: Place,
     pub server: Server,
+    /// Serialized as key names only: extras may hold secrets, and their values aren't shown.
+    #[serde(with = "extra_keys")]
     pub extras: Extras,
     pub enabled: bool,
     /// `Some(app name)` when an app manages this copy; Prism doesn't edit it.
     pub read_only: Option<String>,
+}
+
+/// [`Extras`] as their key names: a list of strings out, keys with `null` values back in.
+mod extra_keys {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::Extras;
+
+    pub fn serialize<S: Serializer>(extras: &Extras, s: S) -> Result<S::Ok, S::Error> {
+        extras.keys().collect::<Vec<_>>().serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Extras, D::Error> {
+        Ok(Vec::<String>::deserialize(d)?.into_iter().map(|k| (k, serde_json::Value::Null)).collect())
+    }
 }
 
 /// The app that owns a server whose command lives inside an app bundle

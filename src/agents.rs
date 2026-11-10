@@ -6,8 +6,10 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 /// Home and config folders, read once from the environment so tests can point them elsewhere.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Paths {
     pub home: PathBuf,
     /// `$XDG_CONFIG_HOME`, else `~/.config`.
@@ -53,7 +55,7 @@ impl Paths {
 }
 
 /// Global skills (the home folder) or one project's.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Scope {
     Global,
     Project(PathBuf),
