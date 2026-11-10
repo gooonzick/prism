@@ -4,20 +4,23 @@
 use rune::El;
 use rune_kit::Kit;
 
-use super::{Card, Notice, Tone, item_row, loading, text};
+use super::{Card, Notice, Tone, color, item_row, loading, text, ty};
 
 enum Entry {
     /// A subject and its lines, shown as an item row with the lines as a hint.
     Group(String, Vec<String>),
     Line(String),
+    /// A muted remark in place of changes, one Label line that wraps.
+    Note(String),
 }
 
 /// A plan as the caller words it. `build` gives, in order: an optional warning notice, then a
-/// card labelled with the heading holding the groups and lines (or a loading line while the
-/// plan is computed), a card "Skipped (n)" and a card "Heads-up", each left out when empty. A
-/// failure (`failed`) replaces the cards with one bad notice keyed `<key>-failed`.
+/// card labelled with the heading holding the groups, lines and notes in the order given (then a
+/// loading line while the plan is computed), a card "Skipped (n)" and a card "Heads-up", each
+/// left out when empty. A failure (`failed`) replaces the cards with one bad notice keyed
+/// `<key>-failed`.
 ///
-/// Keys: `<key>-changes`, `<key>-group-<i>`, `<key>-line-<i>`, `<key>-waiting`,
+/// Keys: `<key>-changes`, `<key>-group-<i>`, `<key>-line-<i>`, `<key>-note-<i>`, `<key>-waiting`,
 /// `<key>-skipped`, `<key>-heads-up`, `<key>-failed`.
 pub struct Plan {
     key: String,
@@ -54,6 +57,13 @@ impl Plan {
         self
     }
 
+    /// A muted remark in the changes card, in the Label style, wrapping: "Nothing to do.",
+    /// "Pick the copy to copy from.", why the plan can't be asked for yet.
+    pub fn note(mut self, s: impl Into<String>) -> Self {
+        self.entries.push(Entry::Note(s.into()));
+        self
+    }
+
     /// What won't be touched and why, one warning line each; no card when empty.
     pub fn skipped(mut self, items: Vec<String>) -> Self {
         self.skipped = items;
@@ -84,7 +94,8 @@ impl Plan {
         self
     }
 
-    /// The blocks for `DialogFrame::body`, top to bottom.
+    /// The blocks for `DialogFrame::body`, top to bottom. The changes card is drawn only when it
+    /// has a group, a line, a note or a loading line: a heading alone draws nothing.
     pub fn build(self, k: &Kit) -> Vec<El> {
         let key = self.key;
         let mut out: Vec<El> = self.notice.into_iter().collect();
@@ -97,7 +108,7 @@ impl Plan {
         if let Some(h) = self.heading {
             changes = changes.label(h);
         }
-        let (mut groups, mut lines) = (0, 0);
+        let (mut groups, mut lines, mut notes) = (0, 0, 0);
         for entry in self.entries {
             changes = changes.row(match entry {
                 Entry::Group(subject, parts) => {
@@ -107,6 +118,10 @@ impl Plan {
                 Entry::Line(s) => {
                     lines += 1;
                     text::body(k, s).key(format!("{key}-line-{}", lines - 1))
+                }
+                Entry::Note(s) => {
+                    notes += 1;
+                    rune::text(s).font(ty::label(k)).color(color::text_muted(k)).wrap().key(format!("{key}-note-{}", notes - 1))
                 }
             });
         }

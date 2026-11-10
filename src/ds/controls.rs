@@ -63,11 +63,12 @@ pub fn reveal(shown: bool, place: Place) -> Button {
     quiet(label, place).icon(icon)
 }
 
-/// A switch at the inspector's control height. The light theme gets the kit's standard switch:
+/// A switch at today's size: switches are not buttons, so `Place` does not apply. Dark gets the
+/// kit's compact switch at its default (Mini, 36 × 16); light gets the standard switch, because
 /// off, the compact one disappears on a light pane (and the standard one on a dark pane). The
 /// caller adds `label`, `hide_label`, `on_toggle`, then builds and keys it.
 pub fn switch(k: &Kit, on: bool) -> Switch {
-    let s = Switch::new(on).control_size(Place::Inspector.control());
+    let s = Switch::new(on);
     if k.dark { s } else { s.standard() }
 }
 
@@ -84,12 +85,20 @@ pub struct SecretInput {
 /// A `SecretInput` over `edit`, shown when `shown`; `on_toggle` flips `shown`. The field takes
 /// the width left beside the eye.
 pub fn secret_input<S: 'static>(edit: &TextEdit, on_edit: impl Fn(&mut S) -> &mut TextEdit + 'static, shown: bool, on_toggle: impl Fn(&mut S) + 'static) -> SecretInput {
-    let input = TextInput::new(edit).width(None).secure().revealed(shown).on_edit(on_edit);
-    let (label, icon) = if shown { ("Hide value", &glyphs::EYE_OFF) } else { ("Show value", &glyphs::EYE) };
-    SecretInput { input, eye: icon_button(icon, label, Place::Inspector).on_press(on_toggle), key: None, eye_key: None }
+    let mut s = SecretInput::unwired(edit, shown, on_toggle);
+    s.input = s.input.on_edit(on_edit);
+    s
 }
 
 impl SecretInput {
+    /// The field with no edit handler, so typing changes nothing: the gallery's, which has no
+    /// state to edit.
+    pub(super) fn unwired<S: 'static>(edit: &TextEdit, shown: bool, on_toggle: impl Fn(&mut S) + 'static) -> SecretInput {
+        let input = TextInput::new(edit).width(None).secure().revealed(shown);
+        let (label, icon) = if shown { ("Hide value", &glyphs::EYE_OFF) } else { ("Show value", &glyphs::EYE) };
+        SecretInput { input, eye: icon_button(icon, label, Place::Inspector).on_press(on_toggle), key: None, eye_key: None }
+    }
+
     /// The field's accessible name.
     pub fn label(mut self, l: impl Into<String>) -> Self {
         self.input = self.input.label(l);

@@ -5,9 +5,9 @@ use rune::{El, TextEdit, Tx, col, row};
 use rune_kit::{Kit, glyphs};
 
 use super::{
-    Card, Inspector, ListRow, MenuAction, Notice, Page, Place, Plan, Selection, Tone, button, color, copy_button, danger, dot, empty,
+    Card, Inspector, ListRow, MenuAction, Notice, Page, Place, Plan, SecretInput, Selection, Tone, button, color, copy_button, danger, dot, empty,
     empty_action, field, field_pair, filter, icon_button, item_row, loading, markdown, overflow, pair_row, plain_row, pressable, primary,
-    quiet, reveal, secret_input, segments, size, space, stacked_row, status, switch, tag, text,
+    quiet, reveal, segments, size, space, stacked_row, status, switch, tag, text,
 };
 
 const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGq0e6m3cX9y5Vb8nqE2Yt7kU1dJw4LrP0sZf9hQ3xTa work@laptop";
@@ -85,10 +85,10 @@ fn plan(k: &Kit) -> Vec<El> {
 
 /// A switch off and on, the reveal button in both states, a secret field hidden and shown.
 fn inspector_controls<S: 'static>(k: &Kit) -> El {
-    // The gallery is not editable: an edit goes to a throwaway field.
+    // Like the gallery's other fields, edits are not wired.
     let secret = |shown: bool| {
         let edit = TextEdit::new("hunter2-fake-token").secure();
-        secret_input(&edit, |_: &mut S| Box::leak(Box::new(TextEdit::new(""))), shown, nothing::<S>()).label("Value").build(k)
+        SecretInput::unwired(&edit, shown, nothing::<S>()).label("Value").build(k)
     };
     col()
         .w_full()

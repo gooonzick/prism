@@ -455,6 +455,11 @@ mod dialog {
         assert!(ok[1] >= 0.0 && ok[1] + ok[3] <= 520.0, "footer button at y {} h {}", ok[1], ok[3]);
         let body = rt.presented("d-body").unwrap().0;
         assert!(body[3] < 2000.0, "body is {} high, it does not scroll", body[3]);
+        assert!(p[0] >= 16.0 && p[0] + p[2] <= 860.0 - 16.0, "panel spans {}..{} in the 860 window", p[0], p[0] + p[2]);
+        // The body's content keeps its height and the frame clips it: it scrolls.
+        let block = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("block")).expect("no body block");
+        assert_eq!(block.rect[3], 2000.0, "the body's content was squeezed");
+        assert!(block.visible[3] < block.rect[3] && block.visible[3] <= body[3] + 0.5, "the body shows {} of {}", block.visible[3], block.rect[3]);
     }
 
     fn cancel_only(_: &Shown, _: &mut Cx<Shown>) -> El {
@@ -906,7 +911,8 @@ mod inspector_additions {
         let plan = match s {
             0 => plan.group("find-skills", vec!["link into Claude Code".into(), "update".into()]).group("pdf", vec!["link into Cursor".into()]).skipped(vec![]).heads_up(vec![]),
             1 => plan.line("Edit plata in Cursor").failed("prism is not installed on work"),
-            _ => plan.waiting("Asking work for the plan…"),
+            2 => plan.waiting("Asking work for the plan…"),
+            _ => plan.note("Pick the copy to copy from."),
         };
         col().w_full().padding(16.0).gap(16.0).children(plan.build(&k))
     }
@@ -921,6 +927,9 @@ mod inspector_additions {
         assert_eq!(groups().failed("boom").build(&k).len(), 1, "a failure replaces the cards");
         let warn = || Notice::new(Tone::Warn, "Only skills in .agents are synced").build(&k);
         assert_eq!(groups().notice(warn()).build(&k).len(), 2, "the notice goes on top of the cards");
+
+        assert!(Plan::new("p").heading("Changes").build(&k).is_empty(), "a heading alone draws a card");
+        assert_eq!(Plan::new("p").heading("Changes").note("Nothing to do.").build(&k).len(), 1, "a note alone is a changes card");
 
         let mut rt = run(0u8, plan_view, (500.0, 700.0));
         let changes = rect(&rt, "p-changes");
@@ -942,6 +951,14 @@ mod inspector_additions {
         let changes = rect(&rt, "p-changes");
         let spinner = rt.elements().into_iter().find(|e| e.role == "progressbar" && !e.exiting).expect("no spinner");
         assert!(inside(spinner.rect, changes), "the spinner is not in the changes card");
+
+        rt.update(|s, _| *s = 3);
+        rt.frame(1.0);
+        let changes = rect(&rt, "p-changes");
+        assert!(inside(rect(&rt, "p-note-0"), changes), "the note is not in the changes card");
+        let note = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("p-note-0")).unwrap();
+        assert_eq!(note.text_color, Some(color::text_muted(&k)), "the note is not muted");
+        assert!((note.rect[3] - ty::label(&k).line_height).abs() <= 0.5, "the note is not one Label line: {}", note.rect[3]);
     }
 
     fn reveal_view(s: &bool, _: &mut Cx<bool>) -> El {
@@ -1002,7 +1019,9 @@ mod inspector_additions {
             rect(&rt, "sw")
         };
         let (light, dark) = (w(false), w(true));
-        assert_eq!(dark[3], 24.0, "the dark switch is not at Place::Inspector height");
+        // Today's sizes: the kit's default (Mini, 36 × 16) in dark, the standard switch in light.
+        assert_eq!((dark[2], dark[3]), (36.0, 16.0), "the dark switch is not today's Mini");
+        assert_eq!(light[3], 16.0, "the light switch is not 16 high");
         assert_ne!(light[2], dark[2], "the light theme does not use the standard switch");
     }
 }
