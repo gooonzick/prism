@@ -1,12 +1,13 @@
 //! Every block once, on one screen (`--scene ds`), so the system can be reviewed in both themes
 //! before the screens use it. Generic over the app's state; every handler does nothing.
 
-use rune::{El, TextEdit, col, row};
+use rune::{El, TextEdit, Tx, col, row};
 use rune_kit::{Kit, glyphs};
 
 use super::{
-    Card, Inspector, ListRow, MenuAction, Notice, Page, Place, Tone, button, color, copy_button, danger, dot, empty, field, field_pair,
-    filter, icon_button, item_row, overflow, pair_row, plain_row, pressable, primary, quiet, size, space, stacked_row, status, tag, text,
+    Card, Inspector, ListRow, MenuAction, Notice, Page, Place, Selection, Tone, button, color, copy_button, danger, dot, empty, empty_action,
+    field, field_pair, filter, icon_button, item_row, loading, overflow, pair_row, plain_row, pressable, primary, quiet, segments, size,
+    space, stacked_row, status, tag, text,
 };
 
 const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGq0e6m3cX9y5Vb8nqE2Yt7kU1dJw4LrP0sZf9hQ3xTa work@laptop";
@@ -30,15 +31,30 @@ pub fn gallery<S: 'static>(k: &Kit, layer: &mut Vec<El>) -> El {
         .child(section(k, "Type", type_ladder(k)))
         .child(section(k, "Status", statuses(k)))
         .child(section(k, "Notices", notices(k)))
-        .child(section(k, "Controls", controls::<S>(k, layer)));
-    let cards = col().w(320.0).h_full().min_h(0.0).padding(size::PANE_EDGE).gap(space::S4).children(cards::<S>(k).into_iter().flatten());
+        .child(section(k, "Controls", controls::<S>(k, layer)))
+        .child(section(k, "Selection", summary_line::<S>(k)));
+    let cards = col()
+        .w(320.0)
+        .h_full()
+        .min_h(0.0)
+        .padding(size::PANE_EDGE)
+        .gap(space::S4)
+        .children(cards::<S>(k).into_iter().flatten());
     col().key("ds-gallery").w_full().h_full().fill(color::pane(k)).child(
-        row().w_full().h_full().items_start().child(blocks).child(cards).child(col().grow(1.0).min_w(0.0).h_full().child(page::<S>(k))).child(
+        row().w_full().h_full().items_start().child(blocks).child(cards).child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .h_full()
+                .child(col().w_full().grow(1.0).min_h(0.0).child(page::<S>(k)))
+                .child(col().w_full().px(size::PANE_EDGE).pb(size::PANE_EDGE).child(section(k, "States", states(k)))),
+        ).child(
             col()
                 .w(size::INSPECTOR_MAX)
                 .h_full()
                 .border(1.0, color::hairline(k))
-                .child(inspector::<S>(k, layer)),
+                .child(inspector::<S>(k, layer))
+                .child(col().w_full().grow(1.0).min_h(0.0).child(picking::<S>(k))),
         ),
     )
 }
@@ -163,5 +179,53 @@ fn inspector<S: 'static>(k: &Kit, layer: &mut Vec<El>) -> El {
         )
         .notice(Notice::new(Tone::Warn, "IdentityFile ~/.ssh/id_old is missing").build(k))
         .card(Card::new("gallery-inspector-card").label("Options").row(pair_row(k, "ServerAliveInterval", text::value(k, "30"))).build(k))
+        .build(k)
+}
+
+/// The selection line while nothing is picked: summary and an action.
+fn summary_line<S: 'static>(k: &Kit) -> El {
+    Selection::new(false, false, true, nothing::<S>())
+        .label("Select all shown")
+        .summary("5 hosts in ~/.ssh/config")
+        .action(quiet("Clean up 1", Place::List).build(k))
+        .build(k)
+}
+
+fn states(k: &Kit) -> El {
+    col()
+        .w_full()
+        .gap(space::S2)
+        .child(loading(k, "Connecting…"))
+        .child(empty_action(k, "Can't reach work", "Connection timed out", button("Retry", Place::List).build(k)))
+}
+
+/// A page whose rows can be picked: segments, the selection line with rows picked (the bulk
+/// bar), picked and selected rows with a trailing status, and a footer.
+fn picking<S: 'static>(k: &Kit) -> El {
+    let labels = ["All 5", "Failing 1", "Patterns 1"].map(String::from);
+    let pick = |key: &str, name: &str, on: bool| {
+        ListRow::new(format!("gallery-pick-{key}"), name).pick(on, format!("Select {name}"), |_: &mut S, _: &mut Tx| {}).pick_key(format!("gallery-check-{key}"))
+    };
+    let footer = col()
+        .w_full()
+        .gap(space::S2)
+        .child(text::label(k, "Or add hosts from another config file"))
+        .child(row().gap(space::S2).child(button("Choose file…", Place::List).build(k)).child(quiet("Import all", Place::List).build(k)));
+    Page::new("gallery-picking")
+        .segments(segments(&labels, Some(0), "Show", |_: &mut S, _, _: &mut Tx| {}).build(k))
+        .selection(
+            Selection::new(false, true, true, nothing::<S>())
+                .picked(2, nothing::<S>())
+                .action(button("Test", Place::List).build(k))
+                .action(button("Copy to…", Place::List).build(k))
+                .danger(danger("Remove…", Place::List).build(k))
+                .build(k),
+        )
+        .rows([
+            pick("work", "work", true).meta("Picked").trailing(status(k, Tone::Ok, "Reachable")).build(k, nothing::<S>()),
+            pick("github", "github", true).meta("Picked and selected").selected(true).trailing(status(k, Tone::Ok, "Reachable")).build(k, nothing::<S>()),
+            pick("pi", "pi", false).trailing(status(k, Tone::Bad, "Timed out")).build(k, nothing::<S>()),
+        ])
+        .footer(footer)
         .build(k)
 }

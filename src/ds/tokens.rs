@@ -51,6 +51,9 @@ pub mod size {
     pub const FIELD_SHORT: f32 = 96.0;
     /// How far a focused field's ring reaches outside the field.
     pub const FOCUS_RING: f32 = 3.0;
+    /// A list row's trailing column (`ListRow::trailing`): a status or a short value, end-aligned,
+    /// so the column lines up from row to row.
+    pub const ROW_TRAILING: f32 = 104.0;
 }
 
 /// Where a control sits, which fixes its height: 24 in the inspector, 28 in lists, filters,
@@ -128,6 +131,10 @@ pub mod color {
     }
     pub fn selected(k: &Kit) -> Color {
         k.c.layer_02
+    }
+    /// A picked (ticked) row that is not the selected one (`ListRow::pick`).
+    pub fn checked(k: &Kit) -> Color {
+        k.c.layer_01
     }
     pub fn hover(k: &Kit) -> Color {
         k.c.hover

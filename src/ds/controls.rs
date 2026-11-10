@@ -3,8 +3,8 @@
 
 use std::rc::Rc;
 
-use rune::{El, Icon, TextEdit, text};
-use rune_kit::{Button, ButtonVariant, IconButton, IconButtonVariant, Kit, Menu, MenuItem, TextInput, glyphs};
+use rune::{El, Icon, TextEdit, Tx, text};
+use rune_kit::{Button, ButtonVariant, IconButton, IconButtonVariant, Kit, Menu, MenuItem, SegmentedControl, TextInput, glyphs};
 
 use super::Place;
 
@@ -64,6 +64,14 @@ pub fn filter(edit: &TextEdit, placeholder: &str) -> TextInput {
         input = input.clear_button();
     }
     input
+}
+
+/// Segments that narrow a list ("All 12", "Broken 1"), for `Page::segments`: as wide as the
+/// labels need, at the list's control height (the kit's segments are 28, `Place::List`). `label`
+/// is the accessible name of the choice ("Show"). The caller adds a key, then builds it.
+pub fn segments<S: 'static>(labels: &[String], current: Option<usize>, label: &str, on_pick: impl Fn(&mut S, usize, &mut Tx) + 'static) -> SegmentedControl {
+    let on_pick = Rc::new(on_pick);
+    SegmentedControl::new(labels, current).label(label).fit().on_pick(move |s: &mut S, i: usize, tx: &mut Tx| on_pick(s, i, tx))
 }
 
 /// A toolbar title, in the kit's toolbar type, at the leading edge. It truncates before the

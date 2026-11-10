@@ -512,3 +512,205 @@ mod motion_and_gallery {
         assert!(old(&rt).is_none(), "the old body is gone");
     }
 }
+
+mod page_additions {
+    use super::*;
+    use rune::{Cx, El, Env, Mods, PhysicalInput, Runtime, TextEdit, Tx, col};
+
+    fn env() -> Env {
+        Env { system_dark: false, scale: 1.0 }
+    }
+
+    fn run<S: 'static>(state: S, view: fn(&S, &mut Cx<S>) -> El, size: (f32, f32)) -> Runtime<S> {
+        let mut rt = Runtime::new(state, view, size, env());
+        rt.frame(0.0);
+        rt
+    }
+
+    fn rect<S: 'static>(rt: &Runtime<S>, key: &str) -> [f32; 4] {
+        rt.presented(key).unwrap_or_else(|| panic!("no {key}")).0
+    }
+
+    fn click<S: 'static>(rt: &mut Runtime<S>, key: &str) {
+        let (x, y) = rt.find(key).unwrap_or_else(|| panic!("no {key}"));
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(0.0);
+    }
+
+    fn row(k: &Kit, name: &str) -> El {
+        ListRow::new(format!("skill-{name}"), name).build(k, |_: &mut ()| {})
+    }
+
+    fn with_segments(_: &(), _: &mut Cx<()>) -> El {
+        let k = Kit::neutral(false);
+        let edit = TextEdit::new("");
+        let labels = vec!["All 3".to_string(), "Broken 1".to_string()];
+        Page::new("page")
+            .filter(filter(&edit, "Filter").build(&k).key("filter"))
+            .segments(segments(&labels, Some(0), "Show", |_: &mut (), _, _: &mut Tx| {}).build(&k).key("segments"))
+            .count("3 skills")
+            .rows([row(&k, "a")])
+            .build(&k)
+    }
+
+    #[test]
+    fn segments_sit_between_filter_and_status() {
+        let rt = run((), with_segments, (400.0, 600.0));
+        let y = |key: &str| rect(&rt, key)[1];
+        assert!(y("filter") < y("segments"), "filter {} segments {}", y("filter"), y("segments"));
+        assert!(y("segments") < y("count"), "segments {} count {}", y("segments"), y("count"));
+        assert!(y("count") < y("skill-a"), "count {} row {}", y("count"), y("skill-a"));
+        assert_eq!(rect(&rt, "segments")[3], 28.0, "segments sit at the list's control height");
+    }
+
+    fn picking(_: &(), _: &mut Cx<()>) -> El {
+        let k = Kit::neutral(false);
+        Page::new("page")
+            .selection(Selection::new(false, false, true, |_: &mut ()| {}).summary("2 skills").build(&k))
+            .rows(["a", "b"].map(|n| {
+                ListRow::new(format!("skill-{n}"), n).pick(n == "b", format!("Select {n}"), |_: &mut (), _: &mut Tx| {}).pick_key(format!("check-{n}")).build(&k, |_: &mut ()| {})
+            }))
+            .build(&k)
+    }
+
+    #[test]
+    fn pick_checkbox_lines_up_with_select_all() {
+        let rt = run((), picking, (400.0, 600.0));
+        let (all, a) = (rect(&rt, "check-all"), rect(&rt, "check-a"));
+        assert!((all[0] - a[0]).abs() <= 0.5, "select-all at x {}, row checkbox at x {}", all[0], a[0]);
+        assert!((all[2] - a[2]).abs() <= 0.5, "select-all {} wide, row checkbox {}", all[2], a[2]);
+    }
+
+    fn fills(_: &(), _: &mut Cx<()>) -> El {
+        let k = Kit::neutral(false);
+        let pick = |key: &str, selected: bool| ListRow::new(key, key).pick(true, "Select", |_: &mut (), _: &mut Tx| {}).selected(selected).build(&k, |_: &mut ()| {});
+        col().w_full().padding(16.0).items_stretch().child(pick("picked", false)).child(pick("both", true))
+    }
+
+    #[test]
+    fn checked_row_fills_checked_selected_wins() {
+        let rt = run((), fills, (400.0, 600.0));
+        let k = Kit::neutral(false);
+        let fill = |key: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).unwrap_or_else(|| panic!("no {key}")).fill;
+        assert_eq!(fill("picked"), color::checked(&k));
+        assert_eq!(fill("both"), color::selected(&k));
+        assert_ne!(color::checked(&k), color::selected(&k));
+    }
+
+    fn trailing(_: &(), _: &mut Cx<()>) -> El {
+        let k = Kit::neutral(false);
+        let r = |key: &str, word: &str| ListRow::new(key, key).trailing(status(&k, Tone::Ok, word).key(format!("{key}-word"))).build(&k, |_: &mut ()| {});
+        Page::new("page").rows([r("short", "synced"), r("long", "not in .agents")]).build(&k)
+    }
+
+    #[test]
+    fn trailing_columns_line_up() {
+        let rt = run((), trailing, (400.0, 600.0));
+        let (a, b) = (rect(&rt, "short-trailing"), rect(&rt, "long-trailing"));
+        assert_eq!(a[2], size::ROW_TRAILING);
+        assert_eq!(b[2], size::ROW_TRAILING);
+        assert!((a[0] + a[2] - (b[0] + b[2])).abs() <= 0.5, "right edges {} and {}", a[0] + a[2], b[0] + b[2]);
+        // The words end on the column's right edge.
+        let (wa, wb) = (rect(&rt, "short-word"), rect(&rt, "long-word"));
+        assert!((wa[0] + wa[2] - (wb[0] + wb[2])).abs() <= 0.5, "words end at {} and {}", wa[0] + wa[2], wb[0] + wb[2]);
+        // The column ends on the row's content edge, `S2` inside its highlight.
+        let row = rect(&rt, "short");
+        assert!((a[0] + a[2] - (row[0] + row[2] - space::S2)).abs() <= 0.5, "the column ends at {}, the row at {}", a[0] + a[2], row[0] + row[2]);
+    }
+
+    fn bulk(_: &(), _: &mut Cx<()>) -> El {
+        let k = Kit::neutral(false);
+        let line = Selection::new(false, true, true, |_: &mut ()| {})
+            .picked(3, |_: &mut ()| {})
+            .action(button("Sync", Place::List).build(&k).key("a1"))
+            .action(button("Copy to…", Place::List).build(&k).key("a2"))
+            .danger(danger("Remove…", Place::List).build(&k).key("del"))
+            .build(&k);
+        Page::new("page").selection(line).rows([row(&k, "a")]).build(&k)
+    }
+
+    #[test]
+    fn selection_bar_keeps_danger_right() {
+        let rt = run((), bulk, (640.0, 400.0));
+        let del = rect(&rt, "del");
+        assert!((del[0] + del[2] - (640.0 - 16.0)).abs() <= 0.5, "danger ends at {}", del[0] + del[2]);
+        assert!(rt.find("bulk-bar").is_some() && rt.find("bulk-clear").is_some(), "no bulk bar");
+        let narrow = run((), bulk, (400.0, 400.0));
+        for key in ["check-all", "bulk-bar", "bulk-clear", "a1", "a2", "del"] {
+            let r = rect(&narrow, key);
+            assert!(r[0] >= 16.0 - 0.5 && r[0] + r[2] <= 400.0 - 16.0 + 0.5, "{key} spans {}..{}", r[0], r[0] + r[2]);
+        }
+        let row = rect(&narrow, "skill-a");
+        let del = rect(&narrow, "del");
+        assert!(del[1] + del[3] <= row[1], "the bar ends at {}, the first row starts at {}", del[1] + del[3], row[1]);
+    }
+
+    fn footer(_: &(), _: &mut Cx<()>) -> El {
+        let k = Kit::neutral(false);
+        let foot = col().key("footer").w_full().gap(space::S2).child(text::label(&k, "Or install straight from a repository")).child(button("List", Place::List).build(&k));
+        Page::new("page").rows((0..50).map(|i| row(&k, &format!("r{i}")))).footer(foot).build(&k)
+    }
+
+    #[test]
+    fn footer_does_not_scroll() {
+        let rt = run((), footer, (400.0, 400.0));
+        let f = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("footer")).expect("no footer");
+        assert_eq!(f.visible, f.rect, "the footer is cut: {:?} of {:?}", f.visible, f.rect);
+        assert!((f.rect[1] + f.rect[3] - (400.0 - 16.0)).abs() <= 0.5, "the footer ends at {}", f.rect[1] + f.rect[3]);
+        let list = rect(&rt, "list");
+        assert!(list[1] + list[3] <= f.rect[1], "the list ends at {}, under the footer at {}", list[1] + list[3], f.rect[1]);
+        assert!(list[3] > 100.0, "the list is only {} high", list[3]);
+    }
+
+    #[derive(Default)]
+    struct Seen {
+        cmd: Option<bool>,
+        rows: u32,
+        ticks: u32,
+    }
+
+    fn pressed(_: &Seen, _: &mut Cx<Seen>) -> El {
+        let k = Kit::neutral(false);
+        let r = ListRow::new("row", "a")
+            .pick(false, "Select a", |s: &mut Seen, _: &mut Tx| s.ticks += 1)
+            .pick_key("check-a")
+            .build_tx(&k, |s: &mut Seen, tx: &mut Tx| {
+                s.rows += 1;
+                s.cmd = Some(tx.mods().cmd);
+            });
+        col().w_full().padding(16.0).items_stretch().child(r)
+    }
+
+    #[test]
+    fn build_tx_sees_modifiers() {
+        let mut rt = run(Seen::default(), pressed, (400.0, 600.0));
+        rt.physical_input(PhysicalInput::Modifiers(Mods { cmd: true, ..Mods::default() }));
+        click(&mut rt, "row-name");
+        assert_eq!(rt.state.cmd, Some(true), "the handler did not see ⌘");
+    }
+
+    #[test]
+    fn pick_toggles_without_pressing_the_row() {
+        let mut rt = run(Seen::default(), pressed, (400.0, 600.0));
+        click(&mut rt, "check-a");
+        assert_eq!((rt.state.ticks, rt.state.rows), (1, 0));
+    }
+
+    fn states(_: &(), _: &mut Cx<()>) -> El {
+        let k = Kit::neutral(false);
+        col()
+            .w_full()
+            .child(loading(&k, "Reading the repository…").key("loading"))
+            .child(empty_action(&k, "Can't reach work", "Timed out", button("Retry", Place::List).build(&k).key("retry")).key("empty"))
+    }
+
+    #[test]
+    fn loading_is_one_line_and_empty_keeps_its_action() {
+        let rt = run((), states, (400.0, 600.0));
+        assert!(rect(&rt, "loading")[3] <= 20.0, "loading is {} high", rect(&rt, "loading")[3]);
+        let (e, b) = (rect(&rt, "empty"), rect(&rt, "retry"));
+        assert!(b[1] >= e[1] && b[1] + b[3] <= e[1] + e[3], "the button sits in the empty state");
+    }
+}
