@@ -1832,9 +1832,125 @@ fn copy_from_a_host_to_this_machine() {
     let this = crate::hosts::copy::this_machine();
     assert_eq!(notice.title, format!("Copied far to Global (~) on {this}"));
     assert!(h.rt.state.is_remote(), "box stays in view");
+    let local = h.rt.state.local.as_ref().unwrap();
+    assert_eq!(local.stats[&Scope::Global].total, 1, "this machine's counts are taken again");
+    assert!(local.global_names.contains("far"), "so the next Copy to… says Global has it");
 
     h.click_button("Undo");
     h.land_remote();
     assert!(!h.root.join(".agents/skills/far").exists(), "the toast's Undo acted here, not on box");
     assert!(remote.path().join(".agents/skills/far").is_dir());
+}
+
+/// A host that is a folder here, slow to apply.
+struct SlowApply(Box<dyn crate::hosts::runner::Runner>);
+
+impl crate::hosts::runner::Runner for SlowApply {
+    fn prism(&self, args: &[String], stdin: Option<Vec<u8>>) -> Result<crate::hosts::runner::Output, String> {
+        if args.iter().any(|a| a == "--apply") {
+            std::thread::sleep(std::time::Duration::from_millis(800));
+        }
+        self.0.prism(args, stdin)
+    }
+    fn shell(&self, script: &str, stdin: Option<Vec<u8>>) -> Result<crate::hosts::runner::Output, String> {
+        self.0.shell(script, stdin)
+    }
+}
+
+impl Harness {
+    /// "this" is this window's home; laptop is `home`, its runner wrapped by `wrap`.
+    fn with_laptop_as(&mut self, home: &Path, wrap: impl Fn(Box<dyn crate::hosts::runner::Runner>) -> Box<dyn crate::hosts::runner::Runner> + Send + Sync + 'static) {
+        let (root, home) = (self.root.clone(), home.to_path_buf());
+        let runners = std::sync::Arc::new(move |h: &crate::hosts::Host| {
+            let local = crate::hosts::runner::local_runners(&[("this", &root), ("laptop", &home)])(h);
+            if h.name == "laptop" { wrap(local) } else { local }
+        });
+        self.rt.update(move |s, _| {
+            s.settings.hosts.push(crate::hosts::Host { name: "laptop".into(), ssh: "me@laptop".into() });
+            s.make_runner = runners;
+        });
+        self.settle();
+    }
+
+    /// Lands a dialog's scopes or plan, leaving any write in flight running.
+    fn land_asks(&mut self) {
+        let start = std::time::Instant::now();
+        while self.rt.state.across_asking() {
+            assert!(start.elapsed().as_secs() < 10, "the machine never answered");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        self.rt.update(|s, _| {
+            s.poll();
+        });
+        self.settle();
+    }
+
+    /// Lands every write, one poll at a time: each toast that showed, in order.
+    fn land_toasts(&mut self) -> Vec<String> {
+        let start = std::time::Instant::now();
+        let mut seen: Vec<String> = Vec::new();
+        while self.rt.state.across_pending() || self.rt.state.across_writing() {
+            assert!(start.elapsed().as_secs() < 20, "the machine never answered");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            self.rt.update(|s, _| {
+                s.poll();
+            });
+            if let Some(n) = &self.rt.state.notice
+                && seen.last() != Some(&n.title)
+            {
+                seen.push(n.title.clone());
+            }
+        }
+        self.settle();
+        seen
+    }
+}
+
+#[test]
+fn copies_in_flight_all_land_with_their_toasts() {
+    let mut h = Harness::project();
+    skill(&h.project_dir().join(".claude/skills"), "notes");
+    h.rescan();
+    let laptop = host_home(crate::hosts::install::VERSION);
+    h.with_laptop_as(laptop.path(), |r| Box::new(SlowApply(r)));
+    h.click("skill-review");
+    h.click("copy");
+    h.land_asks();
+    h.click("copy-to-laptop-0");
+    h.land_asks();
+    h.click("copy-apply");
+    assert!(h.rt.state.across_writing(), "the first copy is in flight");
+    h.click("copy-cancel");
+    assert!(h.rt.state.copy_dialog.is_none() && h.rt.state.across_writing(), "closing leaves it running");
+
+    // A second copy, asked while the first still runs.
+    h.click("skill-notes");
+    h.click("copy");
+    h.land_asks();
+    h.click("copy-to-laptop-0");
+    h.land_asks();
+    h.click("copy-apply");
+    let toasts = h.land_toasts();
+    assert_eq!(toasts, ["Copied review to Global (~) on laptop", "Copied notes to Global (~) on laptop"]);
+    assert!(laptop.path().join(".agents/skills/review/SKILL.md").is_file() && laptop.path().join(".agents/skills/notes/SKILL.md").is_file());
+}
+
+#[test]
+fn a_double_pressed_toast_undo_runs_one_undo() {
+    let mut h = Harness::project();
+    let laptop = host_home(crate::hosts::install::VERSION);
+    let log: Log = std::sync::Arc::default();
+    let record = log.clone();
+    h.with_laptop_as(laptop.path(), move |inner| Box::new(Recorded { inner, log: record.clone() }));
+    h.copy_review_to_laptop();
+    assert!(laptop.path().join(".agents/skills/review").is_dir());
+    h.rt.update(|s, _| {
+        s.undo_toast();
+        s.undo_toast();
+    });
+    assert!(!h.rt.state.notice.as_ref().unwrap().undo, "the toast's Undo is gone once pressed");
+    h.land_remote();
+    assert!(!laptop.path().join(".agents/skills/review").exists());
+    let undos = log.lock().unwrap().iter().filter(|(argv, _)| argv.first().is_some_and(|w| w == "undo")).count();
+    assert_eq!(undos, 1, "one undo ran on laptop");
 }

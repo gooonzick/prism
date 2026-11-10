@@ -298,10 +298,11 @@ pub fn copy(s: &App, k: &Kit, layer: &mut Vec<El>) {
     }
     let machines = &s.across.machines;
     let mut scopes = col().key("copy-scopes").w_full().gap(4.0);
-    if !machines.is_empty() {
+    let here = s.other_scopes();
+    if !machines.is_empty() && !here.is_empty() {
         scopes = scopes.child(machine_heading(&s.env_label(), k));
     }
-    for (i, scope) in s.other_scopes().into_iter().enumerate() {
+    for (i, scope) in here.into_iter().enumerate() {
         let stats = s.stats.get(&scope).copied().unwrap_or_default();
         let clashes: Vec<&String> = names.iter().filter(|n| s.skill_in(&scope, n)).collect();
         let dest = scope.clone();

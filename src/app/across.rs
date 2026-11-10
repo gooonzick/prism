@@ -4,7 +4,7 @@
 //! host to this machine, or between two hosts, goes the same way. All of it runs off the UI
 //! thread: a copy streams a tar over ssh and may take seconds.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 use rune::{Latest, Waker};
@@ -148,15 +148,23 @@ impl Done {
     }
 }
 
-pub struct Applied {
-    seq: u64,
+/// A write on another machine: a copy with its plan's id, or a toast's Undo.
+enum Write {
+    Copy { job: Box<Job>, id: String, seq: u64, done: Done },
+    Undo { host: Host, machine: String },
+}
+
+/// What a write did there.
+pub struct Written {
     machine: String,
-    done: Done,
+    what: Wrote,
     result: Result<Value, String>,
 }
 
-/// The machine a toast's Undo ran on, and its answer.
-pub type Undone = (String, Result<Value, String>);
+enum Wrote {
+    Copy { seq: u64, done: Done },
+    Undo,
+}
 
 /// Copies to other machines: the open dialog's machines and pick, and the work in flight.
 #[derive(Default)]
@@ -168,8 +176,11 @@ pub struct Across {
     pub skills: Option<Target>,
     seq: u64,
     plan: Latest<(u64, Result<Value, String>)>,
-    apply: Latest<Applied>,
-    undo: Latest<Undone>,
+    /// Writes waiting their turn, oldest first: one runs at a time, and none is ever dropped.
+    writes: VecDeque<Write>,
+    /// The one running; it is never replaced, so its answer always lands.
+    write: Latest<Written>,
+    writing: bool,
     /// The MCP copy dialog's Machine and Scope menus are open.
     pub machine_menu: bool,
     pub scope_menu: bool,
@@ -177,7 +188,7 @@ pub struct Across {
 
 impl Across {
     pub(super) fn set_waker(&self, waker: Waker) {
-        for w in [&self.load as &dyn SetWaker, &self.plan, &self.apply, &self.undo] {
+        for w in [&self.load as &dyn SetWaker, &self.plan, &self.write] {
             w.set(waker.clone());
         }
     }
@@ -224,6 +235,16 @@ fn run(make: &MakeRunner, job: &Job, apply: Option<&str>) -> Result<Value, Strin
         What::Server { name, from_agent, agents } => {
             copy_server(from.as_ref(), &job.from_label, name, *from_agent, &job.from_scope, to.as_ref(), &job.to_label, &job.dest, ClaudeScope::Local, agents, apply)
         }
+    }
+}
+
+/// `prism undo` on the machine `r` reaches: its answer, or why it failed.
+fn undo_there(r: &dyn Runner) -> Result<Value, String> {
+    let out = r.prism(&["undo".into(), "--json".into()], None)?;
+    match parse(&out.stdout) {
+        Some(v) if v.get("error").is_none() && out.code == 0 => Ok(v),
+        Some(v) => Err(v["error"].as_str().map_or_else(|| why(&out), String::from)),
+        None => Err(why(&out)),
     }
 }
 
@@ -325,22 +346,35 @@ impl App {
             self.land_across_plan(seq, result);
             changed = true;
         }
-        if let Some(applied) = self.across.apply.take() {
-            self.land_applied(applied);
-            changed = true;
-        }
-        if let Some((machine, result)) = self.across.undo.take() {
-            self.land_undo(machine, result);
+        if let Some(Written { machine, what, result }) = self.across.write.take() {
+            self.across.writing = false;
+            match what {
+                Wrote::Copy { seq, done } => self.land_applied(seq, machine, done, result),
+                Wrote::Undo => self.land_undo(machine, result),
+            }
+            self.next_write();
             changed = true;
         }
         changed
+    }
+
+    /// A dialog still waits for a machine's scopes or plan.
+    #[cfg(test)]
+    pub fn across_asking(&self) -> bool {
+        self.across.load.is_pending() || self.across.plan.is_pending()
     }
 
     /// Something is still being asked of another machine.
     #[cfg(test)]
     pub fn across_pending(&self) -> bool {
         let a = &self.across;
-        a.load.is_pending() || a.plan.is_pending() || a.apply.is_pending() || a.undo.is_pending()
+        a.load.is_pending() || a.plan.is_pending() || a.write.is_pending()
+    }
+
+    /// A write runs, or waits its turn, or its answer waits for a poll.
+    #[cfg(test)]
+    pub fn across_writing(&self) -> bool {
+        self.across.writing || !self.across.writes.is_empty()
     }
 
     fn land_machines(&mut self, answers: Vec<(String, Result<MachineView, String>)>) {
@@ -443,14 +477,26 @@ impl App {
     }
 
     fn copy_across(&mut self, job: Job, id: String, seq: u64, done: Done) {
+        self.across.writes.push_back(Write::Copy { job: Box::new(job), id, seq, done });
+        self.next_write();
+    }
+
+    /// Starts the oldest waiting write once the one running has landed.
+    fn next_write(&mut self) {
+        if self.across.writing {
+            return;
+        }
+        let Some(write) = self.across.writes.pop_front() else { return };
+        self.across.writing = true;
         let make = self.make_runner.clone();
-        let machine = job.to_label.clone();
-        self.across.apply.request((job, id), move |(job, id)| Applied { seq, machine, done, result: run(&make, &job, Some(&id)) });
+        self.across.write.request(write, move |write| match write {
+            Write::Copy { job, id, seq, done } => Written { machine: job.to_label.clone(), result: run(&make, &job, Some(&id)), what: Wrote::Copy { seq, done } },
+            Write::Undo { host, machine } => Written { machine, result: undo_there(make(&host).as_ref()), what: Wrote::Undo },
+        });
     }
 
     /// A copy's answer: a toast whose Undo acts on the target, wherever the window is by then.
-    fn land_applied(&mut self, a: Applied) {
-        let Applied { seq, machine, done, result } = a;
+    fn land_applied(&mut self, seq: u64, machine: String, done: Done, result: Result<Value, String>) {
         let open = self.target_for(seq).is_some();
         let view = result.and_then(|v| Ok((v["applied"] == true, v["plan_changed"] == true, view_of(&v, &machine)?)));
         match view {
@@ -496,6 +542,9 @@ impl App {
 
     /// Reads `machine` again when it is the one in view: a copy or an undo changed it.
     fn look_again(&mut self, machine: &str) {
+        if machine == this_machine() {
+            self.recount_stash();
+        }
         if machine != self.env_label() {
             return;
         }
@@ -505,6 +554,21 @@ impl App {
             self.last_change = crate::store::load_last_change(&self.paths);
             self.rescan();
             self.refresh_stats();
+        }
+    }
+
+    /// Counts this machine's scopes again while a host is in view, so the next Copy to…
+    /// shows what a copy or an undo there changed.
+    fn recount_stash(&mut self) {
+        let Some(local) = &mut self.local else { return };
+        let targets = crate::agents::target_indices(local.settings.targets.as_deref(), &local.paths);
+        let scopes = std::iter::once(Scope::Global).chain(local.settings.projects.iter().cloned().map(Scope::Project));
+        for scope in scopes {
+            let inv = crate::scan::scan(&scope, &local.paths);
+            if scope.is_global() {
+                local.global_names = inv.skills.iter().map(|s| s.name.clone()).collect();
+            }
+            local.stats.insert(scope, crate::scan::stats_of(&inv, &targets));
         }
     }
 
@@ -601,8 +665,11 @@ impl App {
     // Undo from a toast.
 
     /// The toast's Undo: on the machine the toast names, wherever the window is.
+    /// Once pressed it is gone from the toast, so a second press can't undo a second change.
     pub fn undo_toast(&mut self) {
-        match self.notice.as_ref().and_then(|n| n.machine.clone()) {
+        let Some(n) = self.notice.as_mut().filter(|n| n.undo) else { return };
+        n.undo = false;
+        match n.machine.clone() {
             Some(machine) if machine != self.env_label() => self.undo_on(machine),
             _ => self.undo(),
         }
@@ -613,15 +680,8 @@ impl App {
         let Some(host) = self.host_named(&machine) else {
             return self.notify(format!("No saved host named {machine}"), String::new(), true);
         };
-        let make = self.make_runner.clone();
-        self.across.undo.request((host, machine), move |(host, machine)| {
-            let result = make(&host).prism(&["undo".into(), "--json".into()], None).and_then(|out| match parse(&out.stdout) {
-                Some(v) if v.get("error").is_none() && out.code == 0 => Ok(v),
-                Some(v) => Err(v["error"].as_str().map_or_else(|| why(&out), String::from)),
-                None => Err(why(&out)),
-            });
-            (machine, result)
-        });
+        self.across.writes.push_back(Write::Undo { host, machine });
+        self.next_write();
     }
 
     fn land_undo(&mut self, machine: String, result: Result<Value, String>) {
