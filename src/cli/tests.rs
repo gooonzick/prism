@@ -2060,3 +2060,189 @@ fn wire_masked_values_show_as_local() {
     assert_eq!(headers["Authorization"].masked(), "Bearer ${TOKEN}");
     assert_eq!(headers["X-Mixed"].masked(), "Bearer ***${T}");
 }
+
+// Copies to another machine: home A is this machine ("this"), home B the host "laptop".
+
+/// Every path under `root` with its kind and bytes (link targets for links), to tell that a
+/// command left a home as it was.
+fn snapshot(root: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut todo = vec![root.to_path_buf()];
+    while let Some(dir) = todo.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let meta = std::fs::symlink_metadata(&path).unwrap();
+            let bytes = if meta.file_type().is_symlink() {
+                std::fs::read_link(&path).unwrap().into_os_string().into_encoded_bytes()
+            } else if meta.is_dir() {
+                todo.push(path.clone());
+                b"/".to_vec()
+            } else {
+                std::fs::read(&path).unwrap()
+            };
+            out.push((path, bytes));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// A host home whose `prism` reports `version`, with Claude Code installed.
+fn host_home(version: &str) -> tempfile::TempDir {
+    let remote = remote_with_prism();
+    std::fs::write(remote.path().join(".local/bin/prism"), format!("#!/bin/sh\necho \"prism {version}\"\n")).unwrap();
+    std::fs::create_dir_all(remote.path().join(".claude")).unwrap();
+    remote
+}
+
+/// A ctx on home `a` whose "this" is `a` and whose saved host "laptop" is `b`.
+fn copying(a: &std::path::Path, b: &std::path::Path) -> Ctx {
+    let mut c = ctx(a);
+    c.settings.hosts.push(crate::hosts::Host { name: "laptop".into(), ssh: "me@laptop".into() });
+    c.make_runner = runner::local_runners(&[("this", a), ("laptop", b)]);
+    c
+}
+
+#[test]
+fn skill_copy_to_host_plan_then_apply() {
+    let (here, there) = (tempfile::tempdir().unwrap(), host_home(VERSION));
+    let (a, b) = (here.path(), there.path());
+    let src = sent_skill(a);
+    std::fs::create_dir_all(a.join(".agents/skills")).unwrap();
+    std::fs::rename(&src, a.join(".agents/skills/pdf")).unwrap();
+    std::fs::remove_dir(a.join("elsewhere")).unwrap();
+    let before = snapshot(a);
+    let mut c = copying(a, b);
+
+    let (code, out, err) = go(&["skills", "copy", "pdf", "--to-host", "laptop", "--to-global", "--json"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    let plan = json(&out);
+    let this = crate::hosts::copy::this_machine();
+    assert_eq!(plan["actions"], serde_json::json!([format!("Copy pdf from {this} to Global (~) (link into Claude Code) on laptop")]));
+    assert_eq!(plan["applied"], false);
+    assert!(!b.join(".agents/skills/pdf").exists(), "a plan changes nothing");
+
+    let (_, text, _) = go(&["skills", "copy", "pdf", "--to-host", "laptop", "--to-global"], &mut c);
+    assert!(text.contains("on laptop") && text.contains("--apply --plan-id"), "{text}");
+
+    let id = plan["plan_id"].as_str().unwrap();
+    let (code, out, err) = go(&["skills", "copy", "pdf", "--to-host", "laptop", "--to-global", "--apply", "--plan-id", id, "--json"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(json(&out)["applied"], true);
+    let got = b.join(".agents/skills/pdf");
+    assert_eq!(crate::planid::tree_hash(&got), crate::planid::tree_hash(&a.join(".agents/skills/pdf")));
+    assert_eq!(std::fs::read_link(got.join("link")).unwrap(), std::path::Path::new("sub/a.md"));
+    assert!(std::fs::symlink_metadata(b.join(".claude/skills/pdf")).unwrap().file_type().is_symlink());
+    assert_eq!(store::load_last_change(&Paths::isolated(b)).unwrap().label, format!("copy pdf from {this}"));
+    assert_eq!(snapshot(a), before, "this machine is unchanged");
+
+    // Again: the host has it now, and the old id is stale.
+    let (code, out, _) = go(&["skills", "copy", "pdf", "--to-host", "laptop", "--to-global", "--apply", "--plan-id", id, "--json"], &mut c);
+    assert_eq!(code, 4, "{out}");
+    let again = json(&out);
+    assert_eq!(again["plan_changed"], true);
+    assert_eq!(again["conflicts"], serde_json::json!([{ "skill": "pdf", "reason": "already in Global (~)" }]));
+}
+
+#[test]
+fn copy_skill_runs_between_any_two_machines() {
+    use crate::hosts::copy::copy_skill;
+    use crate::hosts::runner::Local;
+    let (one, two) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::create_dir_all(two.path().join(".claude")).unwrap();
+    write_skill(&one.path().join(".agents/skills"), "pdf", "Reads PDFs");
+    let from = Local { name: "box".into(), home: one.path().into() };
+    let to = Local { name: "laptop".into(), home: two.path().into() };
+    let dir = std::fs::canonicalize(one.path().join(".agents/skills/pdf")).unwrap();
+    let plan = copy_skill(&from, "box", &Scope::Global, &dir, "pdf", &to, "laptop", &Scope::Global, None).unwrap();
+    assert_eq!(plan["actions"], serde_json::json!(["Copy pdf from box to Global (~) (link into Claude Code) on laptop"]));
+    let id = plan["plan_id"].as_str().unwrap();
+    let done = copy_skill(&from, "box", &Scope::Global, &dir, "pdf", &to, "laptop", &Scope::Global, Some(id)).unwrap();
+    assert_eq!(done["applied"], true);
+    assert!(two.path().join(".agents/skills/pdf/SKILL.md").is_file());
+}
+
+/// Home A with Claude Code holding `node-srv`: a Homebrew command, a secret and a reference.
+fn server_home() -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    std::fs::write(
+        home.path().join(".claude.json"),
+        r#"{"mcpServers":{"node-srv":{"command":"/opt/homebrew/bin/node","args":["server.js"],"env":{"API_KEY":"FIXTURE_COPY_SECRET","TOKEN":"${TOKEN}"}}}}"#,
+    )
+    .unwrap();
+    home
+}
+
+#[test]
+fn mcp_copy_to_host_warns_on_paths() {
+    let (here, there) = (server_home(), host_home(VERSION));
+    let (a, b) = (here.path(), there.path());
+    let before = snapshot(a);
+    let mut c = copying(a, b);
+    let this = crate::hosts::copy::this_machine();
+
+    let (code, out, err) = go(&["mcp", "copy", "node-srv", "--to-host", "laptop", "--to", "claude", "--json"], &mut c);
+    assert_eq!(code, 0, "{out}{err}");
+    let plan = json(&out);
+    assert_eq!(plan["actions"], serde_json::json!(["Add node-srv to Claude Code on laptop"]));
+    let warnings: Vec<&str> = plan["warnings"].as_array().unwrap().iter().filter_map(|w| w.as_str()).collect();
+    let portable: Vec<&str> = warnings.iter().copied().filter(|w| w.ends_with("check it exists here") || w.ends_with("set here")).collect();
+    assert_eq!(portable, [format!("command points at /opt/homebrew/bin/node on {this}; check it exists here"), "env.TOKEN needs ${TOKEN} set here".to_string()]);
+    assert!(!b.join(".claude.json").exists(), "a plan changes nothing");
+
+    let id = plan["plan_id"].as_str().unwrap().to_string();
+    let (code, applied, err2) = go(&["mcp", "copy", "node-srv", "--to-host", "laptop", "--to", "claude", "--apply", "--plan-id", &id, "--json"], &mut c);
+    assert_eq!(code, 0, "{applied}{err2}");
+    assert_eq!(json(&applied)["applied"], true);
+    let written: serde_json::Value = json(&std::fs::read_to_string(b.join(".claude.json")).unwrap());
+    let srv = &written["mcpServers"]["node-srv"];
+    assert_eq!(srv["command"], "/opt/homebrew/bin/node");
+    assert_eq!(srv["env"]["API_KEY"], "FIXTURE_COPY_SECRET");
+    assert_eq!(srv["env"]["TOKEN"], "${TOKEN}");
+    for text in [&out, &err, &applied, &err2] {
+        assert!(!text.contains("FIXTURE_COPY_SECRET"), "{text}");
+    }
+    assert_eq!(store::load_last_change(&Paths::isolated(b)).unwrap().label, format!("copy node-srv from {this}"));
+    assert_eq!(snapshot(a), before, "this machine is unchanged");
+}
+
+#[test]
+fn mcp_receive_plan_id_covers_the_definition() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+    let mut c = ctx(home.path());
+    let args = ["mcp", "receive", "s", "--to", "claude", "--from", "box", "--source-home", "/home/me", "--json"];
+    let mut id = |command: &str| {
+        let server = crate::mcp::model::Server {
+            name: "s".into(),
+            transport: crate::mcp::model::Transport::Stdio { command: command.into(), args: vec![], env: Default::default(), cwd: None },
+        };
+        c.stdin = Some(Box::new(std::io::Cursor::new(serde_json::to_vec(&server).unwrap())));
+        let (code, out, err) = go(&args, &mut c);
+        assert_eq!(code, 0, "{out}{err}");
+        json(&out)["plan_id"].as_str().unwrap().to_string()
+    };
+    assert_ne!(id("one"), id("two"));
+    assert_eq!(id("one"), id("one"));
+}
+
+#[test]
+fn copy_to_unready_host_refuses() {
+    let (here, there) = (server_home(), host_home("0.0.0-other"));
+    let (a, b) = (here.path(), there.path());
+    write_skill(&a.join(".agents/skills"), "pdf", "Reads PDFs");
+    let (before_a, before_b) = (snapshot(a), snapshot(b));
+    let mut c = copying(a, b);
+    let refusal = format!("prism on laptop is version 0.0.0-other, not {VERSION}; run prism hosts install laptop");
+    for args in [
+        &["skills", "copy", "pdf", "--to-host", "laptop", "--to-global"][..],
+        &["mcp", "copy", "node-srv", "--to-host", "laptop", "--to", "claude"],
+    ] {
+        let (code, out, err) = go(args, &mut c);
+        assert_eq!(code, 1, "{args:?}: {out}{err}");
+        assert_eq!(err.trim(), refusal, "{args:?}");
+    }
+    assert_eq!(snapshot(a), before_a);
+    assert_eq!(snapshot(b), before_b);
+}

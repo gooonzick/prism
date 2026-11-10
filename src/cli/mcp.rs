@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use clap::{ArgGroup, Subcommand};
 use serde_json::{Value, json};
@@ -10,10 +10,12 @@ use serde_json::{Value, json};
 use super::skills::Apply;
 use super::{Ctx, Exit, Out, failed, usage};
 use crate::agents::{Paths, Scope, tilde};
-use crate::fsops::Journal;
+use crate::fsops::{Journal, content_hash};
+use crate::hosts::copy::copy_server;
 use crate::mcp::agents::{MCP_AGENTS, index_of};
 use crate::mcp::model::{EnvValue, McpCopy, Place, Server, Transport, masked_args, masked_url};
 use crate::mcp::plan::{self, ClaudeScope, EditChange, McpPlan, Request};
+use crate::mcp::portable;
 use crate::mcp::scan::{self, FieldDiff, McpServer, Status, safe_error};
 use crate::store::{self, LastChange};
 
@@ -54,7 +56,7 @@ pub enum Cmd {
         #[arg(long, value_name = "SCOPE", default_value = "local", value_parser = ["local", "project"])]
         claude_scope: String,
     },
-    /// Copy a server into other agents.
+    /// Copy a server into other agents, here or on another machine.
     Copy {
         name: String,
         #[arg(long, value_name = "AGENT", num_args = 1.., required = true)]
@@ -63,6 +65,26 @@ pub enum Cmd {
         /// definition is copied.
         #[arg(long, value_name = "AGENT")]
         from: Option<String>,
+        /// Copy to these agents on this saved host (or ssh target), in its global setup.
+        #[arg(long, value_name = "HOST")]
+        to_host: Option<String>,
+        #[command(flatten)]
+        apply: Apply,
+    },
+    /// Take a server another machine sends: its definition as JSON on stdin.
+    #[command(hide = true)]
+    Receive {
+        name: String,
+        #[arg(long, value_name = "AGENT", num_args = 1.., required = true)]
+        to: Vec<String>,
+        #[arg(long, value_name = "SCOPE", default_value = "local", value_parser = ["local", "project"])]
+        claude_scope: String,
+        /// How warnings name the sending machine.
+        #[arg(long, value_name = "LABEL")]
+        from: String,
+        /// The sending machine's home folder: paths into it may not exist here.
+        #[arg(long, value_name = "DIR")]
+        source_home: PathBuf,
         #[command(flatten)]
         apply: Apply,
     },
@@ -139,7 +161,15 @@ pub fn run(cmd: Cmd, ctx: &mut Ctx, scope: &Scope, out: &mut Out, err: &mut dyn 
                 Err(e) => return usage(err, &e),
             }
         }
-        Cmd::Copy { name, to, from, apply } => {
+        Cmd::Copy { name, to, from, to_host: Some(host), apply } => return copy_to_host(ctx, scope, &name, &to, from.as_deref(), &host, apply, out, err),
+        Cmd::Receive { name, to, claude_scope, from, source_home, apply } => {
+            let claude_scope = if claude_scope == "project" { ClaudeScope::Project } else { ClaudeScope::Local };
+            return match agent_indices(&to) {
+                Ok(to) => receive(ctx, scope, Received { name, to, claude_scope, from, source_home }, apply, out, err),
+                Err(e) => usage(err, &e),
+            };
+        }
+        Cmd::Copy { name, to, from, to_host: None, apply } => {
             let built = agent_indices(&to).and_then(|to| Ok(Request::Copy { name: name.clone(), to, from: from.as_deref().map(agent_index).transpose()? }));
             match built {
                 Ok(r) => (r, format!("copy {name}"), apply),
@@ -184,6 +214,78 @@ pub fn run(cmd: Cmd, ctx: &mut Ctx, scope: &Scope, out: &mut Out, err: &mut dyn 
     let inv = scan::scan(scope, &ctx.paths);
     match plan::plan(&inv, &request, &ctx.paths) {
         Ok(plan) => drive(ctx, plan, label, apply, immediate, out, err),
+        Err(e) => failed(out, err, &e),
+    }
+}
+
+/// A server another machine sends, and where it goes.
+struct Received {
+    name: String,
+    to: Vec<usize>,
+    claude_scope: ClaudeScope,
+    from: String,
+    source_home: PathBuf,
+}
+
+/// The receiving end of `mcp copy --to-host`: plans the definition on stdin as `mcp add` would,
+/// with heads-ups for what may not exist here. The plan id covers the definition, so a server
+/// changed on the sender since the plan is a changed plan.
+fn receive(ctx: &mut Ctx, scope: &Scope, r: Received, apply: Apply, out: &mut Out, err: &mut dyn Write) -> Exit {
+    let mut reader = ctx.stdin.take().unwrap_or_else(|| Box::new(std::io::stdin()));
+    let mut bytes = Vec::new();
+    // serde's errors quote the input, and the input holds secrets: say only what failed.
+    let server = match reader.read_to_end(&mut bytes).ok().and_then(|_| serde_json::from_slice::<Server>(&bytes).ok()) {
+        Some(s) => s,
+        None => return failed(out, err, &format!("the definition of {} on stdin can't be read", r.name)),
+    };
+    if server.name != r.name {
+        return failed(out, err, &format!("the definition on stdin is not {}", r.name));
+    }
+    let inv = scan::scan(scope, &ctx.paths);
+    let request = Request::Add { server, to: r.to, claude_scope: r.claude_scope };
+    let mut plan = match plan::plan(&inv, &request, &ctx.paths) {
+        Ok(p) => p,
+        Err(e) => return failed(out, err, &e),
+    };
+    let Request::Add { server, .. } = &request else { unreachable!("built above") };
+    plan.sent = serde_json::to_vec(server).ok().map(|b| content_hash(&b));
+    for w in portable::warnings(server, &r.source_home, &r.from) {
+        if !plan.warnings.contains(&w) {
+            plan.warnings.push(w);
+        }
+    }
+    drive(ctx, plan, format!("copy {} from {}", r.name, r.from), apply, false, out, err)
+}
+
+/// `mcp copy --to-host`: the host plans the copy into its global setup and, with the plan's
+/// id, takes the definition this machine sends. The plan id is the host's.
+#[allow(clippy::too_many_arguments)]
+fn copy_to_host(ctx: &Ctx, scope: &Scope, name: &str, to: &[String], from: Option<&str>, host: &str, a: Apply, out: &mut Out, err: &mut dyn Write) -> Exit {
+    if a.plan_id.is_some() && !a.apply {
+        return usage(err, "--plan-id only goes with --apply");
+    }
+    let (agents, from_agent) = match agent_indices(to).and_then(|to| Ok((to, from.map(agent_index).transpose()?))) {
+        Ok(found) => found,
+        Err(e) => return usage(err, &e),
+    };
+    let (host, target) = match super::hosts::ready(ctx, host) {
+        Ok(found) => found,
+        Err(e) => return failed(out, err, &e),
+    };
+    let source = super::hosts::this(ctx);
+    let label = crate::hosts::copy::this_machine();
+    let copy = |apply: Option<&str>| copy_server(source.as_ref(), label, name, from_agent, scope, target.as_ref(), &host.name, &agents, apply);
+    // --apply alone applies the plan as it is now.
+    let id = match (a.apply, a.plan_id) {
+        (false, _) => None,
+        (true, Some(id)) => Some(id),
+        (true, None) => match copy(None) {
+            Ok(plan) => plan["plan_id"].as_str().map(String::from),
+            Err(e) => return failed(out, err, &e),
+        },
+    };
+    match copy(id.as_deref()) {
+        Ok(v) => super::hosts::print_remote(out, v),
         Err(e) => failed(out, err, &e),
     }
 }

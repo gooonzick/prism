@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use super::{Ctx, Exit, Out, failed, usage};
 use crate::agents::{self, AGENTS, CANONICAL, Scope};
 use crate::fsops::Journal;
+use crate::hosts::copy::copy_skill;
 use crate::planid::{plan_id, tree_hash};
 use crate::scan::{self, Inventory, Placement};
 use crate::remote;
@@ -67,16 +68,19 @@ pub enum Cmd {
         #[command(flatten)]
         apply: Apply,
     },
-    /// Copy skills to a project or to the global setup.
+    /// Copy skills to a project or to the global setup, here or on another machine.
     Copy {
         #[arg(required = true)]
         names: Vec<String>,
-        /// The project folder to copy into.
+        /// The project folder to copy into (with --to-host, a folder on that host).
         #[arg(long, value_name = "DIR", conflicts_with = "to_global")]
         to_project: Option<PathBuf>,
         /// Copy into the global setup.
         #[arg(long)]
         to_global: bool,
+        /// Copy to this saved host (or ssh target) instead of this machine.
+        #[arg(long, value_name = "HOST")]
+        to_host: Option<String>,
         #[command(flatten)]
         apply: Apply,
     },
@@ -343,7 +347,16 @@ fn run_local(cmd: Cmd, ctx: &Ctx, scope: &Scope, out: &mut Out, err: &mut dyn Wr
         Cmd::Unlink { name, agent, apply } => unlink(ctx, scope, &inv, &name, &agent, apply, out, err),
         Cmd::Remove { names, apply } => remove(ctx, scope, &inv, names, apply, out, err),
         Cmd::Trash { name, agent, apply } => trash(ctx, scope, &inv, &name, &agent, apply, out, err),
-        Cmd::Copy { names, to_project, to_global, apply } => {
+        Cmd::Copy { names, to_project, to_global, to_host: Some(host), apply } => {
+            let dest = match (to_project, to_global) {
+                // A folder on the host: the host resolves it.
+                (Some(dir), _) => Scope::Project(dir),
+                (None, true) => Scope::Global,
+                (None, false) => return usage(err, "say where to copy: --to-project DIR or --to-global"),
+            };
+            copy_to_host(ctx, scope, &inv, names, &host, &dest, apply, out, err)
+        }
+        Cmd::Copy { names, to_project, to_global, to_host: None, apply } => {
             let dest = match dest_scope(ctx, to_project.as_deref(), to_global) {
                 Ok(d) => d,
                 Err(e) => return usage(err, &e),
@@ -458,6 +471,77 @@ fn copy(ctx: &Ctx, scope: &Scope, inv: &Inventory, names: Vec<String>, dest: Sco
         }),
     };
     drive(ctx, plan, apply, out, err)
+}
+
+/// `skills copy --to-host`: each skill's plan comes from the host. The plan id joins the
+/// host's ids, one per skill, so a change to any of them is a changed plan.
+#[allow(clippy::too_many_arguments)]
+fn copy_to_host(ctx: &Ctx, scope: &Scope, inv: &Inventory, names: Vec<String>, host: &str, dest: &Scope, a: Apply, out: &mut Out, err: &mut dyn Write) -> Exit {
+    if a.plan_id.is_some() && !a.apply {
+        return usage(err, "--plan-id only goes with --apply");
+    }
+    // A name twice would plan the same copy twice, and the second apply would find it done.
+    let names = names.into_iter().fold(Vec::new(), |mut seen: Vec<String>, n| {
+        if !seen.contains(&n) {
+            seen.push(n);
+        }
+        seen
+    });
+    let mut folders = Vec::new();
+    for n in &names {
+        let Some(s) = inv.get(n) else { return missing_skill(out, err, n, scope) };
+        match s.source.as_deref().and_then(|p| std::fs::canonicalize(p).ok()) {
+            Some(dir) => folders.push(dir),
+            None => return failed(out, err, &format!("{n} has no folder in {}", scope.title())),
+        }
+    }
+    let (host, to) = match super::hosts::ready(ctx, host) {
+        Ok(found) => found,
+        Err(e) => return failed(out, err, &e),
+    };
+    let from = super::hosts::this(ctx);
+    let label = crate::hosts::copy::this_machine();
+    let each = |name: &str, dir: &Path, apply: Option<&str>| copy_skill(from.as_ref(), label, scope, dir, name, to.as_ref(), &host.name, dest, apply);
+    let mut plans = Vec::new();
+    for (n, dir) in names.iter().zip(&folders) {
+        match each(n, dir, None) {
+            Ok(p) => plans.push(p),
+            Err(e) => return failed(out, err, &e),
+        }
+    }
+    let ids: Vec<String> = plans.iter().map(|p| p["plan_id"].as_str().unwrap_or_default().to_string()).collect();
+    let mut merged = merge(&plans, &ids.join(","));
+    if !a.apply {
+        return super::hosts::print_remote(out, merged);
+    }
+    if a.plan_id.as_deref().is_some_and(|old| old != merged["plan_id"]) {
+        merged["plan_changed"] = json!(true);
+        return super::hosts::print_remote(out, merged);
+    }
+    let mut results = Vec::new();
+    for ((n, dir), id) in names.iter().zip(&folders).zip(&ids) {
+        match each(n, dir, Some(id)) {
+            Ok(r) => results.push(r),
+            Err(e) => {
+                let undo = if results.is_empty() { String::new() } else { format!("\nRun prism --host {} undo to take back the last skill copied.", host.name) };
+                return failed(out, err, &format!("Stopped after {} of {}: {e}{undo}", results.len(), names.len()));
+            }
+        }
+    }
+    super::hosts::print_remote(out, merge(&results, &ids.join(",")))
+}
+
+/// One plan or result from the host's answers for each skill.
+fn merge(parts: &[Value], id: &str) -> Value {
+    let all = |key: &str| Value::Array(parts.iter().flat_map(|p| p[key].as_array().cloned().unwrap_or_default()).collect());
+    let mut v = json!({ "applied": parts.iter().any(|p| p["applied"] == true), "plan_id": id, "actions": all("actions"), "conflicts": all("conflicts") });
+    if parts.iter().any(|p| p.get("done").is_some()) {
+        v["done"] = json!(parts.iter().filter_map(|p| p["done"].as_u64()).sum::<u64>());
+    }
+    if parts.iter().any(|p| p["plan_changed"] == true) {
+        v["plan_changed"] = json!(true);
+    }
+    v
 }
 
 /// Where `--to-project DIR` or `--to-global` says to copy.

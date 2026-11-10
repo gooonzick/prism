@@ -26,6 +26,7 @@ Use `prism` instead of editing `~/.claude.json`, `~/.cursor/mcp.json`, `~/.codex
 5. Env and header values print as `***`. Run `prism mcp show NAME --show-secrets` only when the user asks to see them.
 6. `prism undo` reverts the last change, made from the command line or the Prism window.
 7. Commands work on the global setup (the home folder). `--project DIR` works on that project instead.
+8. `--host NAME` runs a command on a saved host (`prism hosts list`) over ssh. `--to-host NAME` copies a skill or an MCP server from this machine to a host; its plan comes from the host and each line ends with "on NAME".
 
 ## Exit codes
 
@@ -49,6 +50,7 @@ prism projects list --json                   # also: add DIR, remove DIR, find D
 prism doctor --all --json                    # global setup and every listed project
 prism undo --json
 prism setup --json                           # put prism on PATH, install this skill
+prism --host laptop skills list --json       # any command, on a saved host
 
 prism skills list --json
 prism skills show pdf --json
@@ -58,6 +60,7 @@ prism skills link pdf --agent cursor --json
 prism skills unlink pdf --agent cursor --json
 prism skills remove pdf --json               # links go, folders go to the trash
 prism skills copy pdf --to-project ~/code/app --json   # or --to-global
+prism skills copy pdf --to-host laptop --to-global --json   # mcp copy takes --to-host too
 prism skills clean-broken --json
 prism skills search react --json             # skills.sh
 prism skills repo vercel-labs/agent-skills --json

@@ -164,6 +164,9 @@ pub struct McpPlan {
     pub warnings: Vec<String>,
     /// Every file the plan writes, with its hash when planned (`None`: it doesn't exist yet).
     pub files: Vec<(PathBuf, Option<u64>)>,
+    /// The hash of a definition another machine sent (`mcp receive`), so a server changed
+    /// there since is a changed plan. Values enter the id only through this hash.
+    pub sent: Option<u64>,
 }
 
 impl McpPlan {
@@ -208,6 +211,7 @@ impl McpPlan {
     pub fn id(&self) -> String {
         let mut lines: Vec<String> = self.actions.iter().map(|a| format!("{} @ {}", a.describe(), a.file().display())).collect();
         lines.extend(self.skipped.iter().map(|(a, why)| format!("skip {}: {why}", MCP_AGENTS[*a].name)));
+        lines.extend(self.sent.map(|h| format!("sent as {h}")));
         planid::plan_id(&lines, &self.files)
     }
 }

@@ -5,4 +5,5 @@ pub mod agents;
 pub mod formats;
 pub mod model;
 pub mod plan;
+pub mod portable;
 pub mod scan;

@@ -1,5 +1,6 @@
 //! Saved remote hosts: a name Prism shows and the ssh target it connects to.
 
+pub mod copy;
 pub mod install;
 pub mod runner;
 

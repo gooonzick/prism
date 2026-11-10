@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 
 use super::{Ctx, Exit, Out, failed, usage};
 use crate::hosts::install::{self, Health, VERSION};
+use crate::hosts::runner::Runner;
 use crate::hosts::{self, Host};
 
 #[derive(Subcommand)]
@@ -126,19 +127,64 @@ fn install(ctx: &Ctx, name: &str, binary: Option<&Path>, out: &mut Out, err: &mu
     }
 }
 
+/// A saved host (or ssh target) and its runner, once its `prism` is this version; else why not.
+pub(super) fn ready(ctx: &Ctx, name: &str) -> Result<(Host, Box<dyn Runner>), String> {
+    let host = resolve(ctx, name);
+    let runner = (ctx.make_runner)(&host);
+    match install::check(runner.as_ref())? {
+        (Health::Ready, _) => Ok((host, runner)),
+        (health, _) => Err(format!("prism on {0} is {1}; run prism hosts install {0}", host.name, health.describe())),
+    }
+}
+
+/// This machine as a runner: the source of a copy to a host.
+pub(super) fn this(ctx: &Ctx) -> Box<dyn Runner> {
+    (ctx.make_runner)(&Host { name: "this".into(), ssh: "this".into() })
+}
+
+/// Prints a host's answer to a copy (its plan or result, lines already naming it) the way
+/// local plans print. Exit 4 when the plan changed since `--plan-id`.
+pub(super) fn print_remote(out: &mut Out, v: Value) -> Exit {
+    let strs = |key: &str| v[key].as_array().map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect::<Vec<_>>()).unwrap_or_default();
+    let (id, applied, changed) = (v["plan_id"].as_str().unwrap_or_default(), v["applied"] == true, v["plan_changed"] == true);
+    let actions = strs("actions");
+    let steps: String = actions.iter().map(|a| format!("\n  - {a}")).collect();
+    let mut text = match (applied, actions.is_empty()) {
+        (true, _) => format!("Done:{steps}"),
+        (false, true) => "Nothing to do".to_string(),
+        (false, false) => format!("Plan {id}:{steps}"),
+    };
+    if let Some(conflicts) = v["conflicts"].as_array().filter(|c| !c.is_empty()) {
+        text.push_str("\nConflicts (left alone):");
+        for c in conflicts {
+            text.push_str(&format!("\n  - {}: {}", c["skill"].as_str().unwrap_or_default(), c["reason"].as_str().unwrap_or_default()));
+        }
+    }
+    for s in v["skipped"].as_array().into_iter().flatten() {
+        let agent = s["agent"].as_str().unwrap_or_default();
+        let name = crate::mcp::agents::MCP_AGENTS.iter().find(|a| a.id == agent).map_or(agent, |a| a.name);
+        text.push_str(&format!("\nSkipped {name}: {}", s["reason"].as_str().unwrap_or_default()));
+    }
+    for w in strs("warnings") {
+        text.push_str(&format!("\nWarning: {w}"));
+    }
+    if !applied && !actions.is_empty() {
+        text.push_str(&format!("\nRun again with --apply --plan-id {id} to do it."));
+    }
+    if changed {
+        text = format!("The plan changed; nothing was done. It now is:\n{text}");
+    }
+    out.emit(text, v);
+    if changed { Exit::PlanChanged } else { Exit::Ok }
+}
+
 /// `--host NAME`: the same command line, minus `--host`, run by the host's `prism` once it is
 /// this version. Its output and exit code are the remote's.
 pub fn forward(name: &str, args: &[&str], ctx: &mut Ctx, out: &mut Out, err: &mut dyn Write) -> i32 {
-    let host = resolve(ctx, name);
-    let runner = (ctx.make_runner)(&host);
-    match install::check(runner.as_ref()) {
-        Ok((Health::Ready, _)) => {}
-        Ok((health, _)) => {
-            let msg = format!("prism on {0} is {1}; run prism hosts install {0}", host.name, health.describe());
-            return failed(out, err, &msg) as i32;
-        }
+    let runner = match ready(ctx, name) {
+        Ok((_, runner)) => runner,
         Err(e) => return failed(out, err, &e) as i32,
-    }
+    };
     let rest = without_host(args);
     // Secrets (`K=-`) travel over stdin; nothing else needs it, and reading it would block.
     // What follows `--` belongs to a command line the remote stores, not to us.
