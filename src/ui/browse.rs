@@ -2,24 +2,25 @@
 
 use rune::{El, Tx, col, row, text};
 use rune_kit::shell::Toolbar;
-use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, Checkbox, ControlSize, Divider, Kit, Markdown, Select, Spinner, TextInput, glyphs};
+use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, Checkbox, ControlSize, Divider, Kit, Select, Spinner, TextInput, glyphs};
 
-use super::{empty, field, heading, inspector_body, mono, row_gap, scroll_pane};
+use super::{code_box, empty, heading, inspector_body, inspector_title, mono, prop, row_gap, scroll_pane, section, skill_md};
 use crate::agents::Scope;
 use crate::app::{App, RepoListing};
 use crate::remote::RemoteSkill;
 
-/// The scopes installs can go to, as labels: global first, then the projects.
+/// The scopes installs can go to, as labels: global first, then the projects. They are this
+/// machine's, whichever machine is in view.
 fn scope_options(s: &App) -> Vec<(String, Scope)> {
-    let mut v = vec![(s.scope_label(&Scope::Global), Scope::Global)];
-    v.extend(s.settings.projects.iter().map(|p| (s.scope_label(&Scope::Project(p.clone())), Scope::Project(p.clone()))));
+    let mut v = vec![(s.install_label(&Scope::Global), Scope::Global)];
+    v.extend(s.local_settings().projects.iter().map(|p| (s.install_label(&Scope::Project(p.clone())), Scope::Project(p.clone()))));
     v
 }
 
 pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>) -> (El, Toolbar, El) {
     let options = scope_options(s);
     let labels: Vec<String> = options.iter().map(|(l, _)| l.clone()).collect();
-    let current = s.scope_label(&s.scope);
+    let current = s.install_label(s.local_scope());
     let scope_select = Select::new("install-scope", &labels)
         .current(Some(&current))
         .label("Install into")
@@ -29,9 +30,7 @@ pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>) -> (El, Toolbar, El) {
         .on_choose(|s: &mut App, v: &str, _: &mut Tx| {
             s.scope_menu = false;
             if let Some((_, scope)) = scope_options(s).into_iter().find(|(l, _)| l == v) {
-                s.scope = scope;
-                s.selected = None;
-                s.rescan();
+                s.set_install_scope(scope);
             }
         })
         .build(k, layer)
@@ -100,13 +99,11 @@ pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>) -> (El, Toolbar, El) {
                 .key("install-source"),
         );
 
-    let main = col()
-        .key("browse-page")
-        .w_full()
-        .h_full()
-        .min_h(0.0)
-        .padding(16.0)
-        .gap(12.0)
+    let mut main = col().key("browse-page").w_full().h_full().min_h(0.0).padding(16.0).gap(12.0);
+    if let Some(note) = super::hosts::browse_note(s, k) {
+        main = main.child(note);
+    }
+    let main = main
         .child(search)
         .child(scroll_pane("results-scroll", list).grow(1.0))
         .child(Divider::horizontal().build(k))
@@ -161,7 +158,7 @@ fn details(s: &App, k: &Kit) -> El {
             row_gap()
                 .key("installing")
                 .child(Spinner::new().build(k))
-                .child(text(format!("Installing {} into {}…", job.label, s.scope_label(&job.scope))).font(k.ty.small).color(k.c.text_muted).wrap()),
+                .child(text(format!("Installing {} into {}…", job.label, s.install_label(&job.scope))).font(k.ty.small).color(k.c.text_muted).wrap()),
         );
     }
     if let Some(log) = &s.install_log {
@@ -169,7 +166,7 @@ fn details(s: &App, k: &Kit) -> El {
             Ok(o) => ("Install log", o),
             Err(e) => ("Install failed", e),
         };
-        body = body.child(field(title, mono(out.trim().to_string(), k), k).key("install-log"));
+        body = body.child(prop(title, code_box(mono(out.trim().to_string(), k).color(k.c.text_base), k), k).key("install-log"));
     }
     if let Some(repo) = &s.repo {
         return body.child(repo_listing(s, repo, k));
@@ -183,9 +180,9 @@ fn details(s: &App, k: &Kit) -> El {
     let installed = s.installed_in(&r.name);
     let url = r.url();
     body = body
-        .child(text(r.name.clone()).font(k.ty.body_medium).color(k.c.text_base).wrap())
-        .child(field("Source", mono(r.source.clone(), k), k))
-        .child(field("Popularity", text(installs(r.installs)).font(k.ty.ui).color(k.c.text_base), k))
+        .child(inspector_title(r.name.clone(), k))
+        .child(prop("Source", mono(r.source.clone(), k).color(k.c.text_base), k))
+        .child(prop("Popularity", text(installs(r.installs)).font(k.ty.ui).color(k.c.text_base), k))
         .child(
             row_gap()
                 .child(
@@ -193,7 +190,7 @@ fn details(s: &App, k: &Kit) -> El {
                         .variant(if s.installing.is_some() { ButtonVariant::Loading } else { ButtonVariant::Contrast })
                         .control_size(ControlSize::Regular)
                         .disabled(s.installing.is_some())
-                        .help(format!("Install into {}", s.scope_label(&s.scope)))
+                        .help(format!("Install into {}", s.install_label(s.local_scope())))
                         .on_press(|s: &mut App| s.install_remote())
                         .build(k)
                         .key("install"),
@@ -211,22 +208,17 @@ fn details(s: &App, k: &Kit) -> El {
         .child(
             text(format!(
                 "Installs into {} and links it into your sync targets.",
-                crate::agents::tilde(&crate::agents::AGENTS[crate::agents::CANONICAL].dir(&s.scope, &s.paths), &s.paths)
+                crate::agents::tilde(&crate::agents::AGENTS[crate::agents::CANONICAL].dir(s.local_scope(), s.local_paths()), s.local_paths())
             ))
-                .font(k.ty.small)
+                .font(k.ty.caption())
                 .color(k.c.text_faint)
                 .wrap(),
         );
-    body = body.child(Divider::horizontal().build(k)).child(heading("SKILL.md", k));
+    body = body.child(Divider::horizontal().build(k)).child(section("SKILL.md", None, k));
     body.child(match &s.remote_md {
         None => row().py(16.0).child(Spinner::new().build(k)),
         Some(Err(e)) => text(e.clone()).font(k.ty.small).color(k.c.text_faint).wrap(),
-        Some(Ok(md)) => Markdown::new(crate::skill::parse(md).body)
-            .on_link_tx(|_: &mut App, url: &str, tx: &mut Tx| {
-                let _ = tx.open_url(url);
-            })
-            .build(k)
-            .key("remote-md"),
+        Some(Ok(md)) => skill_md(crate::skill::parse(md).body, k).key("remote-md"),
     })
 }
 
@@ -237,7 +229,7 @@ fn repo_listing(s: &App, repo: &RepoListing, k: &Kit) -> El {
         .key("repo")
         .w_full()
         .gap(12.0)
-        .child(text(repo.source.clone()).font(k.ty.body_medium).color(k.c.text_base).wrap());
+        .child(inspector_title(repo.source.clone(), k));
     let skills = match &repo.skills {
         None => return body.child(row_gap().child(Spinner::new().build(k)).child(text("Reading the repository…").font(k.ty.small).color(k.c.text_muted))),
         Some(Err(e)) => return body.child(text(e.clone()).font(k.ty.small).color(k.c.text_muted).wrap()),
@@ -255,7 +247,7 @@ fn repo_listing(s: &App, repo: &RepoListing, k: &Kit) -> El {
                 .variant(if s.installing.is_some() { ButtonVariant::Loading } else { ButtonVariant::Contrast })
                 .control_size(ControlSize::Regular)
                 .disabled(picked == 0 || s.installing.is_some())
-                .help(format!("Install into {}", s.scope_label(&s.scope)))
+                .help(format!("Install into {}", s.install_label(s.local_scope())))
                 .on_press(|s: &mut App| s.install_repo_ticked())
                 .build(k)
                 .key("install-ticked"),

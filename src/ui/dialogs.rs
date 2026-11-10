@@ -1,11 +1,13 @@
-//! Modal dialogs: the sync preview and the remove confirmation.
+//! Modal dialogs: the sync preview (this machine's plan, or a host's), the remove confirmation,
+//! Copy to…, New skill and the projects found in a folder.
 
 use rune::{El, ScrollSpec, Tx, col, icon, row, text};
-use rune_kit::{Button, ButtonVariant, Checkbox, Dialog, Kit, TextArea, TextInput, glyphs};
+use rune_kit::{Button, ButtonVariant, Checkbox, Dialog, Kit, Spinner, TextArea, TextInput, glyphs};
 
-use super::heading;
+use super::{dot, heading, row_gap};
 use crate::agents::{AGENTS, CANONICAL};
-use crate::app::App;
+use crate::app::{App, Planned, Target};
+use crate::plan_view::PlanView;
 use crate::sync::Action;
 
 /// The plan's actions per skill, in order, each as a short phrase; links to several agents
@@ -48,7 +50,9 @@ fn changes_heading(changes: usize, skills: usize) -> String {
 }
 
 pub fn sync(s: &App, k: &Kit, layer: &mut Vec<El>) {
-    let Some(plan) = &s.sync_plan else { return };
+    if !s.sync_open() {
+        return;
+    }
     let targets = s.targets();
     let mut agents = col().key("sync-targets").gap(6.0).child(heading("Link into", k));
     for a in (0..AGENTS.len()).filter(|&a| a != CANONICAL) {
@@ -59,30 +63,63 @@ pub fn sync(s: &App, k: &Kit, layer: &mut Vec<El>) {
             .on_toggle(move |s: &mut App| s.toggle_target(a));
         if s.inv.shares_canonical[a] {
             cb = cb.description("same folder as .agents").disabled(true);
-        } else if !agent.detected(&s.paths) {
+        } else if !s.detected(a) {
             cb = cb.label(format!("{} (not found)", agent.name));
         }
         agents = agents.child(cb.build(k).key(format!("target-{}", agent.id)));
     }
 
-    let linkable = targets.iter().filter(|&&t| !s.inv.shares_canonical[t]).count();
-    let groups = group_actions(&plan.actions, linkable);
     let mut changes = col().key("sync-changes").gap(10.0).w_full();
-    if plan.is_empty() {
+    // `settled`: the plan is in, so an empty one means there is nothing to do.
+    let (view, heading_text, applying, settled) = match (&s.sync_plan, &s.sync_host) {
+        (Some(plan), _) => {
+            let linkable = targets.iter().filter(|&&t| !s.inv.shares_canonical[t]).count();
+            let view = PlanView::from((plan, &s.paths));
+            let groups = group_actions(&plan.actions, linkable);
+            for (skill, parts) in &groups {
+                changes = changes.child(
+                    col()
+                        .w_full()
+                        .gap(2.0)
+                        .child(text(skill.clone()).font(k.ty.small_medium).color(k.c.text_base))
+                        .child(text(parts.join(" · ")).font(k.ty.small).color(k.c.text_muted).wrap()),
+                );
+            }
+            let heading_text = changes_heading(view.lines.len(), groups.len());
+            (view, heading_text, false, true)
+        }
+        (None, Some(host)) => {
+            // A host's plan comes as lines, not actions to group: they show as the host words them.
+            if let Some(notice) = &host.notice {
+                changes = changes.child(row().key("sync-notice").w_full().gap(8.0).center_y().child(dot(k.c.warning.icon)).child(text(notice.clone()).font(k.ty.small).color(k.c.text_muted).grow(1.0).min_w(0.0).wrap()));
+            }
+            let view = match &host.view {
+                None => {
+                    let asking = format!("Asking {} for the plan…", s.env_label());
+                    changes = changes.child(row_gap().child(Spinner::new().build(k)).child(text(asking).font(k.ty.small).color(k.c.text_muted)));
+                    PlanView::default()
+                }
+                Some(Err(e)) => {
+                    changes = changes.child(failure(e, k));
+                    PlanView::default()
+                }
+                Some(Ok(view)) => view.clone(),
+            };
+            for (i, line) in view.lines.iter().enumerate() {
+                changes = changes.child(text(line.clone()).key(format!("sync-line-{i}")).font(k.ty.small).color(k.c.text_base).wrap());
+            }
+            let n = view.lines.len();
+            let heading_text = if n == 0 { "Changes".to_string() } else { format!("{n} change{}", if n == 1 { "" } else { "s" }) };
+            (view, heading_text, host.applying, matches!(host.view, Some(Ok(_))))
+        }
+        (None, None) => return,
+    };
+    if settled && view.lines.is_empty() && view.skipped.is_empty() {
         changes = changes.child(text("Everything is in sync.").font(k.ty.small).color(k.c.text_muted));
     }
-    for (skill, parts) in &groups {
-        changes = changes.child(
-            col()
-                .w_full()
-                .gap(2.0)
-                .child(text(skill.clone()).font(k.ty.small_medium).color(k.c.text_base))
-                .child(text(parts.join(" · ")).font(k.ty.small).color(k.c.text_muted).wrap()),
-        );
-    }
-    if !plan.conflicts.is_empty() {
-        changes = changes.child(heading(&format!("Skipped ({})", plan.conflicts.len()), k));
-        for c in &plan.conflicts {
+    if !view.skipped.is_empty() {
+        changes = changes.child(heading(&format!("Skipped ({})", view.skipped.len()), k));
+        for (skill, reason) in &view.skipped {
             changes = changes.child(
                 row()
                     .w_full()
@@ -94,27 +131,25 @@ pub fn sync(s: &App, k: &Kit, layer: &mut Vec<El>) {
                             .grow(1.0)
                             .min_w(0.0)
                             .gap(2.0)
-                            .child(text(c.skill.clone()).font(k.ty.small_medium).color(k.c.text_base))
-                            .child(text(c.reason.clone()).font(k.ty.small).color(k.c.text_muted).wrap()),
+                            .child(text(skill.clone()).font(k.ty.small_medium).color(k.c.text_base))
+                            .child(text(reason.clone()).font(k.ty.small).color(k.c.text_muted).wrap()),
                     ),
             );
         }
     }
 
-    let n = plan.actions.len();
+    let n = view.lines.len();
+    let apply = match (applying, n) {
+        (true, _) => Button::new("Applying…").variant(ButtonVariant::Loading).disabled(true),
+        (false, 0) => Button::new("Nothing to do").variant(ButtonVariant::Contrast).disabled(true),
+        (false, n) => Button::new(format!("Apply {n} change{}", if n == 1 { "" } else { "s" })).variant(ButtonVariant::Contrast),
+    };
     let buttons = row()
         .w_full()
         .gap(8.0)
         .justify_end()
         .child(Button::new("Cancel").variant(ButtonVariant::Ghost).on_press(|s: &mut App| s.close_sync()).build(k).key("sync-cancel"))
-        .child(
-            Button::new(if n == 0 { "Nothing to do".to_string() } else { format!("Apply {n} change{}", if n == 1 { "" } else { "s" }) })
-                .variant(ButtonVariant::Contrast)
-                .disabled(n == 0)
-                .on_press(|s: &mut App| s.apply_sync())
-                .build(k)
-                .key("sync-apply"),
-        );
+        .child(apply.on_press(|s: &mut App| s.apply_sync()).build(k).key("sync-apply"));
     let body = row()
         .w_full()
         .gap(20.0)
@@ -124,7 +159,7 @@ pub fn sync(s: &App, k: &Kit, layer: &mut Vec<El>) {
                 .grow(1.0)
                 .min_w(0.0)
                 .gap(6.0)
-                .child(heading(&changes_heading(plan.actions.len(), groups.len()), k))
+                .child(heading(&heading_text, k))
                 .child(col().w_full().h(260.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(changes)),
         );
     let title = match s.sync_only.as_deref() {
@@ -141,10 +176,23 @@ pub fn sync(s: &App, k: &Kit, layer: &mut Vec<El>) {
         .build(k, layer);
 }
 
+/// Why a plan couldn't be made: a red mark and the reason.
+fn failure(why: &str, k: &Kit) -> El {
+    row()
+        .w_full()
+        .gap(8.0)
+        .items_start()
+        .child(icon(&glyphs::CIRCLE_X, 14.0).color(k.c.danger.icon))
+        .child(text(why.to_string()).font(k.ty.small).color(k.c.text_muted).grow(1.0).min_w(0.0).wrap())
+}
+
 pub fn remove(s: &App, k: &Kit, layer: &mut Vec<El>) {
     let Some(names) = &s.confirm_remove else { return };
     let skills: Vec<_> = names.iter().filter_map(|n| s.inv.get(n)).collect();
-    let scope = s.scope_label(&s.inv.scope);
+    let mut scope = s.scope_label(&s.inv.scope);
+    if let Some(host) = s.host() {
+        scope.push_str(&format!(" on {}", host.name));
+    }
     let (title, message) = match skills.as_slice() {
         [] => return,
         [skill] => {
@@ -188,66 +236,175 @@ pub fn remove(s: &App, k: &Kit, layer: &mut Vec<El>) {
 
 const SYNC_NOTE: &str = "Skills live once in .agents/skills and every agent gets a link. A skill only one agent has moves into .agents first. Folders that differ are skipped, and replaced copies go to the trash.";
 
-fn dialog_body() -> El {
+pub(super) fn dialog_body() -> El {
     col().w_full().px(16.0).pb(16.0).gap(16.0)
 }
 
-fn note(t: &str, k: &Kit) -> El {
+pub(super) fn note(t: &str, k: &Kit) -> El {
     text(t.to_string()).font(k.ty.ui).color(k.c.text_muted).wrap()
 }
 
-/// Where to copy the picked skills: one row per other scope.
+/// One place a copy can go: its icon, its name and what is there now.
+fn scope_row(key: String, label: String, global: bool, detail: String, k: &Kit, pick: impl Fn(&mut App) + 'static) -> El {
+    row()
+        .key(key)
+        .role("button")
+        .label(label.clone())
+        .focusable(true)
+        .w_full()
+        .px(12.0)
+        .py(8.0)
+        .gap(10.0)
+        .center_y()
+        .radius(k.radius.md)
+        .hover(k.c.hover)
+        .on_press(pick)
+        .child(icon(if global { &super::HOME } else { &glyphs::FOLDER }, 16.0).color(k.c.icon_muted))
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(2.0)
+                .child(text(label).font(k.ty.ui_medium).color(k.c.text_base).truncate())
+                .child(text(detail).font(k.ty.small).color(k.c.text_faint).truncate()),
+        )
+}
+
+/// "N skills there", or the picked skills it already has, which a copy skips.
+fn scope_detail(total: usize, clashes: &[&String]) -> String {
+    if clashes.is_empty() {
+        format!("{total} skill{} there", if total == 1 { "" } else { "s" })
+    } else {
+        let which = if clashes.len() == 1 { "that one is" } else { "those are" };
+        format!("already has {}; {which} skipped", clashes.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", "))
+    }
+}
+
+/// A machine's name over its scopes.
+fn machine_heading(label: &str, k: &Kit) -> El {
+    row().w_full().px(12.0).pt(8.0).pb(2.0).child(heading(label, k))
+}
+
+/// Where to copy the picked skills: one row per other scope of the machine in view, then one
+/// group per other machine with its Global and projects.
 pub fn copy(s: &App, k: &Kit, layer: &mut Vec<El>) {
     let Some(names) = &s.copy_dialog else { return };
     let what = match names.as_slice() {
         [one] => one.clone(),
         many => format!("{} skills", many.len()),
     };
+    if let Some(target) = &s.across.skills {
+        return copy_plan(s, &what, target, k, layer);
+    }
+    let machines = &s.across.machines;
     let mut scopes = col().key("copy-scopes").w_full().gap(4.0);
-    for (i, scope) in s.other_scopes().into_iter().enumerate() {
+    let here = s.other_scopes();
+    if !machines.is_empty() && !here.is_empty() {
+        scopes = scopes.child(machine_heading(&s.env_label(), k));
+    }
+    for (i, scope) in here.into_iter().enumerate() {
         let stats = s.stats.get(&scope).copied().unwrap_or_default();
-        let clashes: Vec<&String> = names.iter().filter(|n| crate::agents::AGENTS[CANONICAL].dir(&scope, &s.paths).join(n).exists()).collect();
-        let detail = if clashes.is_empty() {
-            format!("{} skill{} there", stats.total, if stats.total == 1 { "" } else { "s" })
-        } else {
-            format!("already has {}; that one is skipped", clashes.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", "))
-        };
+        let clashes: Vec<&String> = names.iter().filter(|n| s.skill_in(&scope, n)).collect();
         let dest = scope.clone();
-        scopes = scopes.child(
-            row()
-                .key(format!("copy-to-{i}"))
-                .role("button")
-                .label(s.scope_label(&scope))
-                .focusable(true)
-                .w_full()
-                .px(12.0)
-                .py(8.0)
-                .gap(10.0)
-                .center_y()
-                .radius(k.radius.md)
-                .hover(k.c.hover)
-                .on_press(move |s: &mut App| s.copy_to(dest.clone()))
-                .child(icon(if scope.is_global() { &super::HOME } else { &glyphs::FOLDER }, 16.0).color(k.c.icon_muted))
-                .child(
-                    col()
-                        .grow(1.0)
-                        .min_w(0.0)
-                        .gap(2.0)
-                        .child(text(s.scope_label(&scope)).font(k.ty.ui_medium).color(k.c.text_base).truncate())
-                        .child(text(detail).font(k.ty.small).color(k.c.text_faint).truncate()),
-                ),
-        );
+        scopes = scopes.child(scope_row(format!("copy-to-{i}"), s.scope_label(&scope), scope.is_global(), scope_detail(stats.total, &clashes), k, move |s: &mut App| s.copy_to(dest.clone())));
+    }
+    for m in machines {
+        scopes = scopes.child(machine_heading(&m.label, k));
+        match &m.view {
+            None => {
+                let asking = format!("Asking {} for its projects…", m.label);
+                scopes = scopes.child(row_gap().px(12.0).py(8.0).child(Spinner::new().build(k)).child(text(asking).font(k.ty.small).color(k.c.text_muted)));
+            }
+            Some(Err(e)) => scopes = scopes.child(col().w_full().px(12.0).py(8.0).child(failure(e, k))),
+            Some(Ok(view)) => {
+                for (i, scope) in view.scopes().into_iter().enumerate() {
+                    let total = view.stats.get(&scope).map_or(0, |st| st.total);
+                    // Its Global's skills are known; a project's would take another look there.
+                    let clashes: Vec<&String> = if scope.is_global() { names.iter().filter(|n| view.global_names.contains(*n)).collect() } else { Vec::new() };
+                    let (label, machine) = (m.label.clone(), view.label(&scope));
+                    let dest = scope.clone();
+                    scopes = scopes.child(scope_row(format!("copy-to-{}-{i}", m.key()), machine, scope.is_global(), scope_detail(total, &clashes), k, move |s: &mut App| s.copy_to_machine(&label, dest.clone())));
+                }
+            }
+        }
     }
     let buttons = row()
         .w_full()
         .justify_end()
-        .child(Button::new("Cancel").variant(ButtonVariant::Ghost).on_press(|s: &mut App| s.copy_dialog = None).build(k).key("copy-cancel"));
+        .child(Button::new("Cancel").variant(ButtonVariant::Ghost).on_press(|s: &mut App| s.close_copy()).build(k).key("copy-cancel"));
+    let list = col().w_full().max_h(420.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(scopes);
     Dialog::new("copy-dialog", format!("Copy {what} to…"))
         .width(460.0)
         .fit()
         .open(true)
-        .on_close(|s: &mut App| s.copy_dialog = None)
-        .child(dialog_body().child(note("It lands in that scope's .agents/skills and is linked into your sync targets there.", k)).child(scopes).child(buttons))
+        .on_close(|s: &mut App| s.close_copy())
+        .child(dialog_body().child(note("It lands in that scope's .agents/skills and is linked into your sync targets there.", k)).child(list).child(buttons))
+        .build(k, layer);
+}
+
+/// The other machine's plan for the pick, then Apply: lines, the skills it skips, and why.
+fn copy_plan(s: &App, what: &str, t: &Target, k: &Kit, layer: &mut Vec<El>) {
+    let dest = s.machine(&t.machine).and_then(|m| m.view.as_ref()).and_then(|v| v.as_ref().ok()).map_or_else(|| s.scope_label(&t.dest), |v| v.label(&t.dest));
+    let mut changes = col().key("copy-plan").w_full().gap(8.0);
+    if let Some(notice) = &t.notice {
+        changes = changes.child(row().w_full().gap(8.0).center_y().child(dot(k.c.warning.icon)).child(text(notice.clone()).font(k.ty.small).color(k.c.text_muted).grow(1.0).min_w(0.0).wrap()));
+    }
+    let view = match &t.plan {
+        Planned::Asking => {
+            let asking = format!("Asking {} for the plan…", t.machine);
+            changes = changes.child(row_gap().child(Spinner::new().build(k)).child(text(asking).font(k.ty.small).color(k.c.text_muted)));
+            PlanView::default()
+        }
+        Planned::Waiting(why) => {
+            changes = changes.child(text(why.clone()).font(k.ty.small).color(k.c.text_muted));
+            PlanView::default()
+        }
+        Planned::Done(Err(e)) => {
+            changes = changes.child(failure(e, k));
+            PlanView::default()
+        }
+        Planned::Done(Ok(view)) => {
+            if view.lines.is_empty() {
+                changes = changes.child(text("Nothing to copy.").font(k.ty.small).color(k.c.text_muted));
+            }
+            view.clone()
+        }
+    };
+    for (i, line) in view.lines.iter().enumerate() {
+        changes = changes.child(text(line.clone()).key(format!("copy-line-{i}")).font(k.ty.ui).color(k.c.text_base).wrap());
+    }
+    if !view.skipped.is_empty() {
+        changes = changes.child(col().pt(6.0).child(heading(&format!("Skipped ({})", view.skipped.len()), k)));
+        for (skill, reason) in &view.skipped {
+            changes = changes.child(
+                row()
+                    .w_full()
+                    .gap(8.0)
+                    .items_start()
+                    .child(icon(&glyphs::CIRCLE_X, 14.0).color(k.c.warning.icon))
+                    .child(text(format!("{skill}: {reason}")).font(k.ty.small).color(k.c.text_muted).grow(1.0).min_w(0.0).wrap()),
+            );
+        }
+    }
+    let n = view.lines.len();
+    let apply = match (t.applying, n) {
+        (true, _) => Button::new("Applying…").variant(ButtonVariant::Loading).disabled(true),
+        (false, 0) => Button::new("Nothing to do").variant(ButtonVariant::Contrast).disabled(true),
+        (false, n) => Button::new(format!("Apply {n} change{}", if n == 1 { "" } else { "s" })).variant(ButtonVariant::Contrast),
+    };
+    let buttons = row()
+        .w_full()
+        .gap(8.0)
+        .justify_end()
+        .child(Button::new("Cancel").variant(ButtonVariant::Ghost).on_press(|s: &mut App| s.close_copy()).build(k).key("copy-cancel"))
+        .child(apply.on_press(|s: &mut App| s.apply_copy_across()).build(k).key("copy-apply"));
+    let what_there = format!("It lands in .agents/skills there and is linked into the sync targets of {0}; a skill {0} already has is skipped, never overwritten.", t.machine);
+    Dialog::new("copy-dialog", format!("Copy {what} to {dest} on {}", t.machine))
+        .width(560.0)
+        .fit()
+        .open(true)
+        .on_close(|s: &mut App| s.close_copy())
+        .child(dialog_body().child(note(&what_there, k)).child(col().w_full().max_h(300.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(changes)).child(buttons))
         .build(k, layer);
 }
 
@@ -271,8 +428,14 @@ pub fn new_skill(s: &App, k: &Kit, layer: &mut Vec<El>) {
         .on_edit(|s: &mut App| &mut s.new_skill.as_mut().expect("the dialog is open").description)
         .build(k)
         .key("new-description");
+    let dir = crate::agents::tilde(&crate::agents::AGENTS[CANONICAL].dir(&s.scope, &s.paths), &s.paths);
+    // A host's file opens in no editor here.
+    let what = match s.host() {
+        Some(h) => format!("Creates {dir}/<name>/SKILL.md on {} and links it into the sync targets there.", h.name),
+        None => format!("Creates {dir}/<name>/SKILL.md, links it into your sync targets and opens it in your editor."),
+    };
     let mut body = dialog_body()
-        .child(note(&format!("Creates {}/<name>/SKILL.md, links it into your sync targets and opens it in your editor.", crate::agents::tilde(&crate::agents::AGENTS[CANONICAL].dir(&s.scope, &s.paths), &s.paths)), k))
+        .child(note(&what, k))
         .child(field_block("Name", name, k))
         .child(field_block("When to use it", description, k));
     if let Some(e) = &form.error {
@@ -299,7 +462,7 @@ pub fn new_skill(s: &App, k: &Kit, layer: &mut Vec<El>) {
         .build(k, layer);
 }
 
-fn field_block(label: &str, input: El, k: &Kit) -> El {
+pub(super) fn field_block(label: &str, input: El, k: &Kit) -> El {
     col().w_full().gap(6.0).child(text(label.to_string()).font(k.ty.small_medium).color(k.c.text_base)).child(input)
 }
 
@@ -340,6 +503,7 @@ pub fn found(s: &App, k: &Kit, layer: &mut Vec<El>) {
         .on_close(|s: &mut App| s.found = None)
         .child(
             dialog_body()
+                .child(note("That folder has no skills of its own; pick the projects inside it to add.", k))
                 .child(col().w_full().h(320.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(list))
                 .child(buttons),
         )

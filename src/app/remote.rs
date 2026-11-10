@@ -2,10 +2,8 @@
 
 use super::{App, Install, Page};
 use crate::agents::{AGENTS, CANONICAL, Scope};
-use crate::fsops::Journal;
 use crate::remote::{self, RemoteSkill};
-use crate::scan;
-use crate::sync::{self, Action};
+use crate::sync;
 
 /// A skill in a repository listing: name, description, ticked.
 pub type RepoSkill = (String, String, bool);
@@ -47,9 +45,34 @@ impl App {
         }
     }
 
-    /// Whether `name` is already in `scope`'s `.agents`.
+    /// Whether `name` is already in the install scope's `.agents`. Installs go to this machine,
+    /// so a host in view is never looked at.
     pub fn installed_in(&self, name: &str) -> bool {
-        AGENTS[CANONICAL].dir(&self.scope, &self.paths).join(name).exists()
+        AGENTS[CANONICAL].dir(self.local_scope(), self.local_paths()).join(name).exists()
+    }
+
+    /// Whether `scope`'s `.agents` has `name`: on a host, from the inventory of the scope in view.
+    pub fn skill_in(&self, scope: &Scope, name: &str) -> bool {
+        if self.is_remote() {
+            return *scope == self.scope && self.inv.get(name).is_some_and(|s| s.placements[CANONICAL].present());
+        }
+        AGENTS[CANONICAL].dir(scope, &self.paths).join(name).exists()
+    }
+
+    /// A scope of this machine, as installs name it.
+    pub fn install_label(&self, scope: &Scope) -> String {
+        sync::label::scope(scope, self.local_paths())
+    }
+
+    /// Picks this machine's scope that skills.sh installs go to.
+    pub fn set_install_scope(&mut self, scope: Scope) {
+        if let Some(local) = &mut self.local {
+            local.scope = scope;
+            return;
+        }
+        self.scope = scope;
+        self.selected = None;
+        self.rescan();
     }
 
     // Installing.
@@ -111,7 +134,7 @@ impl App {
         if self.installing.is_some() {
             return;
         }
-        let (scope, paths) = (self.scope.clone(), self.paths.clone());
+        let (scope, paths) = (self.local_scope().clone(), self.local_paths().clone());
         self.install_log = None;
         self.installing = Some(Install { label, scope: scope.clone() });
         self.install.request((source, skills), move |(source, skills)| {
@@ -120,55 +143,57 @@ impl App {
         });
     }
 
+    /// A toast's title about this machine: while a host is in view, it says which machine.
+    pub(super) fn here(&self, title: String) -> String {
+        if self.is_remote() { format!("{title} on {}", crate::hosts::copy::this_machine()) } else { title }
+    }
+
     pub(super) fn finish_install(&mut self, skills: Vec<String>, result: Result<String, String>) {
         let Some(job) = self.installing.take() else { return };
         let ok = result.is_ok();
         self.install_log = Some(result);
         if !ok {
-            self.notify(format!("Installing {} failed", job.label), "The log is in the details pane".into(), true);
+            self.notify(self.here(format!("Installing {} failed", job.label)), "The log is in the details pane".into(), true);
             return;
         }
-        let detail = match self.link_installed(&job.scope, &skills) {
-            Ok(n) => format!("Into {} · {} link{}", self.scope_label(&job.scope), n, if n == 1 { "" } else { "s" }),
+        let (paths, settings) = (self.local_paths().clone(), self.local_settings().clone());
+        let targets = crate::agents::target_indices(settings.targets.as_deref(), &paths);
+        let detail = match sync::link_installed(&job.scope, &paths, &targets, &skills) {
+            Ok(n) => format!("Into {} · {} link{}", sync::label::scope(&job.scope, &paths), n, if n == 1 { "" } else { "s" }),
             Err(e) => e,
         };
-        self.notify(format!("Installed {}", job.label), detail, false);
+        self.notify(self.here(format!("Installed {}", job.label)), detail, false);
+        if self.is_remote() {
+            // This machine is looked at again on the way back.
+            return;
+        }
         if job.scope == self.scope {
             self.rescan();
         }
         self.refresh_stats();
     }
 
-    /// Links freshly installed skills (all of the scope's when `skills` is empty) into the
-    /// sync targets. Returns how many links it made.
-    fn link_installed(&mut self, scope: &Scope, skills: &[String]) -> Result<usize, String> {
-        let inv = scan::scan(scope, &self.paths);
-        let names: Vec<String> = if skills.is_empty() || skills.iter().any(|s| s == "*") {
-            inv.skills.iter().filter(|s| s.canonical().present()).map(|s| s.name.clone()).collect()
-        } else {
-            skills.to_vec()
-        };
-        let plan = sync::plan_many(&inv, &names, &self.targets(), &self.paths);
-        let links: Vec<Action> = plan.actions.into_iter().filter(|a| matches!(a, Action::Link { .. } | Action::Replace { .. })).collect();
-        sync::apply(scope, &self.paths, &links, &mut Journal::default()).map_err(|(_, e)| e)
-    }
-
     // Updates.
 
     pub fn has_update(&self, name: &str) -> bool {
-        self.updates.get(&self.scope).is_some_and(|v| v.iter().any(|n| n == name))
+        // skills.sh checks this machine's skills only.
+        !self.is_remote()
+            && self.updates.get(&self.scope).is_some_and(|v| v.iter().any(|n| n == name))
     }
 
 
     /// Checks the current scope for updates once a session, in the background. Without Node
     /// there is nothing to check with; that only gets reported when asked for.
     pub(super) fn check_updates_once(&mut self) {
-        if self.waker.is_some() && !self.checked_once.contains(&self.scope) && remote::runner().is_some() {
+        if self.waker.is_some() && !self.is_remote() && !self.checked_once.contains(&self.scope) && remote::runner().is_some() {
             self.check_updates();
         }
     }
 
     pub fn check_updates(&mut self) {
+        if self.is_remote() {
+            return;
+        }
         let (scope, paths) = (self.scope.clone(), self.paths.clone());
         self.checked_once.insert(scope.clone());
         self.checking.insert(scope.clone());
@@ -184,14 +209,15 @@ impl App {
             Ok(names) => {
                 self.updates.insert(scope, names);
             }
-            Err(e) if scope == self.scope => self.notify("Couldn't check for updates".into(), e, true),
+            // This machine's scope: while a host is in view, the one installs go to.
+            Err(e) if scope == *self.local_scope() => self.notify(self.here("Couldn't check for updates".into()), e, true),
             Err(_) => {}
         }
     }
 
     /// Updates `names` (or every skill with an update when empty) in the current scope.
     pub fn update(&mut self, names: Vec<String>) {
-        if self.updating.is_some() {
+        if self.updating.is_some() || self.is_remote() {
             return;
         }
         let names = if names.is_empty() { self.updates.get(&self.scope).cloned().unwrap_or_default() } else { names };
@@ -215,12 +241,54 @@ impl App {
                     v.retain(|n| !job.skills.contains(n));
                 }
                 let what = if job.skills.len() == 1 { job.skills[0].clone() } else { format!("{} skills", job.skills.len()) };
-                self.notify(format!("Updated {what}"), String::new(), false);
+                self.notify(self.here(format!("Updated {what}")), String::new(), false);
             }
-            Err(e) => self.notify("Update failed".into(), e.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").to_string(), true),
+            Err(e) => self.notify(self.here("Update failed".into()), e.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").to_string(), true),
         }
-        if job.scope == self.scope {
+        // A host in view has none of this machine's skills to look at again.
+        if job.scope == self.scope && !self.is_remote() {
             self.rescan();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::Paths;
+    use crate::app::{Install, RemoteState};
+    use crate::hosts::Host;
+    use crate::hosts::copy::this_machine;
+    use crate::store::Settings;
+
+    /// A window with host `box` in view, reaching nothing.
+    fn on_box(home: &std::path::Path) -> App {
+        let mut app = App::new(Paths::isolated(home), Settings::default());
+        app.show_remote(Host { name: "box".into(), ssh: "me@box".into() }, Err(RemoteState::Unreachable("down".into())));
+        assert!(app.is_remote());
+        app
+    }
+
+    #[test]
+    fn toasts_about_this_machine_name_it_while_a_host_is_in_view() {
+        let home = tempfile::tempdir().unwrap();
+        let mut app = on_box(home.path());
+        let here = this_machine();
+        app.installing = Some(Install { label: "pdf".into(), scope: Scope::Global });
+        app.finish_install(vec![], Err("npx failed".into()));
+        assert_eq!(app.notice.as_ref().unwrap().title, format!("Installing pdf failed on {here}"));
+        app.installing = Some(Install { label: "pdf".into(), scope: Scope::Global });
+        app.finish_install(vec![], Ok(String::new()));
+        assert_eq!(app.notice.as_ref().unwrap().title, format!("Installed pdf on {here}"));
+        app.finish_update(UpdateJob { scope: Scope::Global, skills: vec!["pdf".into()] }, Ok(String::new()));
+        assert_eq!(app.notice.as_ref().unwrap().title, format!("Updated pdf on {here}"));
+        app.land_update_check(Scope::Global, Err("no node".into()));
+        assert_eq!(app.notice.as_ref().unwrap().title, format!("Couldn't check for updates on {here}"));
+
+        // With this machine in view, they say nothing more.
+        app.switch_env(None);
+        app.installing = Some(Install { label: "pdf".into(), scope: Scope::Global });
+        app.finish_install(vec![], Ok(String::new()));
+        assert_eq!(app.notice.as_ref().unwrap().title, "Installed pdf");
     }
 }

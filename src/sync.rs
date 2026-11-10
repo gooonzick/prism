@@ -6,12 +6,69 @@
 //! copies go to the trash, never straight to deletion.
 
 use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::io::{self, Read};
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 use crate::agents::{AGENTS, CANONICAL, Paths, Scope};
 use crate::fsops::Journal;
 use crate::scan::{Inventory, Placement, Skill};
+
+/// `1 change`, `3 changes`.
+pub fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// How the window and the CLI name a change, so Undo reads the same in both.
+pub mod label {
+    use super::{AGENTS, Scope, plural};
+    use crate::agents::{Paths, tilde};
+
+    pub fn sync(changes: usize) -> String {
+        format!("sync ({})", plural(changes, "change", "changes"))
+    }
+
+    pub fn link(skill: &str, agent: usize) -> String {
+        format!("link {skill} into {}", AGENTS[agent].name)
+    }
+
+    pub fn unlink(skill: &str, agent: usize) -> String {
+        format!("unlink {skill} from {}", AGENTS[agent].name)
+    }
+
+    pub fn remove(names: &[String]) -> String {
+        match names {
+            [one] => format!("remove {one}"),
+            _ => format!("remove {}", plural(names.len(), "skill", "skills")),
+        }
+    }
+
+    pub const BROKEN: &str = "clean up broken links";
+
+    pub fn copy(to: &str) -> String {
+        format!("copy to {to}")
+    }
+
+    /// A skill copied here from another machine, `from` naming it.
+    pub fn receive(names: &[String], from: &str) -> String {
+        match names {
+            [one] => format!("copy {one} from {from}"),
+            _ => format!("copy {} from {from}", plural(names.len(), "skill", "skills")),
+        }
+    }
+
+    pub fn trash_copy(skill: &str, agent: usize) -> String {
+        format!("trash {}'s copy of {skill}", AGENTS[agent].name)
+    }
+
+    /// A scope as the window titles it: `Global (~)`, or the project's path with `~`.
+    pub fn scope(scope: &Scope, paths: &Paths) -> String {
+        match scope {
+            Scope::Global => "Global (~)".into(),
+            Scope::Project(p) => tilde(p, paths),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
@@ -48,6 +105,7 @@ pub struct Plan {
     pub conflicts: Vec<Conflict>,
 }
 
+#[cfg(test)]
 impl Plan {
     pub fn is_empty(&self) -> bool {
         self.actions.is_empty() && self.conflicts.is_empty()
@@ -163,6 +221,21 @@ fn apply_one(scope: &Scope, paths: &Paths, action: &Action, j: &mut Journal) -> 
     }
 }
 
+/// Links freshly installed skills (all of the scope's when `skills` is empty or `*`) into
+/// `targets`. Installs are not undoable, so the journal is thrown away. Returns how many
+/// links it made.
+pub fn link_installed(scope: &Scope, paths: &Paths, targets: &[usize], skills: &[String]) -> Result<usize, String> {
+    let inv = crate::scan::scan(scope, paths);
+    let names: Vec<String> = if skills.is_empty() || skills.iter().any(|s| s == "*") {
+        inv.skills.iter().filter(|s| s.canonical().present()).map(|s| s.name.clone()).collect()
+    } else {
+        skills.to_vec()
+    };
+    let plan = plan_many(&inv, &names, targets, paths);
+    let links: Vec<Action> = plan.actions.into_iter().filter(|a| matches!(a, Action::Link { .. } | Action::Replace { .. })).collect();
+    apply(scope, paths, &links, &mut Journal::default()).map_err(|(_, e)| e)
+}
+
 /// Links `skill` into `agent`, moving it into `.agents` first if it isn't there yet.
 pub fn link(inv: &Inventory, paths: &Paths, skill: &str, agent: usize, j: &mut Journal) -> Result<(), String> {
     let plan = plan_one(inv, skill, &[agent], paths);
@@ -236,10 +309,132 @@ pub fn copy_to(inv: &Inventory, paths: &Paths, skill: &str, dest: &Scope, target
         return Err(format!("{skill} is already in {}", dst.display()));
     }
     j.copy(&src, &dst).map_err(|e| format!("{}: {e}", dst.display()))?;
+    link_arrived(paths, skill, dest, targets, j)
+}
+
+/// Links `skill`, just put into `dest`'s `.agents/skills`, into `targets` there.
+fn link_arrived(paths: &Paths, skill: &str, dest: &Scope, targets: &[usize], j: &mut Journal) -> Result<(), String> {
     let there = crate::scan::scan(dest, paths);
     let plan = plan_one(&there, skill, targets, paths);
     let links: Vec<Action> = plan.actions.into_iter().filter(|a| matches!(a, Action::Link { .. })).collect();
     apply(dest, paths, &links, j).map(|_| ()).map_err(|(_, e)| e)
+}
+
+/// Why `name` can't be a skill folder's name: it must be one path component and not hidden.
+pub fn check_folder_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.contains(['/', '\0']) || name.starts_with('.') {
+        return Err(format!("{name:?} is not a skill name: it must be a folder name, not a path or a hidden name"));
+    }
+    Ok(())
+}
+
+/// What another machine sends in one tar.
+pub struct Incoming<'a> {
+    /// Each skill's name and the sender's [`tree_hash`](crate::planid::tree_hash) of its folder.
+    pub sent: &'a [(String, u64)],
+    /// `true`: each skill is a top-level folder named after it (`pdf/SKILL.md`). `false`: the
+    /// tar holds the one skill's folder contents (`./SKILL.md`).
+    pub named: bool,
+    /// The skills to place: the others (already here) are checked and left out.
+    pub place: &'a [String],
+}
+
+/// Puts skills that another machine sent as one tar into `dest`'s `.agents/skills`, then links
+/// them into `targets` there like [`copy_to`]. The tar comes over the network, so it is saved
+/// and listed first: a member with an absolute path or a `..`, or (named) outside the sent
+/// skills' folders, refuses the whole archive. It unpacks into a staging folder, and nothing is
+/// placed unless every sent folder is there and has the sender's hash (a cut-off or altered
+/// stream is refused). The staging folder and the saved tar always go. Returns how many skills
+/// were placed; on failure, how many were before it (undo takes them back).
+pub fn receive_many(paths: &Paths, dest: &Scope, incoming: &Incoming, tar: &mut dyn Read, targets: &[usize], j: &mut Journal) -> Result<usize, (usize, String)> {
+    let names: Vec<&str> = incoming.sent.iter().map(|(n, _)| n.as_str()).collect();
+    for (i, name) in names.iter().enumerate() {
+        check_folder_name(name).map_err(|e| (0, e))?;
+        if names[..i].contains(name) {
+            return Err((0, format!("{name} is sent twice")));
+        }
+    }
+    if names.is_empty() || (!incoming.named && names.len() != 1) {
+        return Err((0, "a tar of one folder's contents holds one skill".into()));
+    }
+    let store = AGENTS[CANONICAL].dir(dest, paths);
+    for name in incoming.place {
+        if !names.contains(&name.as_str()) {
+            return Err((0, format!("{name} was not sent")));
+        }
+        if fs::symlink_metadata(store.join(name)).is_ok() {
+            return Err((0, format!("{name} is already in {}", store.join(name).display())));
+        }
+    }
+    fs::create_dir_all(&store).map_err(|e| (0, format!("{}: {e}", store.display())))?;
+    // Hidden names: a scan of the store never shows them as skills.
+    let incoming_name = format!(".prism-incoming-{}-{}", std::process::id(), names[0]);
+    let (archive, staging) = (store.join(format!("{incoming_name}.tar")), store.join(&incoming_name));
+    let top = if incoming.named { Some(names.as_slice()) } else { None };
+    let into = if incoming.named { staging.clone() } else { staging.join(names[0]) };
+    let unpacked = unpack(tar, &archive, &staging, &into, top).and_then(|()| {
+        for (name, hash) in incoming.sent {
+            let folder = staging.join(name);
+            // A link where a folder should be would place a link to anywhere.
+            let real = fs::symlink_metadata(&folder).is_ok_and(|m| m.is_dir());
+            if !real || crate::planid::tree_hash(&folder) != Some(*hash) {
+                return Err(format!("{name} arrived incomplete or changed; nothing was placed"));
+            }
+        }
+        Ok(())
+    });
+    let _ = fs::remove_file(&archive);
+    let mut placed = 0;
+    let result = unpacked.map_err(|e| (0, e)).and_then(|()| {
+        for name in incoming.place {
+            let dst = store.join(name);
+            j.place(&staging.join(name), &dst).map_err(|e| (placed, format!("{}: {e}", dst.display())))?;
+            placed += 1;
+        }
+        Ok(())
+    });
+    let _ = fs::remove_dir_all(&staging);
+    result?;
+    // Every skill is placed by now: a link that fails leaves all of them for undo to take back.
+    for name in incoming.place {
+        link_arrived(paths, name, dest, targets, j).map_err(|e| (placed, e))?;
+    }
+    Ok(placed)
+}
+
+/// Saves `tar` to `archive`, checks every member stays inside (and, given `top`, inside one of
+/// those top-level folders), and unpacks it into `into`, made inside a fresh `staging`.
+fn unpack(tar: &mut dyn Read, archive: &Path, staging: &Path, into: &Path, top: Option<&[&str]>) -> Result<(), String> {
+    let saved = fs::File::create(archive).and_then(|mut f| io::copy(tar, &mut f));
+    saved.map_err(|e| format!("could not save the skill's archive: {e}"))?;
+    let listed = run_tar(Command::new("tar").arg("-tf").arg(archive))?;
+    let outside = |m: &&str| {
+        let path = Path::new(m);
+        let first = path.components().find(|c| c != &Component::CurDir);
+        let stray = match (top, first) {
+            (Some(names), Some(Component::Normal(n))) => !names.iter().any(|t| n == std::ffi::OsStr::new(t)),
+            _ => false,
+        };
+        m.starts_with('/') || path.components().any(|c| c == Component::ParentDir) || stray
+    };
+    if let Some(member) = String::from_utf8_lossy(&listed).lines().find(outside) {
+        return Err(format!("the skill's archive reaches outside its folder ({member}); nothing was unpacked"));
+    }
+    let _ = fs::remove_dir_all(staging);
+    fs::create_dir(staging).map_err(|e| format!("{}: {e}", staging.display()))?;
+    if into != staging {
+        fs::create_dir(into).map_err(|e| format!("{}: {e}", into.display()))?;
+    }
+    run_tar(Command::new("tar").arg("-xf").arg(archive).arg("-C").arg(into).arg("--no-same-owner")).map(|_| ())
+}
+
+/// Runs `tar` and returns what it printed, or why it failed.
+fn run_tar(cmd: &mut Command) -> Result<Vec<u8>, String> {
+    let out = cmd.output().map_err(|e| format!("could not run tar: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("tar could not read the skill's archive: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(out.stdout)
 }
 
 /// The two folders hold the same files with the same bytes (`.DS_Store` aside).

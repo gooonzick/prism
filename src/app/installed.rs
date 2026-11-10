@@ -6,13 +6,9 @@ use rune::{Mods, TextEdit};
 
 use super::{App, Filter, NewSkill};
 use crate::agents::{AGENTS, CANONICAL, Scope};
-use crate::fsops::Journal;
 use crate::scan::{Placement, Skill};
-use crate::sync;
-
-fn plural(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
-}
+use crate::skill;
+use crate::sync::{self, plural};
 
 impl App {
     // The list.
@@ -64,6 +60,10 @@ impl App {
     }
 
     pub(super) fn load_preview(&mut self) {
+        if self.is_remote() {
+            self.load_remote_preview();
+            return;
+        }
         self.preview = self.selected.as_deref().and_then(|n| self.inv.get(n)).and_then(|s| s.manifest()).map(|m| m.body);
     }
 
@@ -178,28 +178,33 @@ impl App {
 
     /// Links or unlinks `skill` for `agent`, from its switch.
     pub fn toggle_link(&mut self, skill: &str, agent: usize) {
+        if self.is_remote() {
+            return self.host_toggle_link(skill, agent);
+        }
         let Some(s) = self.inv.get(skill) else { return };
-        let mut j = Journal::default();
+        let mut j = self.new_journal();
         let (label, result) = match &s.placements[agent] {
             Placement::Linked | Placement::Link(_) | Placement::Broken(_) => (
-                format!("unlink {skill} from {}", AGENTS[agent].name),
+                sync::label::unlink(skill, agent),
                 sync::unlink(&self.scope, &self.paths, skill, agent, &mut j),
             ),
-            Placement::Missing => (format!("link {skill} into {}", AGENTS[agent].name), sync::link(&self.inv, &self.paths, skill, agent, &mut j)),
+            Placement::Missing => (sync::label::link(skill, agent), sync::link(&self.inv, &self.paths, skill, agent, &mut j)),
             Placement::Dir => (
                 String::new(),
                 Err(format!("{} has its own folder; use \"Use link\" or move it to the trash", AGENTS[agent].name)),
             ),
         };
-        let mut chars = label.chars();
-        let title = chars.next().map(|c| c.to_uppercase().chain(chars).collect::<String>()).unwrap_or_default();
+        let title = sentence(&label);
         self.changed(label, j, result.map(|_| title));
     }
 
     /// Replaces `agent`'s own copy with a link to `.agents` (adopting it if `.agents` lacks it).
     pub fn replace_with_link(&mut self, skill: &str, agent: usize) {
+        if self.is_remote() {
+            return self.host_replace_with_link(skill, agent);
+        }
         let plan = sync::plan_one(&self.inv, skill, &[agent], &self.paths);
-        let mut j = Journal::default();
+        let mut j = self.new_journal();
         let result = match plan.conflicts.first() {
             Some(c) => Err(c.reason.clone()),
             None => sync::apply(&self.scope, &self.paths, &plan.actions, &mut j).map(|_| format!("{skill} now lives in .agents")).map_err(|(_, e)| e),
@@ -208,16 +213,23 @@ impl App {
     }
 
     pub fn trash_copy(&mut self, skill: &str, agent: usize) {
-        let mut j = Journal::default();
+        if self.is_remote() {
+            return self.host_trash_copy(skill, agent);
+        }
+        let mut j = self.new_journal();
         let result = sync::trash_copy(&self.scope, &self.paths, skill, agent, &mut j)
             .map(|_| format!("Moved {}'s copy of {skill} to the trash", AGENTS[agent].name));
-        self.changed(format!("trash {}'s copy of {skill}", AGENTS[agent].name), j, result);
+        self.changed(sync::label::trash_copy(skill, agent), j, result);
     }
 
     /// Removes every skill in `names`, going on past failures.
     pub fn remove(&mut self, names: &[String]) {
         self.confirm_remove = None;
-        let mut j = Journal::default();
+        if self.is_remote() {
+            self.checked.retain(|n| !names.contains(n));
+            return self.host_remove(names);
+        }
+        let mut j = self.new_journal();
         let mut failed = Vec::new();
         for name in names {
             if let Err(e) = sync::remove(&self.inv, &self.paths, name, &mut j) {
@@ -231,20 +243,19 @@ impl App {
             (false, _) => Err(format!("Removed {removed} of {}: {}", names.len(), failed.join("\n"))),
         };
         self.checked.retain(|n| !names.contains(n));
-        let label = match names {
-            [one] => format!("remove {one}"),
-            _ => format!("remove {}", plural(names.len(), "skill", "skills")),
-        };
-        self.changed(label, j, result);
+        self.changed(sync::label::remove(names), j, result);
     }
 
     pub fn remove_broken(&mut self) {
-        let mut j = Journal::default();
-        let result = sync::remove_broken(&self.inv, &self.paths, &mut j).map(|n| format!("Removed {}", plural(n, "broken link", "broken links")));
         if self.status_filter == Filter::Broken {
             self.status_filter = Filter::All;
         }
-        self.changed("clean up broken links".into(), j, result);
+        if self.is_remote() {
+            return self.host_remove_broken();
+        }
+        let mut j = self.new_journal();
+        let result = sync::remove_broken(&self.inv, &self.paths, &mut j).map(|n| format!("Removed {}", plural(n, "broken link", "broken links")));
+        self.changed(sync::label::BROKEN.into(), j, result);
     }
 
     // Sync.
@@ -260,6 +271,9 @@ impl App {
     }
 
     fn open_sync_for(&mut self, only: Option<Vec<String>>) {
+        if self.is_remote() {
+            return self.host_open_sync(only);
+        }
         self.rescan();
         let targets = self.targets();
         self.sync_plan = Some(match &only {
@@ -271,19 +285,31 @@ impl App {
 
     pub fn close_sync(&mut self) {
         self.sync_plan = None;
+        self.sync_host = None;
         self.sync_only = None;
     }
 
+    /// The sync dialog is open, with this machine's plan or a host's.
+    pub fn sync_open(&self) -> bool {
+        self.sync_plan.is_some() || self.sync_host.is_some()
+    }
+
     pub fn toggle_target(&mut self, agent: usize) {
-        let mut t = self.targets();
-        if let Some(i) = t.iter().position(|&a| a == agent) {
-            t.remove(i);
-        } else {
-            t.push(agent);
-            t.sort();
+        if self.is_remote() {
+            return self.host_toggle_target(agent);
         }
-        self.settings.targets = Some(t.iter().map(|&a| AGENTS[a].id.to_string()).collect());
-        self.settings.save();
+        let paths = self.paths.clone();
+        self.edit_settings(|s| {
+            // From the targets on disk: the CLI may have set them since.
+            let mut t = crate::agents::target_indices(s.targets.as_deref(), &paths);
+            if let Some(i) = t.iter().position(|&a| a == agent) {
+                t.remove(i);
+            } else {
+                t.push(agent);
+                t.sort();
+            }
+            s.targets = Some(t.iter().map(|&a| AGENTS[a].id.to_string()).collect());
+        });
         if self.sync_plan.is_some() {
             self.open_sync_for(self.sync_only.clone());
         }
@@ -291,31 +317,39 @@ impl App {
     }
 
     pub fn apply_sync(&mut self) {
+        if self.is_remote() {
+            return self.host_apply_sync();
+        }
         let Some(plan) = self.sync_plan.take() else { return };
         let only = self.sync_only.take();
         let n = plan.actions.len();
-        let mut j = Journal::default();
+        let mut j = self.new_journal();
         let result = sync::apply(&self.scope, &self.paths, &plan.actions, &mut j)
             .map(|_| format!("Synced: {}", plural(n, "change", "changes")))
             .map_err(|(done, e)| format!("Stopped after {done} of {n}: {e}"));
         if result.is_ok() && only.is_some() {
             self.checked.clear();
         }
-        self.changed(format!("sync ({})", plural(n, "change", "changes")), j, result);
+        self.changed(sync::label::sync(n), j, result);
     }
 
     // Copying to another scope.
 
     pub fn open_copy(&mut self, names: Vec<String>) {
         if !names.is_empty() {
+            // Other machines are listed too: their scopes are asked for now.
+            self.look_at_machines();
             self.copy_dialog = Some(names);
         }
     }
 
     pub fn copy_to(&mut self, dest: Scope) {
         let Some(names) = self.copy_dialog.take() else { return };
+        if self.is_remote() {
+            return self.host_copy_to(names, &dest);
+        }
         let targets = self.targets();
-        let mut j = Journal::default();
+        let mut j = self.new_journal();
         let mut failed = Vec::new();
         for n in &names {
             if let Err(e) = sync::copy_to(&self.inv, &self.paths, n, &dest, &targets, &mut j) {
@@ -329,7 +363,7 @@ impl App {
         } else {
             Err(format!("Copied {copied} of {} to {to}: {}", names.len(), failed.join("\n")))
         };
-        self.changed(format!("copy to {to}"), j, result);
+        self.changed(sync::label::copy(&to), j, result);
         self.refresh_stats();
     }
 
@@ -343,10 +377,13 @@ impl App {
 
     /// Writes `.agents/skills/<name>/SKILL.md`, links it into the targets and opens it.
     pub fn create_skill(&mut self) {
+        if self.is_remote() {
+            return self.host_create_skill();
+        }
         let Some(form) = &mut self.new_skill else { return };
         let name = form.name.text.trim().to_string();
-        let description = form.description.text.trim().replace('\n', " ");
-        if let Err(e) = valid_name(&name) {
+        let description = form.description.text.clone();
+        if let Err(e) = skill::valid_name(&name) {
             form.error = Some(e);
             return;
         }
@@ -355,18 +392,14 @@ impl App {
             form.error = Some(format!("{name} already exists here"));
             return;
         }
-        let description = if description.is_empty() { "Use when …".to_string() } else { description };
-        let body = format!(
-            "---\nname: {name}\ndescription: {}\n---\n\n# {name}\n\nWhat to do, step by step.\n",
-            yaml_string(&description)
-        );
+        let body = skill::template(&name, &description);
         if let Err(e) = fs::create_dir_all(&dir).and_then(|_| fs::write(dir.join("SKILL.md"), body)) {
             form.error = Some(e.to_string());
             return;
         }
         self.new_skill = None;
         self.rescan();
-        let mut j = Journal::default();
+        let mut j = self.new_journal();
         let plan = sync::plan_one(&self.inv, &name, &self.targets(), &self.paths);
         let _ = sync::apply(&self.scope, &self.paths, &plan.actions, &mut j);
         self.notify(format!("Created {name}"), "Its SKILL.md is open in your editor".into(), false);
@@ -374,6 +407,12 @@ impl App {
         self.select(&name);
         open_path(&dir.join("SKILL.md"));
     }
+}
+
+/// `label` as a toast's title: its first letter capitalised.
+pub(super) fn sentence(label: &str) -> String {
+    let mut chars = label.chars();
+    chars.next().map(|c| c.to_uppercase().chain(chars).collect::<String>()).unwrap_or_default()
 }
 
 /// Opens a file or folder with its default app.
@@ -406,50 +445,4 @@ pub fn reveal_path(path: &std::path::Path) {
             let _ = std::process::Command::new("xdg-open").arg(path.parent().unwrap_or(&path)).spawn();
         }
     });
-}
-
-/// Skill names as agents accept them: lowercase letters, digits and single hyphens.
-pub fn valid_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("Give it a name".into());
-    }
-    if name.len() > 64 {
-        return Err("Keep the name under 64 characters".into());
-    }
-    let ok = name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-    if !ok || name.starts_with('-') || name.ends_with('-') || name.contains("--") {
-        return Err("Use lowercase letters, digits and single hyphens, like pdf-tools".into());
-    }
-    Ok(())
-}
-
-/// `s` as a YAML scalar: plain when that is safe, double-quoted otherwise.
-fn yaml_string(s: &str) -> String {
-    let plain = !s.is_empty()
-        && !s.contains(": ")
-        && !s.contains(" #")
-        && !s.starts_with(|c: char| "-?:,[]{}#&*!|>'\"%@`".contains(c))
-        && !s.ends_with(':');
-    if plain { s.to_string() } else { format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")) }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn names_follow_the_skill_convention() {
-        assert!(valid_name("pdf-tools").is_ok());
-        assert!(valid_name("v2").is_ok());
-        for bad in ["", "PDF", "pdf tools", "-x", "x-", "a--b"] {
-            assert!(valid_name(bad).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
-    fn descriptions_are_quoted_only_when_yaml_needs_it() {
-        assert_eq!(yaml_string("Use when testing"), "Use when testing");
-        assert_eq!(yaml_string("Use when: testing"), "\"Use when: testing\"");
-        assert_eq!(crate::skill::parse(&format!("---\ndescription: {}\n---\n", yaml_string("Say \"hi\": now"))).description.as_deref(), Some("Say \"hi\": now"));
-    }
 }

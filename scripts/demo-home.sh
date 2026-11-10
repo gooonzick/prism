@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds a throwaway home folder with a few skills in every state Prism shows (synced, an
-# agent's own copy, half linked, a broken link) and renders the README screenshots from it.
+# agent's own copy, half linked, a broken link) and a few MCP servers, and renders the README
+# screenshots from it.
 # Usage: scripts/demo-home.sh [out dir, default docs]
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -38,6 +39,42 @@ skill "$PROJECT/.agents/skills" api-conventions "How endpoints, errors and pagin
 link "$PROJECT/.claude/skills" api-conventions
 skill "$PROJECT/.claude/skills" release-checklist "Steps to cut, tag and announce a release of acme-web."
 
+# MCP servers in Claude Code, Cursor and Codex: two in sync, context7 missing its header in
+# Cursor, and the same Figma package under two names. Values are references, never real keys.
+mkdir -p "$DEMO/.cursor" "$DEMO/.codex"
+cat >"$DEMO/.claude.json" <<'JSON'
+{
+  "mcpServers": {
+    "github": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"] },
+    "playwright": { "command": "npx", "args": ["@playwright/mcp@latest"] },
+    "context7": {
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp",
+      "headers": { "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}" }
+    },
+    "figma": { "command": "npx", "args": ["-y", "figma-developer-mcp", "--stdio"] }
+  }
+}
+JSON
+cat >"$DEMO/.cursor/mcp.json" <<'JSON'
+{
+  "mcpServers": {
+    "github": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"] },
+    "context7": { "url": "https://mcp.context7.com/mcp" },
+    "figma-dev": { "command": "bunx", "args": ["figma-developer-mcp", "--stdio"] }
+  }
+}
+JSON
+cat >"$DEMO/.codex/config.toml" <<'TOML'
+[mcp_servers.github]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+
+[mcp_servers.playwright]
+command = "npx"
+args = ["@playwright/mcp@latest"]
+TOML
+
 SETTINGS="$DEMO/Library/Application Support/dev.prism.skills"
 mkdir -p "$SETTINGS"
 printf '{ "projects": ["%s"] }\n' "$PROJECT" >"$SETTINGS/settings.json"
@@ -55,4 +92,6 @@ snap detail-dark.png --scene detail --theme dark
 snap sync.png --scene sync --theme light
 snap browse.png --scene browse --theme light
 snap project.png --theme light "$PROJECT"
+snap mcp.png --scene mcp --theme light
+snap remote.png --scene env-remote --theme light
 echo "Screenshots in $OUT, demo home in $DEMO"

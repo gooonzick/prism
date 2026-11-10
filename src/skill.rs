@@ -73,9 +73,81 @@ fn unquote(v: &str) -> String {
     v.to_string()
 }
 
+/// A value under the frontmatter's `metadata:` map (string keys and values, as the skills
+/// format has it), like `metadata.prism-version`.
+pub fn metadata(src: &str, key: &str) -> Option<String> {
+    let mut lines = src.strip_prefix('\u{feff}').unwrap_or(src).lines();
+    if lines.next().map(str::trim_end) != Some("---") {
+        return None;
+    }
+    let front: Vec<&str> = lines.take_while(|l| l.trim_end() != "---").collect();
+    let start = front.iter().position(|l| l.trim_end() == "metadata:")?;
+    let prefix = format!("{key}:");
+    front[start + 1..]
+        .iter()
+        .take_while(|l| l.is_empty() || l.starts_with(' ') || l.starts_with('\t'))
+        .find_map(|l| l.trim().strip_prefix(&prefix).map(|v| unquote(v.trim())))
+}
+
+/// Skill names as agents accept them: lowercase letters, digits and single hyphens.
+pub fn valid_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Give it a name".into());
+    }
+    if name.len() > 64 {
+        return Err("Keep the name under 64 characters".into());
+    }
+    let ok = name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !ok || name.starts_with('-') || name.ends_with('-') || name.contains("--") {
+        return Err("Use lowercase letters, digits and single hyphens, like pdf-tools".into());
+    }
+    Ok(())
+}
+
+/// The `SKILL.md` of a new skill. An empty description becomes a prompt to fill in.
+pub fn template(name: &str, description: &str) -> String {
+    let description = description.trim().replace('\n', " ");
+    let description = if description.is_empty() { "Use when …".to_string() } else { description };
+    format!("---\nname: {name}\ndescription: {}\n---\n\n# {name}\n\nWhat to do, step by step.\n", yaml_string(&description))
+}
+
+/// `s` as a YAML scalar: plain when that is safe, double-quoted otherwise.
+fn yaml_string(s: &str) -> String {
+    let plain = !s.is_empty()
+        && !s.contains(": ")
+        && !s.contains(" #")
+        && !s.starts_with(|c: char| "-?:,[]{}#&*!|>'\"%@`".contains(c))
+        && !s.ends_with(':');
+    if plain { s.to_string() } else { format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_follow_the_skill_convention() {
+        assert!(valid_name("pdf-tools").is_ok());
+        assert!(valid_name("v2").is_ok());
+        for bad in ["", "PDF", "pdf tools", "-x", "x-", "a--b"] {
+            assert!(valid_name(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn descriptions_are_quoted_only_when_yaml_needs_it() {
+        assert_eq!(yaml_string("Use when testing"), "Use when testing");
+        assert_eq!(yaml_string("Use when: testing"), "\"Use when: testing\"");
+        assert_eq!(parse(&format!("---\ndescription: {}\n---\n", yaml_string("Say \"hi\": now"))).description.as_deref(), Some("Say \"hi\": now"));
+    }
+
+    #[test]
+    fn a_new_skill_reads_back() {
+        let m = parse(&template("pdf-tools", "  Use when\nPDFs: ok "));
+        assert_eq!(m.name.as_deref(), Some("pdf-tools"));
+        assert_eq!(m.description.as_deref(), Some("Use when PDFs: ok"));
+        assert_eq!(parse(&template("x", "")).description.as_deref(), Some("Use when …"));
+    }
 
     #[test]
     fn reads_plain_frontmatter_and_body() {
@@ -92,6 +164,16 @@ mod tests {
         assert_eq!(m.description.as_deref(), Some("Use when testing."));
         let m = parse("---\ndescription: \"Say \\\"hi\\\"\"\n---\n");
         assert_eq!(m.description.as_deref(), Some("Say \"hi\""));
+    }
+
+    #[test]
+    fn reads_metadata_values() {
+        let src = "---\nname: prism\nmetadata:\n  author: me\n  prism-version: \"1.2.3\"\nlicense: MIT\n---\nversion: 9\n";
+        assert_eq!(metadata(src, "prism-version").as_deref(), Some("1.2.3"));
+        assert_eq!(metadata(src, "author").as_deref(), Some("me"));
+        assert_eq!(metadata(src, "license"), None, "top-level keys are not metadata");
+        assert_eq!(metadata("---\nname: x\nprism-version: 1\n---\n", "prism-version"), None);
+        assert_eq!(metadata("# no frontmatter\nmetadata:\n  a: b\n", "a"), None);
     }
 
     #[test]

@@ -205,3 +205,134 @@ fn copy_to_another_scope_lands_in_its_agents_and_links() {
     assert_eq!(fs::read_link(project.join(".claude/skills/alpha")).unwrap(), PathBuf::from("../../.agents/skills/alpha"));
     assert!(copy_to(&f.inv(), &f.paths, "alpha", &dest, &[], &mut Journal::default()).is_err(), "an existing copy is kept");
 }
+
+#[test]
+fn link_installed_links_into_targets_only() {
+    let fx = Fixture::new();
+    fx.skill("agents", "fresh", "x");
+    let claude = index_of("claude").unwrap();
+    let n = link_installed(&Scope::Global, &fx.paths, &[claude], &["fresh".to_string()]).unwrap();
+    assert_eq!(n, 1);
+    assert!(fs::symlink_metadata(fx.dir("claude").join("fresh")).unwrap().file_type().is_symlink());
+    assert!(fs::symlink_metadata(fx.dir("codex").join("fresh")).is_err());
+    // `*` means every skill in the canonical store; nothing is left to link now.
+    assert_eq!(link_installed(&Scope::Global, &fx.paths, &[claude], &["*".to_string()]).unwrap(), 0);
+}
+
+/// A tar with one file per `(name, body)`, member names written as given (system `tar`
+/// strips `..` and leading `/` when it creates one, the way a hostile sender would not).
+fn raw_tar(members: &[(&str, &str)]) -> Vec<u8> {
+    let mut tar = Vec::new();
+    for (name, body) in members {
+        assert!(name.len() < 100, "{name} is too long for a plain ustar name");
+        let mut h = [0u8; 512];
+        h[..name.len()].copy_from_slice(name.as_bytes());
+        h[100..108].copy_from_slice(b"0000644\0");
+        h[108..116].copy_from_slice(b"0000000\0");
+        h[116..124].copy_from_slice(b"0000000\0");
+        h[124..136].copy_from_slice(format!("{:011o}\0", body.len()).as_bytes());
+        h[136..148].copy_from_slice(b"00000000000\0");
+        h[156] = b'0';
+        h[257..263].copy_from_slice(b"ustar\0");
+        h[263..265].copy_from_slice(b"00");
+        h[148..156].copy_from_slice(b"        ");
+        let sum: u32 = h.iter().map(|&b| u32::from(b)).sum();
+        h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+        tar.extend_from_slice(&h);
+        tar.extend_from_slice(body.as_bytes());
+        tar.resize(tar.len().next_multiple_of(512), 0);
+    }
+    tar.resize(tar.len() + 1024, 0);
+    tar
+}
+
+/// One skill sent as a tar of its folder's contents, as `skills receive NAME` takes it.
+fn receive(paths: &Paths, dest: &Scope, name: &str, tar: &mut dyn Read, hash: u64, targets: &[usize], j: &mut Journal) -> Result<(), String> {
+    let sent = [(name.to_string(), hash)];
+    receive_many(paths, dest, &Incoming { sent: &sent, named: false, place: &[name.to_string()] }, tar, targets, j).map(|_| ()).map_err(|(_, e)| e)
+}
+
+#[test]
+fn receive_refuses_an_archive_reaching_outside_the_skill() {
+    let f = Fixture::new();
+    let store = f.dir("agents");
+    let codex = ids(&["codex"]);
+    let absolute = f.paths.home.join("evil-abs");
+    for bad in ["../evil", "./sub/../../evil", absolute.to_str().unwrap()] {
+        let tar = raw_tar(&[("./SKILL.md", "ok"), (bad, "pwned")]);
+        let mut j = Journal::default();
+        let got = receive(&f.paths, &Scope::Global, "pdf", &mut tar.as_slice(), 0, &codex, &mut j);
+        assert!(got.as_ref().is_err_and(|e| e.contains("reaches outside")), "{bad}: {got:?}");
+        assert!(j.is_empty());
+        let left: Vec<_> = fs::read_dir(&store).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert!(left.is_empty(), "{bad} left {left:?}");
+        assert!(!store.parent().unwrap().join("evil").exists() && !store.join("evil").exists());
+        assert!(!absolute.exists());
+    }
+    // The same archive without the bad member goes in.
+    let tar = raw_tar(&[("./SKILL.md", "ok"), ("sub/a.md", "a")]);
+    let mut j = Journal::default();
+    receive(&f.paths, &Scope::Global, "pdf", &mut tar.as_slice(), expected_hash(), &codex, &mut j).unwrap();
+    assert_eq!(fs::read_to_string(store.join("pdf/sub/a.md")).unwrap(), "a");
+    assert!(fs::symlink_metadata(f.dir("codex").join("pdf")).unwrap().file_type().is_symlink());
+}
+
+/// The hash of the tree `raw_tar(&[("./SKILL.md", "ok"), ("sub/a.md", "a")])` unpacks to.
+fn expected_hash() -> u64 {
+    let d = tempfile::tempdir().unwrap();
+    fs::create_dir_all(d.path().join("sub")).unwrap();
+    fs::write(d.path().join("SKILL.md"), "ok").unwrap();
+    fs::write(d.path().join("sub/a.md"), "a").unwrap();
+    crate::planid::tree_hash(d.path()).unwrap()
+}
+
+#[test]
+fn receive_cleans_up_after_a_broken_archive() {
+    let f = Fixture::new();
+    let store = f.dir("agents");
+    let mut j = Journal::default();
+    assert!(receive(&f.paths, &Scope::Global, "pdf", &mut &b"not a tar at all"[..], expected_hash(), &[], &mut j).is_err());
+    assert!(fs::read_dir(&store).unwrap().next().is_none());
+    assert!(j.is_empty());
+}
+
+#[test]
+fn receive_refuses_an_empty_stream() {
+    let f = Fixture::new();
+    let store = f.dir("agents");
+    let mut j = Journal::default();
+    let got = receive(&f.paths, &Scope::Global, "pdf", &mut &b""[..], expected_hash(), &ids(&["codex"]), &mut j);
+    assert!(got.is_err(), "an empty stream became a skill");
+    assert!(fs::read_dir(&store).unwrap().next().is_none(), "nothing is placed and nothing is left");
+    assert!(fs::symlink_metadata(f.dir("codex").join("pdf")).is_err());
+    assert!(j.is_empty());
+}
+
+#[test]
+fn receive_refuses_a_tampered_archive() {
+    let f = Fixture::new();
+    let store = f.dir("agents");
+    let tar = raw_tar(&[("./SKILL.md", "ok"), ("sub/a.md", "changed on the way")]);
+    let mut j = Journal::default();
+    let got = receive(&f.paths, &Scope::Global, "pdf", &mut tar.as_slice(), expected_hash(), &[], &mut j);
+    assert_eq!(got, Err("pdf arrived incomplete or changed; nothing was placed".to_string()));
+    assert!(fs::read_dir(&store).unwrap().next().is_none());
+    assert!(j.is_empty());
+}
+
+#[test]
+fn a_link_that_fails_after_placing_counts_what_was_placed() {
+    let f = Fixture::new();
+    let store = f.dir("agents");
+    // Codex's skills folder is a file: the skill is placed, then its link fails.
+    let codex = f.dir("codex");
+    fs::create_dir_all(codex.parent().unwrap()).unwrap();
+    fs::write(&codex, "not a folder").unwrap();
+    let tar = raw_tar(&[("./SKILL.md", "ok"), ("sub/a.md", "a")]);
+    let sent = [("pdf".to_string(), expected_hash())];
+    let mut j = Journal::default();
+    let got = receive_many(&f.paths, &Scope::Global, &Incoming { sent: &sent, named: false, place: &["pdf".to_string()] }, &mut tar.as_slice(), &ids(&["codex"]), &mut j);
+    let (placed, _) = got.expect_err("the link fails");
+    assert_eq!(placed, 1, "the skill was placed before the link failed");
+    assert!(store.join("pdf/SKILL.md").is_file() && !j.is_empty(), "and undo can take it back");
+}

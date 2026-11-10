@@ -6,8 +6,10 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 /// Home and config folders, read once from the environment so tests can point them elsewhere.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Paths {
     pub home: PathBuf,
     /// `$XDG_CONFIG_HOME`, else `~/.config`.
@@ -18,6 +20,8 @@ pub struct Paths {
     pub codex: PathBuf,
     /// The trash: `~/.Trash` on macOS, the freedesktop trash (`$XDG_DATA_HOME/Trash`) elsewhere.
     pub trash: PathBuf,
+    /// Prism's own folder: settings, the last change and its config backups.
+    pub state: PathBuf,
 }
 
 impl Paths {
@@ -29,6 +33,7 @@ impl Paths {
     pub fn with_home(home: PathBuf) -> Paths {
         let var = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
         Paths {
+            state: dirs::config_dir().unwrap_or_else(|| home.join(".config")).join("dev.prism.skills"),
             config: var("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config")),
             claude: var("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude")),
             codex: var("CODEX_HOME").unwrap_or_else(|| home.join(".codex")),
@@ -45,12 +50,12 @@ impl Paths {
     #[cfg(test)]
     pub fn isolated(home: &Path) -> Paths {
         let trash = if cfg!(target_os = "macos") { home.join(".Trash") } else { home.join(".local/share/Trash") };
-        Paths { home: home.into(), config: home.join(".config"), claude: home.join(".claude"), codex: home.join(".codex"), trash }
+        Paths { home: home.into(), config: home.join(".config"), claude: home.join(".claude"), codex: home.join(".codex"), trash, state: home.join(".config/dev.prism.skills") }
     }
 }
 
 /// Global skills (the home folder) or one project's.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Scope {
     Global,
     Project(PathBuf),
@@ -164,6 +169,12 @@ pub fn tilde(path: &Path, paths: &Paths) -> String {
 /// Agents to sync into by default: the installed ones, except the canonical store.
 pub fn default_targets(paths: &Paths) -> Vec<String> {
     AGENTS.iter().skip(1).filter(|a| a.detected(paths)).map(|a| a.id.to_string()).collect()
+}
+
+/// Agent indices a sync links into: the chosen `targets` (or the defaults), minus the canonical store.
+pub fn target_indices(targets: Option<&[String]>, paths: &Paths) -> Vec<usize> {
+    let ids = targets.map_or_else(|| default_targets(paths), <[String]>::to_vec);
+    ids.iter().filter_map(|id| index_of(id)).filter(|&i| i != CANONICAL).collect()
 }
 
 #[cfg(test)]

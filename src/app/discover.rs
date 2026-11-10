@@ -1,67 +1,62 @@
-//! Finding projects that already have skills, under a folder the user picks.
+//! Add project…: the folder the user picks, or the projects with skills inside it.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::{App, Found};
-use crate::agents::{Paths, Scope};
-use crate::scan;
-
-/// Folders never worth descending into.
-const SKIP: &[&str] = &["node_modules", "target", "dist", "build", "vendor", "Library", "Applications", "Pictures", "Movies", "Music"];
-
-/// How deep below the chosen folder projects are looked for.
-const DEPTH: usize = 4;
-
-/// Projects under `root` with at least one skill in an agent folder, with their counts.
-pub fn find_projects(root: &Path, paths: &Paths) -> Vec<(PathBuf, usize)> {
-    let mut out = Vec::new();
-    walk(root, 0, paths, &mut out);
-    out.sort();
-    out
-}
-
-fn walk(dir: &Path, depth: usize, paths: &Paths, out: &mut Vec<(PathBuf, usize)>) {
-    if dir == paths.home && depth > 0 {
-        return;
-    }
-    let n = if dir == paths.home { 0 } else { scan::scan(&Scope::Project(dir.to_path_buf()), paths).skills.len() };
-    if n > 0 {
-        out.push((dir.to_path_buf(), n));
-    }
-    if depth >= DEPTH {
-        return;
-    }
-    let Ok(entries) = fs::read_dir(dir) else { return };
-    for e in entries.filter_map(Result::ok) {
-        let name = e.file_name().to_string_lossy().into_owned();
-        let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
-        if is_dir && !name.starts_with('.') && !SKIP.contains(&name.as_str()) {
-            walk(&e.path(), depth + 1, paths, out);
-        }
-    }
-}
+use crate::agents::Scope;
 
 impl App {
-    pub fn discover_in(&mut self, root: PathBuf) {
+    /// Adds `dir` when it has skills of its own, offers the projects with skills found inside it
+    /// when it has none, and adds it as is when nothing inside has skills either. A folder already
+    /// listed just opens.
+    pub fn add_folder(&mut self, dir: PathBuf) {
+        // A folder picked here is on this machine; a host's projects are typed paths
+        // (`save_host_project`).
+        if self.is_remote() {
+            return;
+        }
+        let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+        if self.settings.projects.contains(&dir) {
+            self.open_scope(Scope::Project(dir));
+            return;
+        }
+        if self.discovering {
+            return;
+        }
         let paths = self.paths.clone();
         self.discovering = true;
         self.found = None;
-        self.discover.request(root, move |root| {
-            let found = find_projects(&root, &paths);
+        self.discover.request(dir, move |root| {
+            let found = crate::projects::find_projects(&root, &paths);
             (root, found)
         });
     }
 
     pub(super) fn land_discovery(&mut self, root: PathBuf, found: Vec<(PathBuf, usize)>) {
         self.discovering = false;
-        let known = &self.settings.projects;
-        let projects: Vec<(PathBuf, usize, bool)> = found.into_iter().filter(|(p, _)| !known.contains(p)).map(|(p, n)| (p, n, true)).collect();
-        if projects.is_empty() {
-            self.notify("No new projects found".into(), format!("Nothing under {} has skills that isn't already listed", crate::agents::tilde(&root, &self.paths)), false);
+        if self.is_remote() {
             return;
         }
-        self.found = Some(Found { root, projects });
+        // The folder has skills of its own: it is the project.
+        if found.iter().any(|(p, _)| *p == root) {
+            self.add_project(root);
+            return;
+        }
+        let known = &self.settings.projects;
+        let projects: Vec<(PathBuf, usize, bool)> = found.iter().filter(|(p, _)| !known.contains(p)).map(|(p, n)| (p.clone(), *n, true)).collect();
+        if !projects.is_empty() {
+            self.found = Some(Found { root, projects });
+            return;
+        }
+        let where_ = crate::agents::tilde(&root, &self.paths);
+        if !found.is_empty() {
+            self.notify("Nothing new to add".into(), format!("Every project with skills in {where_} is already listed"), false);
+        } else if root == self.paths.home {
+            // Home is the Global scope, never a project.
+            self.notify("No projects with skills found".into(), format!("Nothing in {where_} has skills; pick a project folder instead"), false);
+        } else {
+            self.add_project(root);
+        }
     }
 
     /// Lands a discovery of `a` and `b` (one skill each), as a finished search would.
@@ -80,38 +75,18 @@ impl App {
     }
 
     pub fn add_found(&mut self) {
+        if self.is_remote() {
+            return;
+        }
         let Some(found) = self.found.take() else { return };
         let picked: Vec<PathBuf> = found.projects.into_iter().filter(|p| p.2).map(|p| p.0).collect();
-        for p in &picked {
-            self.settings.add_project(p.clone());
-        }
-        self.settings.save();
+        self.edit_settings(|s| {
+            for p in &picked {
+                s.add_project(p.clone());
+            }
+        });
         self.refresh_stats();
         let n = picked.len();
         self.notify(format!("Added {n} project{}", if n == 1 { "" } else { "s" }), String::new(), false);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn finds_projects_with_skills_and_skips_the_rest() {
-        let home = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(home.path()).unwrap();
-        let paths = Paths::isolated(&root);
-        let skill = |dir: &Path| {
-            fs::create_dir_all(dir.join("x")).unwrap();
-            fs::write(dir.join("x/SKILL.md"), "---\nname: x\n---\n").unwrap();
-        };
-        let dev = root.join("dev");
-        skill(&dev.join("app/.claude/skills"));
-        skill(&dev.join("group/lib/.agents/skills"));
-        skill(&dev.join("app/node_modules/pkg/.claude/skills"));
-        fs::create_dir_all(dev.join("empty/.claude/skills")).unwrap();
-
-        let found = find_projects(&dev, &paths);
-        assert_eq!(found, [(dev.join("app"), 1), (dev.join("group/lib"), 1)]);
     }
 }

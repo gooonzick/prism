@@ -4,11 +4,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::agents::{AGENTS, CANONICAL, Paths, Scope};
 use crate::skill;
 
 /// One agent's entry for a skill.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Placement {
     Missing,
     /// A real folder: a copy, or the canonical skill itself in `.agents`.
@@ -37,7 +39,7 @@ impl Placement {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Skill {
     /// The folder name, which agents use as the skill's id.
     pub name: String,
@@ -63,7 +65,7 @@ impl Skill {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Inventory {
     pub scope: Scope,
     pub skills: Vec<Skill>,
@@ -76,6 +78,18 @@ impl Inventory {
     pub fn get(&self, name: &str) -> Option<&Skill> {
         self.skills.iter().find(|s| s.name == name)
     }
+}
+
+/// A scope's counts, for the sidebar.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ScopeStats {
+    pub total: usize,
+    pub unsynced: usize,
+}
+
+/// Skill count, and how many skills are not synced into every agent in `targets`.
+pub fn stats_of(inv: &Inventory, targets: &[usize]) -> ScopeStats {
+    ScopeStats { total: inv.skills.len(), unsynced: inv.skills.iter().filter(|s| !s.synced(targets)).count() }
 }
 
 pub fn scan(scope: &Scope, paths: &Paths) -> Inventory {

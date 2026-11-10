@@ -4,8 +4,8 @@ use rune::{Color, El, Tx, col, row, text};
 use rune_kit::shell::Toolbar;
 use rune_kit::{Button, ButtonVariant, Checkbox, ControlSize, IconButton, IconButtonVariant, Kit, SegmentedControl, TextInput, glyphs};
 
-use super::{PLUS, REFRESH, SYNC, UPDATE, dot, empty, inspector, scroll_pane};
-use crate::agents::{AGENTS, Scope, tilde};
+use super::{PLUS, REFRESH, SYNC, UPDATE, dot, empty, inspector, page_tabs, scope_title, scroll_pane};
+use crate::agents::{AGENTS, tilde};
 use crate::app::{App, Filter};
 use crate::scan::{Placement, Skill};
 
@@ -19,13 +19,11 @@ pub fn page(s: &App, k: &Kit, _layer: &mut Vec<El>) -> (El, Toolbar, El) {
 }
 
 fn toolbar(s: &App, unsynced: usize, k: &Kit) -> Toolbar {
-    let title = match &s.scope {
-        Scope::Global => "Global skills".to_string(),
-        Scope::Project(p) => p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned()),
-    };
     let checking = s.checking.contains(&s.scope);
+    // skills.sh is this machine's: a host's skills aren't checked against it.
+    let remote = s.is_remote();
     let check_label = if checking { "Checking for updates…" } else { "Check skills.sh for updates" };
-    Toolbar::new().title(title).trailing(
+    Toolbar::new().leading(page_tabs(s, k)).title(scope_title(&s.scope, "skills")).trailing(
         row()
             .gap(6.0)
             .center_y()
@@ -44,7 +42,7 @@ fn toolbar(s: &App, unsynced: usize, k: &Kit) -> Toolbar {
                     .variant(IconButtonVariant::GhostMuted)
                     .label(check_label)
                     .help(check_label)
-                    .disabled(checking)
+                    .disabled(checking || remote)
                     .on_press(|s: &mut App| s.check_updates())
                     .build(k)
                     .key("check-updates"),
@@ -89,7 +87,11 @@ fn main(s: &App, visible: &[usize], targets: &[usize], k: &Kit) -> El {
         .key("filter");
     let mut list = col().key("skills").w_full().gap(2.0);
     if s.inv.skills.is_empty() {
-        list = list.child(empty("No skills here yet", &format!("Install one from skills.sh, or make one with New skill ({}).", crate::ui::key_label("N")), k));
+        let hint = match s.host() {
+            Some(h) => format!("Install one from skills.sh, then copy it to {} with prism skills copy --to-host {}.", h.name, h.name),
+            None => format!("Install one from skills.sh, or make one with New skill ({}).", crate::ui::key_label("N")),
+        };
+        list = list.child(empty("No skills here yet", &hint, k));
     } else if visible.is_empty() {
         let hint = match s.status_filter {
             Filter::All => "Try another word.",
@@ -226,12 +228,12 @@ fn bulk_bar(s: &App, n: usize, k: &Kit) -> El {
                 .key("bulk-update"),
         );
     }
-    if !s.other_scopes().is_empty() {
+    if s.can_copy() {
         bar = bar.child(
             Button::new("Copy to…")
                 .variant(ButtonVariant::Outline)
                 .control_size(ControlSize::Small)
-                .help("Copy the selected skills into another scope")
+                .help("Copy the selected skills into another scope or machine")
                 .on_press(|s: &mut App| s.open_copy(s.checked.clone()))
                 .build(k)
                 .key("bulk-copy"),
@@ -337,7 +339,7 @@ pub fn placement_color(p: &Placement, k: &Kit) -> Option<Color> {
 }
 
 /// A quiet label, with a dot when it has a state to show.
-fn tag(label: &str, color: Option<Color>, help: &str, k: &Kit) -> El {
+pub(super) fn tag(label: &str, color: Option<Color>, help: &str, k: &Kit) -> El {
     let mut c = row().h(20.0).px(6.0).gap(4.0).center_y().radius(k.radius.sm).border(1.0, k.c.border_weak).help(help.to_string());
     if let Some(color) = color {
         c = c.child(dot(color));

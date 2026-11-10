@@ -42,7 +42,8 @@ Prism keeps **one real copy** of each skill in `.agents/skills`, the same place 
   - folders that differ are skipped, never overwritten.
 - **Install from skills.sh.** Search the index, preview `SKILL.md`, list every skill in a repository and pick the ones you want. Installs and updates run through the official `skills` CLI.
 - **Updates.** Prism checks your skills against their sources in the background and updates one, several, or all of them.
-- **Projects.** Add project folders one by one, or let *Find projects* scan a folder for projects that already have skills. Skills move between scopes with *Copy to*.
+- **MCP servers.** One list of the MCP servers in Claude Code, Claude Desktop, Codex, Cursor, OpenCode, Gemini CLI, Windsurf and Kiro, with the agents that have each one. Prism shows where copies differ, suggests merging servers that are one under two names, and adds, copies, edits or removes a server in several agents' configs at once, leaving the rest of each file as it was. Env and header values stay hidden until you reveal them.
+- **Projects.** *Add project* takes a project folder, or a folder that holds projects: then it lists the ones with skills inside so you can add several at once. Skills move between scopes with *Copy to*.
 - **Safe by default.** Nothing is deleted outright: replaced folders go to the Trash (the freedesktop trash on Linux, so your file manager can put them back). The last change (a sync, remove, cleanup or copy) can be undone with ⌘Z.
 - **Live.** Prism watches the skill folders, so changes from the terminal, an editor or git show up on their own.
 - **Fast and native.** Written in Rust on [Rune](https://github.com/anomalyco/rune), with a GPU-drawn UI in light and dark.
@@ -55,6 +56,12 @@ Prism keeps **one real copy** of each skill in `.agents/skills`, the same place 
   <tr>
     <td align="center">Every sync shows its plan first</td>
     <td align="center">Search and install from skills.sh</td>
+  </tr>
+  <tr>
+    <td colspan="2"><img src="docs/mcp.png" alt="MCP servers in Claude Code, Cursor and Codex, one with copies that differ"></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center">MCP servers across agents, with the differences between copies</td>
   </tr>
 </table>
 
@@ -120,6 +127,67 @@ To run it straight from the terminal, optionally opening a project:
 cargo run --release -- ~/path/to/project
 ```
 
+## Command line
+
+The app is also a command line tool, for you and for your agents. On macOS, choose **Install Command Line Tool…** in the app menu, or run the binary inside the app once:
+
+```bash
+/Applications/Prism.app/Contents/MacOS/prism setup
+```
+
+`prism setup` links `prism` into `~/.local/bin` (or `/usr/local/bin`) and installs the `prism` skill, which tells Claude Code, Codex and the rest how to use it. On Linux the installer already put `prism` on your `PATH`; `setup` checks that and installs the skill.
+
+```bash
+prism skills list                         # every skill and the agents that have it
+prism mcp list                            # every MCP server, with drift and merge hints
+prism doctor --all                        # broken links, invalid skills, servers that differ
+prism mcp add github --command npx --arg -y --arg @modelcontextprotocol/server-github \
+  --env GITHUB_TOKEN=@token.txt --to claude cursor codex
+```
+
+Commands that change or remove something print their plan first and act only with `--apply`. Pass the plan's id back, and Prism stops if anything changed in between:
+
+```bash
+prism skills sync
+# Plan 3f9c2a1b7d40:
+#   - Link pdf into Codex
+# Run again with --apply --plan-id 3f9c2a1b7d40 to do it.
+prism skills sync --apply --plan-id 3f9c2a1b7d40
+prism undo                                # takes back the last change, from here or the app
+```
+
+Add `--json` to any command for output a script or an agent can read. Secrets print as `***` unless you ask for `--show-secrets`; pass them in with `KEY=@file` or `KEY=-` (stdin) to keep them out of your shell history. Several `KEY=-` share stdin, their values apart by NUL bytes (`--env` ones first, then `--header` ones).
+
+## Other machines
+
+Prism also works on the machines you reach over ssh: a dev box, a server, your other laptop. It connects with your own ssh setup (keys, agent, `~/.ssh/config`), never a password, and runs `prism` there.
+
+<img src="docs/remote.png" alt="Prism showing the global skills of devbox, picked in the machine switcher above the scopes">
+
+**Hosts.** Save a machine under a name, with what follows `ssh`:
+
+```bash
+prism hosts add devbox --ssh me@devbox.lan   # or an alias from ~/.ssh/config
+prism hosts check devbox                     # reachable, and running this version of prism?
+prism hosts install devbox                   # put this version in ~/.local/bin there
+prism hosts list
+```
+
+The host needs the same version of `prism` as this machine. Each release carries a CLI-only build, without the window, for that: `prism-cli-X.Y.Z-linux-x86_64.tar.gz`, `prism-cli-X.Y.Z-linux-arm64.tar.gz` and `prism-cli-X.Y.Z-macos-arm64.tar.gz`, each holding one file, `prism`, and all listed in `SHA256SUMS`; the Linux ones are static (musl), so they run whatever the host's glibc. `prism hosts install` downloads the matching archive on the host, checks it against `SHA256SUMS`, runs it there to see that it reports this version, and only then puts `prism` in `~/.local/bin`; nothing else there changes. Use `--binary PATH` to upload a build of your own instead. A `~/.local/bin/prism` there that is another program stays unless you pass `--force`.
+
+**The switcher.** The machine menu above the scopes lists this machine, your saved hosts and *Add host…*. Pick a host and the window shows its skills, projects and MCP servers, and every action (sync, link, remove, edit a server, undo) acts there. A host without this version of `prism` offers *Install prism*; one that doesn't answer says why and offers *Retry*. skills.sh installs always land on this machine; copy them across afterwards.
+
+**Copy across.** *Copy to…* on skills, and on an MCP server, lists your other machines next to the scopes of this one, so a skill or a server goes from this Mac to a host, from a host back here, or between two hosts. Each copy shows its plan first, as every change does, and the plan says what will need fixing there, such as a command path that only exists here. Secrets travel inside ssh on stdin, never in a command line. From the terminal:
+
+```bash
+prism skills copy pdf emil-animations --to-host devbox --to-global
+prism skills copy pdf --to-host devbox --to-project /home/me/site --apply
+prism mcp copy mobbin --to-host devbox --to claude codex
+prism mcp copy github --to-host devbox --to claude --to-project /home/me/site --claude-scope project
+```
+
+**`--host`.** Any command runs on a host with `--host NAME`, its output and exit code as the host gives them: `prism --host devbox doctor`, `prism --host devbox mcp list --json`. A copy to a host is one change there, so `prism --host devbox undo` takes it back.
+
 ## Keyboard
 
 On Linux, ⌘ is Ctrl.
@@ -142,8 +210,15 @@ On Linux, ⌘ is Ctrl.
 
 ```bash
 cargo test                    # core and UI tests, headless, on a throwaway $HOME
-cargo test -- --ignored       # also hit skills.sh and GitHub
+cargo test -- --ignored       # also hit skills.sh and GitHub; the e2e_ ones need the container below
 ./scripts/demo-home.sh        # rebuild the screenshots in docs/ from a demo home
+```
+
+The end to end tests reach a Linux container over a real ssh, so they need Docker running (on macOS, start Colima with `colima start`, or Docker Desktop); the script checks `docker info` first and says so when it doesn't answer. `scripts/e2e-ssh.sh` starts the container with a throwaway key and the CLI-only Linux build of `prism`, the static musl build releases ship; it keeps everything in `~/.cache/prism-e2e` and never touches your `~/.ssh`:
+
+```bash
+./scripts/e2e-ssh.sh && cargo test -- --ignored e2e_
+./scripts/e2e-ssh.sh --down   # stop the container and delete ~/.cache/prism-e2e
 ```
 
 Any screen renders without a window, which is handy for checking layout:
@@ -152,7 +227,7 @@ Any screen renders without a window, which is handy for checking layout:
 ./target/debug/prism --snap out.png --scene sync --theme dark
 ```
 
-Scenes: `detail`, `sync`, `remove`, `bulk`, `bulk-remove`, `updates`, `copy`, `new-skill`, `browse`, `repo`, `notice`.
+Scenes: `detail`, `sync`, `remove`, `bulk`, `bulk-remove`, `updates`, `copy`, `copy-to-host`, `new-skill`, `browse`, `repo`, `notice`, `found`, `mcp`, `mcp-add`, `mcp-copy`, `env-remote`, `env-unreachable`.
 
 | Path | What it does |
 | --- | --- |
@@ -161,6 +236,9 @@ Scenes: `detail`, `sync`, `remove`, `bulk`, `bulk-remove`, `updates`, `copy`, `n
 | `src/sync.rs` | sync plans, linking, removing, copying, broken links |
 | `src/fsops.rs` | the change journal behind undo, and the Trash |
 | `src/remote.rs` | skills.sh search, previews from GitHub, the `skills` CLI |
+| `src/mcp/` | MCP servers: each agent's config format, scans, plans and edits |
+| `src/cli/` | the `prism` command line and `prism setup` |
+| `src/hosts/` | saved hosts, running `prism` over ssh, installing it there, copies between machines |
 | `src/app/` | app state and actions |
 | `src/ui/` | the screens, built with rune-kit |
 
