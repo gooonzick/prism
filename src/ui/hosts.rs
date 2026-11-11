@@ -73,7 +73,7 @@ pub fn pending(s: &App, k: &Kit) -> Option<El> {
 pub fn browse_note(s: &App, k: &Kit) -> Option<El> {
     let host = s.host()?;
     let here = if cfg!(target_os = "macos") { "this Mac" } else { "this computer" };
-    Some(text(format!("skills.sh installs go to {here}; copy them to {} afterwards", host.name)).font(k.ty.caption()).color(k.c.text_muted).wrap().key("browse-host-note"))
+    Some(ds::text::hint(k, format!("skills.sh installs go to {here}; copy them to {} afterwards", host.name)).key("browse-host-note"))
 }
 
 /// A name and an ssh target, saved on this machine; then the window connects.

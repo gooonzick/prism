@@ -9,9 +9,9 @@ mod installed;
 mod mcp;
 mod mcp_dialogs;
 
-use rune::{Chrome, Color, Cx, El, Icon, KeyEvent, ScrollSpec, TextStyle, Tx, col, el, row, text};
+use rune::{Chrome, Color, Cx, El, Icon, KeyEvent, ScrollSpec, Tx, col, el, row, text};
 use rune_kit::shell::{self, PaneState, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar};
-use rune_kit::{Kit, Markdown, MarkdownStyle, Toast, ToastRegion, glyphs};
+use rune_kit::{Kit, Toast, ToastRegion, glyphs};
 
 use crate::agents::{Scope, tilde};
 use crate::app::{App, Page};
@@ -257,7 +257,9 @@ pub fn toolbar_fits(k: &Kit, room: Option<f32>, title: &str, icons: usize, butto
 /// The toolbar of a page without tabs (skills.sh): the title on the leading side, `trailing` on
 /// the other.
 pub fn toolbar_untabbed(k: &Kit, title: impl Into<String>, trailing: El) -> Toolbar {
-    Toolbar::new().leading(ds::toolbar_title(k, title)).trailing(trailing)
+    // The title truncates before the trailing controls give way.
+    let leading = row().shrink().min_w(0.0).child(ds::toolbar_title(k, title).shrink().min_w(0.0));
+    Toolbar::new().leading(leading).trailing(trailing)
 }
 
 /// A pane's content in a vertical scroll view that fills the pane.
@@ -272,16 +274,6 @@ pub fn heading(label: &str, k: &Kit) -> El {
 
 pub fn dot(color: Color) -> El {
     el().size(7.0, 7.0).radius(3.5).fill(color)
-}
-
-pub fn empty(title: &str, detail: &str, k: &Kit) -> El {
-    col()
-        .w_full()
-        .py(48.0)
-        .gap(6.0)
-        .items_center()
-        .child(text(title.to_string()).font(k.ty.ui_medium).color(k.c.text_muted))
-        .child(text(detail.to_string()).font(k.ty.small).color(k.c.text_faint).wrap())
 }
 
 pub fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
@@ -354,7 +346,6 @@ pub fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
     false
 }
 
-/// The row of a key-value field in the inspector.
 /// `key` with the platform's command modifier, as shortcut hints show it: "⌘N", or "Ctrl+N".
 pub fn key_label(key: &str) -> String {
     if cfg!(target_os = "macos") { format!("⌘{key}") } else { format!("Ctrl+{key}") }
@@ -363,54 +354,6 @@ pub fn key_label(key: &str) -> String {
 /// How to pick several rows with the mouse.
 pub fn pick_hint() -> &'static str {
     if cfg!(target_os = "macos") { "⌘- or ⇧-click" } else { "Ctrl- or Shift-click" }
-}
-
-// The inspector's type ladder: title (15 semibold), section title (13 semibold), value (13 or
-// 12 mono, text colour), label (11, muted), path and note (11, faint).
-
-/// An inspector's title: a step above its section titles.
-pub fn inspector_title(t: impl Into<String>, k: &Kit) -> El {
-    text(t.into()).font(TextStyle::new(15.0, 600.0).lh(20.0)).color(k.c.text_base).wrap()
-}
-
-/// A section's title row in an inspector, with an optional control on the right.
-pub fn section(title: &str, trailing: Option<El>, k: &Kit) -> El {
-    let mut head = row().w_full().gap(8.0).center_y().child(text(title.to_string()).font(TextStyle::new(13.0, 600.0).lh(20.0)).color(k.c.text_base).grow(1.0).min_w(0.0));
-    if let Some(t) = trailing {
-        head = head.child(t);
-    }
-    head
-}
-
-/// A labelled value: the label quiet, the value in the text colour.
-pub fn prop(label: &str, value: El, k: &Kit) -> El {
-    col().w_full().gap(4.0).child(text(label.to_string()).font(k.ty.caption()).color(k.c.text_muted)).child(value)
-}
-
-/// A boxed block of monospace text.
-pub fn code_box(inner: El, k: &Kit) -> El {
-    col().w_full().px(10.0).py(7.0).radius(k.radius.md).fill(k.c.layer_01).border(1.0, k.c.border_muted).child(inner)
-}
-
-/// A SKILL.md body in an inspector: body text at UI size and headings below the inspector's
-/// own titles, so the file never outranks the pane around it.
-pub fn skill_md(md: String, k: &Kit) -> El {
-    let style = MarkdownStyle::from_kit(k)
-        .body_font(k.ty.ui)
-        .heading_font(1, TextStyle::new(13.0, 600.0).lh(20.0))
-        .heading_font(2, TextStyle::new(13.0, 600.0).lh(20.0))
-        .heading_font(3, TextStyle::new(13.0, 500.0).lh(20.0))
-        .code_block_font(k.ty.mono);
-    Markdown::new(md)
-        .style(style)
-        .on_link_tx(|_: &mut App, url: &str, tx: &mut Tx| {
-            let _ = tx.open_url(url);
-        })
-        .build(k)
-}
-
-pub fn mono(t: impl Into<String>, k: &Kit) -> El {
-    text(t.into()).font(k.ty.mono).color(k.c.text_muted).wrap_anywhere().selectable(true).selection_color(k.selection())
 }
 
 pub fn inspector_body(k: &Kit) -> El {

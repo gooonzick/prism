@@ -2831,3 +2831,76 @@ fn mcp_toolbar_fits_the_smallest_window() {
     }
     assert!(wide.texts().contains("Add server"), "the wide button has its words");
 }
+
+/// The skills.sh page with `n` results, of very different install counts, and the first selected.
+fn browse_with(n: usize) -> Harness {
+    let mut h = Harness::project();
+    h.click("browse");
+    let found: Vec<crate::remote::RemoteSkill> = (0..n)
+        .map(|i| crate::remote::RemoteSkill {
+            id: format!("owner/repo/skill-{i}"),
+            source: "owner/repo".into(),
+            skill_id: format!("skill-{i}"),
+            name: format!("skill-{i}"),
+            installs: [7, 12_345, 1_256_574][i % 3],
+        })
+        .collect();
+    h.rt.update(move |s, _| s.results = Ok(found));
+    h.settle();
+    h
+}
+
+#[test]
+fn install_count_in_trailing_column() {
+    let h = browse_with(3);
+    let ends: Vec<f32> = (0..3)
+        .map(|i| {
+            let (r, _) = h.rt.presented(&format!("result-owner/repo/skill-{i}-trailing")).expect("the trailing column");
+            r[0] + r[2]
+        })
+        .collect();
+    assert!(ends.iter().all(|e| (e - ends[0]).abs() < 0.5), "install counts share a right edge: {ends:?}");
+    assert!(h.texts().contains("1.3M installs") && h.texts().contains("7 installs"));
+}
+
+#[test]
+fn installed_skill_wears_a_tag() {
+    let mut h = browse_with(2);
+    assert!(h.rt.find("installed-tag").is_none());
+    let name = "review";
+    fs::create_dir_all(h.project_dir().join(".agents/skills/review")).unwrap();
+    h.rt.update(move |s, _| {
+        s.results = Ok(vec![crate::remote::RemoteSkill { id: "o/r/review".into(), source: "o/r".into(), skill_id: name.into(), name: name.into(), installs: 3 }]);
+    });
+    h.settle();
+    assert!(h.rt.find("installed-tag").is_some(), "review is in the project");
+}
+
+#[test]
+fn repo_footer_stays_visible() {
+    let h = browse_with(40);
+    let (window, _) = h.rt.presented("browse-page").expect("the page");
+    let (source, _) = h.rt.presented("source").expect("the repository input");
+    let (list, _) = h.rt.presented("list").expect("the results");
+    assert!(source[1] >= window[1] && source[1] + source[3] <= window[1] + window[3] + 0.5, "the input {source:?} is inside the page {window:?}");
+    assert!(list[1] + list[3] <= source[1] + 0.5, "the footer is under the list: {list:?} / {source:?}");
+    for k in ["list-source", "install-source"] {
+        let (r, _) = h.rt.presented(k).unwrap();
+        assert!(r[1] + r[3] <= window[1] + window[3] + 0.5, "{k} {r:?} is inside the page {window:?}");
+    }
+}
+
+#[test]
+fn skills_sh_toolbar_fits_the_smallest_window() {
+    let mut h = browse_with(3);
+    h.rt.set_viewport(crate::ui::MIN_WINDOW, 2.0);
+    h.settle();
+    h.click("result-owner/repo/skill-0");
+    assert!(h.rt.find("inspector").is_some(), "the inspector is open");
+    let (pane, _) = h.rt.presented("main-pane").unwrap();
+    let (scope, _) = h.rt.presented("install-scope").expect("the scope select");
+    assert!(scope[0] >= pane[0] && scope[0] + scope[2] <= pane[0] + pane[2] + 0.5, "the select {scope:?} is inside the pane {pane:?}");
+    if let Some((title, _)) = h.rt.presented("title") {
+        assert!(title[0] + title[2] <= scope[0] + 0.5, "the title {title:?} ends before the select {scope:?}");
+    }
+}
