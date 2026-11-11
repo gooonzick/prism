@@ -180,7 +180,8 @@ pub fn segments<S: 'static>(labels: &[String], current: Option<usize>, label: &s
 /// Tabs that switch what a window shows (Skills / MCP servers): the kit's segments as they look
 /// in a toolbar, at `Place::Bar` height, but each segment keyed by the caller, since the kit's
 /// `SegmentedControl` keys its segments `segment<i>`. `items` are (key, label); `label` is the
-/// group's accessible name. The caller keys the group.
+/// group's accessible name. The caller keys the group. It also serves keyed segments inside a
+/// form (an MCP server's Command / URL), where the segments keep caller keys too.
 pub fn tabs<S: 'static>(k: &Kit, label: &str, items: &[(&str, &str)], current: usize, on_pick: impl Fn(&mut S, usize) + Clone + 'static) -> El {
     let c = &k.c;
     let height = Place::Bar.height();

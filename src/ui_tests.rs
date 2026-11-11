@@ -217,18 +217,6 @@ fn tick_all_follows_the_filter_and_toggles_off() {
 }
 
 impl Harness {
-    /// Clicks the element keyed `key` inside the one keyed `parent`: for rune-kit's segments,
-    /// which key themselves `segment<i>` in every group.
-    fn click_in(&mut self, parent: &str, key: &str) {
-        let inside = format!("/{parent}/");
-        let e = self.rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key) && e.path.contains(&inside) && !e.exiting);
-        let r = e.unwrap_or_else(|| panic!("no {key} in {parent}")).rect;
-        let (x, y) = (r[0] + r[2] * 0.5, r[1] + r[3] * 0.5);
-        self.rt.pointer_down(x, y);
-        self.rt.pointer_up(x, y);
-        self.settle();
-    }
-
     fn click_with(&mut self, key: &str, mods: rune::Mods) {
         self.rt.physical_input(rune::PhysicalInput::Modifiers(mods));
         self.rt.frame(0.0);
@@ -915,7 +903,7 @@ fn add_validation_messages() {
     h.click("mcp-add-save");
     assert_eq!(error(&h), "Two variables are named TOKEN");
     assert!(!h.texts().contains("fake-dup-secret"));
-    h.click_in("mcp-add-kind", "segment1");
+    h.click("mcp-add-kind-http");
     h.click("mcp-add-save");
     assert_eq!(error(&h), "Give the server's URL");
     h.fill_form(|f| {
@@ -3108,22 +3096,43 @@ fn edit_form_masks_prefilled_secrets() {
     assert!(h.rt.state.mcp_form.as_ref().unwrap().line_shown, "and the command's eye shows the command");
 }
 
-/// The machine Select in MCP Copy opens its menu by the select, not in the window's corner:
-/// the menu is laid out after the dialog that holds the select.
+/// The machine and scope Selects in MCP Copy open their menus by the select, not in the
+/// window's corner: the menus are laid out after the dialog that holds the selects.
 #[test]
 fn copy_scope_menu_opens_by_its_select() {
     let mut h = mcp_home();
     let laptop = host_home(crate::hosts::install::VERSION);
+    // A project on laptop, so copying there offers a Scope.
+    let site = fs::canonicalize(laptop.path()).unwrap().join("work/site");
+    fs::create_dir_all(&site).unwrap();
+    let there = Paths::isolated(laptop.path());
+    let mut settings = Settings::load_from(&there);
+    settings.projects = vec![site];
+    settings.save_to(&there);
     h.with_laptop(laptop.path());
     h.mcp_global();
     h.click("mcp-row-plata");
     h.click("mcp-copy");
     h.land_remote();
+    let near = |h: &Harness, select: &str, menu: &str| {
+        let (select, menu) = (rect_of(h, select), rect_of(h, menu));
+        let below = (menu[1] - (select[1] + select[3])).abs() < 40.0;
+        let above = (select[1] - (menu[1] + menu[3])).abs() < 40.0;
+        assert!((below || above) && (menu[0] - select[0]).abs() < 40.0, "the menu {menu:?} opens by the select {select:?}");
+    };
     h.click("mcp-copy-machine-trigger");
-    assert!(h.rt.state.across.machine_menu, "the menu is open");
-    let (select, menu) = (rect_of(&h, "mcp-copy-machine-trigger"), rect_of(&h, "mcp-copy-machine-content"));
-    let near = (menu[1] - (select[1] + select[3])).abs() < 40.0 || (select[1] - (menu[1] + menu[3])).abs() < 40.0;
-    assert!(near && (menu[0] - select[0]).abs() < 40.0, "the menu {menu:?} opens by the select {select:?}");
+    assert!(h.rt.state.across.machine_menu, "the machine menu is open");
+    near(&h, "mcp-copy-machine-trigger", "mcp-copy-machine-content");
+
+    h.rt.update(|s, _| {
+        s.across.machine_menu = false;
+        s.set_mcp_copy_machine("laptop");
+    });
+    h.settle();
+    h.land_remote();
+    h.click("mcp-copy-scope-trigger");
+    assert!(h.rt.state.across.scope_menu, "the scope menu is open");
+    near(&h, "mcp-copy-scope-trigger", "mcp-copy-scope-content");
 }
 
 /// Errors moved into the frame's error line keep the keys they had.

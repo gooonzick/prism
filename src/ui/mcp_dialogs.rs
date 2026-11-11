@@ -39,9 +39,10 @@ fn server_card(f: &McpForm, k: &Kit) -> El {
         .on_submit(|s: &mut App, _: &mut Tx| s.save_mcp_form())
         .build(k)
         .key("mcp-add-name");
-    let labels = ["Command".to_string(), "URL".to_string()];
-    let kind = ds::segments(&labels, Some(usize::from(f.http)), "Runs as", |s: &mut App, i: usize, _: &mut Tx| s.set_mcp_kind(i == 1)).build(k).key("mcp-add-kind");
-    Card::new("mcp-add-server").label("Server").row(field_pair(field(k, "Name", name), field(k, "Runs as", kind), None)).build(k).expect("one row")
+    let items = [("mcp-add-kind-stdio", "Command"), ("mcp-add-kind-http", "URL")];
+    // In a row, so the segments keep their own width instead of stretching across the field.
+    let kind = ds::tabs(k, "Runs as", &items, usize::from(f.http), |s: &mut App, i: usize| s.set_mcp_kind(i == 1)).key("mcp-add-kind");
+    Card::new("mcp-add-server").label("Server").row(field_pair(field(k, "Name", name), field(k, "Runs as", row().child(kind)), None)).build(k).expect("one row")
 }
 
 /// The command line or the URL; a prefilled one with a likely secret is masked until shown.
@@ -91,7 +92,7 @@ fn pairs_card(f: &McpForm, k: &Kit) -> El {
             let key = TextInput::new(&p.key)
                 .label(if header { "Header name" } else { "Variable name" })
                 .placeholder(if header { "Authorization" } else { "API_TOKEN" })
-                .width(Some(170.0))
+                .width(Some(size::FIELD_KEY))
                 .on_edit(move |s: &mut App| &mut form_mut(s).pairs_edit(header, i).key)
                 .build(k)
                 .key(format!("mcp-add-{what}-{i}-key"));

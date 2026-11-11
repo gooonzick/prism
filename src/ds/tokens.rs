@@ -57,6 +57,8 @@ pub mod size {
     pub const ROW_NAME_MIN: f32 = 120.0;
     /// A short field beside a wide one: a port.
     pub const FIELD_SHORT: f32 = 96.0;
+    /// The name half of a name = value row in a form (an env variable, a header): 170.
+    pub const FIELD_KEY: f32 = 170.0;
     /// How far a focused field's ring reaches outside the field.
     pub const FOCUS_RING: f32 = 3.0;
     /// A list row's trailing column (`ListRow::trailing`): a status or a short value, end-aligned,
