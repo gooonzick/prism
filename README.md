@@ -88,6 +88,7 @@ By default Prism links into the agents installed on your machine; you can change
 ### Homebrew (macOS)
 
 ```bash
+brew tap gooonzick/tap && brew trust gooonzick/tap
 brew install --cask gooonzick/tap/prism
 ```
 
