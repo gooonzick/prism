@@ -35,7 +35,6 @@ fn the_pattern() {
 }
 
 #[test]
-#[ignore = "on once every screen is on ds (Task 11)"]
 fn no_raw_values_in_ui() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui");
     let mut files: Vec<_> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|x| x == "rs")).collect();

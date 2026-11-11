@@ -183,6 +183,8 @@ pub fn segments<S: 'static>(labels: &[String], current: Option<usize>, label: &s
 /// group's accessible name. The caller keys the group. It also serves keyed segments inside a
 /// form (an MCP server's Command / URL), where the segments keep caller keys too.
 pub fn tabs<S: 'static>(k: &Kit, label: &str, items: &[(&str, &str)], current: usize, on_pick: impl Fn(&mut S, usize) + Clone + 'static) -> El {
+    // The raw values here (0.5 hairline, 2/1 focus ring, 13-point line) and the kit's own colours
+    // and type mirror the kit's `SegmentedControl`, so these tabs read as the same control.
     let c = &k.c;
     let height = Place::Bar.height();
     let hairline = |color| Shadow { spread: 0.5, color, ..Default::default() };

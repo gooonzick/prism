@@ -49,10 +49,6 @@ pub static UPDATE: Icon = Icon {
     body: r#"<path d="M8 10.5V3.5M5 6.5L8 3.5L11 6.5M3.5 12.5H12.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>"#,
 };
 
-/// The smallest window: with the default sidebar (232) it shows all three panes (232 + `size::LIST_MIN`
-/// + `size::INSPECTOR_MIN`).
-pub const MIN_WINDOW: (f32, f32) = (860.0, 520.0);
-
 pub fn chrome() -> Chrome {
     Chrome { full_size_content: true, traffic_lights: Some((16.0, 25.0)), drag_regions: true }
 }
@@ -69,7 +65,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     let inspector_width = pane.map_or(size::INSPECTOR_MIN, |p| p.width());
     let (main, toolbar, inspector) = match (s.page.clone(), hosts::pending(s, &k)) {
         // A host whose state isn't in yet: what is happening with it, in place of the page.
-        (Page::Installed | Page::Mcp, Some(pane)) => (pane, toolbar(s, &k, s.env_label(), row()), inspector_body(&k)),
+        (Page::Installed | Page::Mcp, Some(pane)) => (pane, toolbar(s, &k, s.env_label(), row()), ds::Inspector::new().build(&k)),
         (Page::Installed, None) => installed::page(s, &k, &mut layer, cx.is_reduced_motion(), toolbar_room(cx), inspector_width),
         (Page::Mcp, None) => mcp::page(s, &k, &mut layer, cx.is_reduced_motion(), toolbar_room(cx)),
         (Page::Browse, _) => browse::page(s, &k, &mut layer, cx.layout_with("main-pane", |r| r[2])),
@@ -345,9 +341,4 @@ pub fn key_label(key: &str) -> String {
 /// How to pick several rows with the mouse.
 pub fn pick_hint() -> &'static str {
     if cfg!(target_os = "macos") { "⌘- or ⇧-click" } else { "Ctrl- or Shift-click" }
-}
-
-pub fn inspector_body(k: &Kit) -> El {
-    let _ = k;
-    col().key("inspector").w_full().padding(space::S4).gap(space::S4)
 }

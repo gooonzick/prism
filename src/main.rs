@@ -12,7 +12,6 @@ mod agents;
 mod app;
 mod cli;
 #[cfg(feature = "gui")]
-#[allow(dead_code, unused_imports)] // Task 11 removes this once every screen is on ds.
 mod ds;
 mod fsops;
 mod hosts;
@@ -42,6 +41,11 @@ use crate::agents::Paths;
 use crate::app::App;
 #[cfg(feature = "gui")]
 use crate::store::Settings;
+
+/// The smallest window: with the default sidebar (232) it shows all three panes (232 +
+/// `ds::size::LIST_MIN` + `ds::size::INSPECTOR_MIN`).
+#[cfg(feature = "gui")]
+pub const MIN_WINDOW: (f32, f32) = (860.0, 520.0);
 
 #[cfg(feature = "gui")]
 fn init() -> App {
@@ -237,7 +241,7 @@ fn window() {
         setup: Some(setup),
         poll: Some(poll),
         on_key: Some(ui::on_key),
-        min_size: Some(ui::MIN_WINDOW),
+        min_size: Some(MIN_WINDOW),
         scenes: SCENES,
         // Commands, paths and keys read as code: the system monospace (SF Mono on macOS).
         families: ("Inter", "ui-monospace"),

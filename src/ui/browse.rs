@@ -65,9 +65,6 @@ fn main(s: &App, k: &Kit, width: Option<f32>) -> El {
     page.footer(from_source(s, k, width)).build(k)
 }
 
-/// The narrowest the source input may get beside its buttons.
-const SOURCE_MIN: f32 = 200.0;
-
 /// "Or install straight from a repository": the source, Show skills and Install all on one line
 /// when the list pane `width` has room for them, else the buttons under the input so it keeps
 /// its width in the narrowest list.
@@ -101,7 +98,7 @@ fn from_source(s: &App, k: &Kit, width: Option<f32>) -> El {
                 .key("install-source"),
         );
     let buttons_width = ds::button_width(k, "Show skills", Place::List, false) + ds::button_width(k, "Install all", Place::List, false) + space::S2;
-    let side_by_side = width.is_none_or(|w| w - 2.0 * size::PANE_EDGE >= SOURCE_MIN + space::S2 + buttons_width);
+    let side_by_side = width.is_none_or(|w| w - 2.0 * size::PANE_EDGE >= size::FIELD_MIN + space::S2 + buttons_width);
     col()
         .key("from-source")
         .w_full()

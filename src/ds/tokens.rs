@@ -57,6 +57,9 @@ pub mod size {
     pub const ROW_NAME_MIN: f32 = 120.0;
     /// A short field beside a wide one: a port.
     pub const FIELD_SHORT: f32 = 96.0;
+    /// The narrowest a text field may get with its buttons beside it on one line; narrower, the
+    /// buttons go under it.
+    pub const FIELD_MIN: f32 = 200.0;
     /// The name half of a name = value row in a form (an env variable, a header): 170.
     pub const FIELD_KEY: f32 = 170.0;
     /// How far a focused field's ring reaches outside the field.
@@ -177,6 +180,7 @@ pub mod motion {
 
     /// Opacity of a de-emphasised row (a pattern, an unused entry).
     pub const DIM: f32 = 0.75;
+    #[allow(dead_code)] // Keysmith's copy button clears after it; Prism has no copy button yet.
     pub const COPY_CONFIRM_SECS: f64 = 1.2;
 
     pub fn press_scale(reduced: bool) -> f32 {

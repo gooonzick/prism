@@ -2161,11 +2161,11 @@ fn a_double_pressed_toast_undo_runs_one_undo() {
 fn pane_widths() {
     use crate::ds::size;
     const { assert!(232.0 + size::LIST_MIN + size::INSPECTOR_MIN <= 860.0) };
-    assert_eq!(crate::ui::MIN_WINDOW, (860.0, 520.0));
+    assert_eq!(crate::MIN_WINDOW, (860.0, 520.0));
     let h = Harness::project();
     let (sidebar, inspector) = (h.rt.state.sidebar, h.rt.state.inspector);
     assert_eq!(sidebar.width(), 232.0);
-    assert!(sidebar.width() + size::LIST_MIN + size::INSPECTOR_MIN <= crate::ui::MIN_WINDOW.0);
+    assert!(sidebar.width() + size::LIST_MIN + size::INSPECTOR_MIN <= crate::MIN_WINDOW.0);
     assert_eq!((inspector.min_width(), inspector.max_width()), (size::INSPECTOR_MIN, size::INSPECTOR_READ_MAX));
     assert!(!inspector.is_open(), "the inspector starts closed and opens on a selection");
 }
@@ -2173,7 +2173,7 @@ fn pane_widths() {
 /// The window at its minimum, with a skill selected.
 fn smallest_with_selection() -> Harness {
     let mut h = Harness::project();
-    h.rt.set_viewport(crate::ui::MIN_WINDOW, 2.0);
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
     h.settle();
     h.click("skill-review");
     h
@@ -2342,7 +2342,7 @@ fn narrow_menu_disables_the_check_while_checking_and_on_a_host() {
     assert!(!h.menu_item_enabled(1), "Checking for updates… is disabled while it runs");
 
     let (mut h, _remote) = on_host();
-    h.rt.set_viewport(crate::ui::MIN_WINDOW, 2.0);
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
     h.settle();
     h.click("skill-far");
     assert!(h.rt.find("new-skill").is_none(), "narrow on the host too");
@@ -2371,7 +2371,7 @@ fn selecting_a_row_lets_go_of_a_stale_menu() {
     assert!(h.rt.find("toolbar-more").is_none());
     h.click("skill-review");
     assert!(!h.rt.state.toolbar_menu, "a selection clears it");
-    h.rt.set_viewport(crate::ui::MIN_WINDOW, 2.0);
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
     h.settle();
     assert!(h.rt.find("toolbar-more-popup-item0").is_none(), "the menu doesn't reopen by itself");
 }
@@ -2391,7 +2391,7 @@ fn skill_actions_fit_one_row_at_minimum() {
     skill(&h.project_dir().join(".claude/skills"), long);
     skill(&h.project_dir().join(".claude/skills"), longer);
     h.rescan();
-    h.rt.set_viewport(crate::ui::MIN_WINDOW, 2.0);
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
     h.settle();
     h.click(&format!("skill-{long}"));
     let pane = rect_of(&h, "inspector");
@@ -2444,7 +2444,7 @@ fn open_md_stays_in_the_row_when_it_fits() {
     skill(&root.join(".agents/skills"), "solo");
     let mut app = App::new(Paths::isolated(&root), Settings::default());
     app.open_scope(Scope::Global);
-    let mut rt = Runtime::new(app, crate::ui::view, crate::ui::MIN_WINDOW, Env { system_dark: false, scale: 2.0 });
+    let mut rt = Runtime::new(app, crate::ui::view, crate::MIN_WINDOW, Env { system_dark: false, scale: 2.0 });
     rt.on_key = Some(crate::ui::on_key);
     rt.frame(0.0);
     let mut h = Harness { _home: home, root, rt };
@@ -2560,7 +2560,7 @@ fn host_disables_local_actions() {
     assert!(!h.item_enabled("skill-more", 0), "Reveal stays in the menu, disabled");
     key(&mut h, rune::Key::Escape, rune::Mods::default());
     // At 352 Open SKILL.md is in the menu, disabled there too.
-    h.rt.set_viewport(crate::ui::MIN_WINDOW, 2.0);
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
     h.settle();
     h.click("skill-more");
     assert_eq!(h.item_label("skill-more", 1).as_deref(), Some("Open SKILL.md"));
@@ -2584,7 +2584,7 @@ fn open_md_follows_the_inspector_width() {
     key(&mut h, rune::Key::Escape, rune::Mods::default());
 
     // The smallest window: a 352 inspector, so Open SKILL.md goes into "…" after Reveal.
-    h.rt.set_viewport(crate::ui::MIN_WINDOW, 2.0);
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
     h.settle();
     assert!(h.rt.find("open-md").is_none(), "no room at 352");
     let (copy, remove) = (rect_of(&h, "copy"), rect_of(&h, "remove"));
@@ -2682,7 +2682,7 @@ fn long_command_wraps_in_card() {
     let line = std::iter::once("npx".to_string()).chain(args.iter().cloned()).collect::<Vec<_>>().join(" ");
     assert!(line.len() >= 200, "{} characters", line.len());
     fs::write(h.root.join(".claude.json"), serde_json::json!({ "mcpServers": { "long": { "command": "npx", "args": args } } }).to_string()).unwrap();
-    h.rt.set_viewport(crate::ui::MIN_WINDOW, 2.0);
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
     h.settle();
     h.mcp_global();
     h.click("mcp-row-long");
@@ -2698,7 +2698,7 @@ fn long_command_wraps_in_card() {
 fn mcp_actions_fit_one_row_at_minimum() {
     use crate::ds::size;
     let mut h = mcp_home();
-    h.rt.set_viewport(crate::ui::MIN_WINDOW, 2.0);
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
     h.settle();
     h.mcp_global();
     h.click("mcp-row-plata");
@@ -2807,7 +2807,7 @@ fn mcp_menu_closes_on_selection_change() {
 #[test]
 fn mcp_toolbar_fits_the_smallest_window() {
     let mut h = mcp_home();
-    h.rt.set_viewport(crate::ui::MIN_WINDOW, 2.0);
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
     h.settle();
     h.mcp_global();
     h.click("mcp-row-plata");
@@ -2893,7 +2893,7 @@ fn repo_footer_stays_visible() {
 #[test]
 fn skills_sh_toolbar_fits_the_smallest_window() {
     let mut h = browse_with(3);
-    h.rt.set_viewport(crate::ui::MIN_WINDOW, 2.0);
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
     h.settle();
     h.click("result-owner/repo/skill-0");
     assert!(h.rt.find("inspector").is_some(), "the inspector is open");
@@ -2913,7 +2913,7 @@ fn repo_footer_is_side_by_side_when_it_fits_and_stacks_when_not() {
     assert!(source[0] + source[2] <= show[0] && show[0] + show[2] <= all[0] + 0.5, "input, Show skills, Install all in order");
 
     let mut h = browse_with(3);
-    h.rt.set_viewport(crate::ui::MIN_WINDOW, 2.0);
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
     h.settle();
     h.click("result-owner/repo/skill-0");
     assert!(h.rt.find("inspector").is_some());
@@ -2982,13 +2982,13 @@ fn sync_fits_minimum_window() {
     let settings = Settings { targets: Some(targets.iter().map(|t| t.to_string()).collect()), ..Settings::default() };
     let mut app = App::new(Paths::isolated(&root), settings);
     app.add_project(project);
-    let mut rt = Runtime::new(app, crate::ui::view, crate::ui::MIN_WINDOW, Env { system_dark: false, scale: 2.0 });
+    let mut rt = Runtime::new(app, crate::ui::view, crate::MIN_WINDOW, Env { system_dark: false, scale: 2.0 });
     rt.on_key = Some(crate::ui::on_key);
     rt.frame(0.0);
     let mut h = Harness { _home: home, root, rt };
     h.scene("sync");
 
-    let (w, hgt) = crate::ui::MIN_WINDOW;
+    let (w, hgt) = crate::MIN_WINDOW;
     let panel = rect_of(&h, "sync-dialog");
     assert!(panel[0] >= 0.0 && panel[0] + panel[2] <= w && panel[1] + panel[3] <= hgt, "the dialog {panel:?} is inside the window");
     for key in ["sync-cancel", "sync-apply"] {
