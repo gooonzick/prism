@@ -3,8 +3,9 @@
 //! frame; picks and fields go in cards, plans are `Plan`s.
 
 use rune::{El, Tx, col, icon, row};
-use rune_kit::{ButtonVariant, Checkbox, Kit, TextArea, TextInput, glyphs};
+use rune_kit::{Checkbox, Kit, TextArea, TextInput, glyphs};
 
+use super::{apply_button, cancel, changes_heading};
 use crate::agents::{AGENTS, CANONICAL};
 use crate::app::{App, Planned, Target};
 use crate::ds::{self, Card, DialogFrame, DialogKind, Notice, Place, Plan, Tone, color, field, item_row, loading, pressable, size, space, text};
@@ -42,25 +43,12 @@ fn group_actions(actions: &[Action], targets: usize) -> Vec<(String, Vec<String>
         .collect()
 }
 
-fn changes_heading(changes: usize, skills: usize) -> String {
+/// This machine's sync plan's heading: "3 changes to 2 skills".
+fn skills_heading(changes: usize, skills: usize) -> String {
     match (changes, skills) {
         (0, _) => "Changes".into(),
-        (c, 1) => format!("{c} change{} to 1 skill", if c == 1 { "" } else { "s" }),
+        (c, 1) => format!("{} to 1 skill", super::changes(c)),
         (c, n) => format!("{c} changes to {n} skills"),
-    }
-}
-
-/// Cancel in a dialog's footer.
-fn cancel(key: &str, k: &Kit, on: impl Fn(&mut App) + 'static) -> El {
-    ds::button("Cancel", Place::Bar).on_press(on).build(k).key(key.to_string())
-}
-
-/// The apply button of a plan: loading while it is applied, disabled when there is nothing to do.
-fn apply_button(applying: bool, n: usize) -> rune_kit::Button {
-    match (applying, n) {
-        (true, _) => ds::primary("Applying…", Place::Bar).variant(ButtonVariant::Loading).disabled(true),
-        (false, 0) => ds::primary("Nothing to do", Place::Bar).disabled(true),
-        (false, n) => ds::primary(format!("Apply {n} change{}", if n == 1 { "" } else { "s" }), Place::Bar),
     }
 }
 
@@ -96,7 +84,7 @@ pub fn sync(s: &App, k: &Kit, layer: &mut Vec<El>) {
             let linkable = targets.iter().filter(|&&t| !s.inv.shares_canonical[t]).count();
             let view = PlanView::from((p, &s.paths));
             let groups = group_actions(&p.actions, linkable);
-            plan = plan.heading(changes_heading(view.lines.len(), groups.len()));
+            plan = plan.heading(skills_heading(view.lines.len(), groups.len()));
             for (skill, parts) in groups {
                 plan = plan.group(skill, parts);
             }
@@ -122,7 +110,7 @@ pub fn sync(s: &App, k: &Kit, layer: &mut Vec<El>) {
                 plan = plan.line(line.clone());
             }
             let n = view.lines.len();
-            plan = plan.heading(if n == 0 { "Changes".to_string() } else { format!("{n} change{}", if n == 1 { "" } else { "s" }) });
+            plan = plan.heading(changes_heading(n));
             (view, host.applying, matches!(host.view, Some(Ok(_))))
         }
         (None, None) => return,
@@ -132,7 +120,7 @@ pub fn sync(s: &App, k: &Kit, layer: &mut Vec<El>) {
     }
     let plan = plan.skipped(skipped(&view));
 
-    let apply = apply_button(applying, view.lines.len()).on_press(|s: &mut App| s.apply_sync()).build(k).key("sync-apply");
+    let apply = apply_button(applying, view.lines.len(), false).on_press(|s: &mut App| s.apply_sync()).build(k).key("sync-apply");
     let picks = col().w(size::DIALOG_PICKS).children(agents.build(k));
     let changes = col().grow(1.0).min_w(0.0).gap(space::S4).children(plan.build(k));
     let title = match s.sync_only.as_deref() {
@@ -284,7 +272,7 @@ fn copy_plan(s: &App, what: &str, t: &Target, k: &Kit, layer: &mut Vec<El>) {
         plan = plan.line(line.clone());
     }
     let plan = plan.skipped(skipped(&view));
-    let apply = apply_button(t.applying, view.lines.len()).on_press(|s: &mut App| s.apply_copy_across()).build(k).key("copy-apply");
+    let apply = apply_button(t.applying, view.lines.len(), false).on_press(|s: &mut App| s.apply_copy_across()).build(k).key("copy-apply");
     let what_there = format!("It lands in .agents/skills there and is linked into the sync targets of {0}; a skill {0} already has is skipped, never overwritten.", t.machine);
     let mut frame = DialogFrame::new("copy", format!("Copy {what} to {dest} on {}", t.machine), DialogKind::Form).body(text::body(k, what_there));
     for block in plan.build(k) {

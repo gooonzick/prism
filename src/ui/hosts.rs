@@ -4,6 +4,7 @@
 use rune::{El, Tx, col, row};
 use rune_kit::{Kit, Placement, Select, SelectAppearance, TextInput};
 
+use super::cancel;
 use crate::app::{App, Env, RemoteState};
 use crate::ds::{self, Card, DialogFrame, DialogKind, Place, field, size, space, text};
 use crate::hosts::copy::this_machine;
@@ -73,11 +74,6 @@ pub fn browse_note(s: &App, k: &Kit) -> Option<El> {
     let host = s.host()?;
     let here = if cfg!(target_os = "macos") { "this Mac" } else { "this computer" };
     Some(ds::text::hint(k, format!("skills.sh installs go to {here}; copy them to {} afterwards", host.name)).key("browse-host-note"))
-}
-
-/// Cancel in a dialog's footer.
-fn cancel(key: &str, k: &Kit, on: impl Fn(&mut App) + 'static) -> El {
-    ds::button("Cancel", Place::Bar).on_press(on).build(k).key(key.to_string())
 }
 
 /// A name and an ssh target, saved on this machine; then the window connects.

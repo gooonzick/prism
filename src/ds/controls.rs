@@ -39,6 +39,20 @@ pub fn quiet(label: impl Into<String>, place: Place) -> Button {
     with(label, place, ButtonVariant::Ghost)
 }
 
+/// A text button whose action is running: `ds::primary("Applying…", Place::Bar).loading(true)`.
+/// While `on` it shows the kit's loading look and takes no presses, so the label says what runs
+/// ("Updating…"); `false` leaves the button as it was. For `button`, `primary`, `quiet` and
+/// `danger`.
+pub trait LoadingButton {
+    fn loading(self, on: bool) -> Self;
+}
+
+impl LoadingButton for Button {
+    fn loading(self, on: bool) -> Self {
+        if on { self.variant(ButtonVariant::Loading).disabled(true) } else { self }
+    }
+}
+
 /// The ordinary button with a copy icon, which becomes a check while `copied` (the app clears it
 /// after `motion::COPY_CONFIRM_SECS`). While copied its accessible name is "Copied"; the visible
 /// label stays.
@@ -180,9 +194,10 @@ pub fn segments<S: 'static>(labels: &[String], current: Option<usize>, label: &s
 /// Tabs that switch what a window shows (Skills / MCP servers): the kit's segments as they look
 /// in a toolbar, at `Place::Bar` height, but each segment keyed by the caller, since the kit's
 /// `SegmentedControl` keys its segments `segment<i>`. `items` are (key, label); `label` is the
-/// group's accessible name. The caller keys the group. It also serves keyed segments inside a
-/// form (an MCP server's Command / URL), where the segments keep caller keys too.
-pub fn tabs<S: 'static>(k: &Kit, label: &str, items: &[(&str, &str)], current: usize, on_pick: impl Fn(&mut S, usize) + Clone + 'static) -> El {
+/// group's accessible name; `on_pick` gets the picked index and the press's `Tx`, as `segments`
+/// does. The caller keys the group. It also serves keyed segments inside a form (an MCP
+/// server's Command / URL), where the segments keep caller keys too.
+pub fn tabs<S: 'static>(k: &Kit, label: &str, items: &[(&str, &str)], current: usize, on_pick: impl Fn(&mut S, usize, &mut Tx) + Clone + 'static) -> El {
     // The raw values here (0.5 hairline, 2/1 focus ring, 13-point line) and the kit's own colours
     // and type mirror the kit's `SegmentedControl`, so these tabs read as the same control.
     let c = &k.c;
@@ -206,7 +221,7 @@ pub fn tabs<S: 'static>(k: &Kit, label: &str, items: &[(&str, &str)], current: u
             .center()
             .radius(radius::CONTROL)
             .cursor(rune::Cursor::Pointer)
-            .on_press(move |s: &mut S| pick(s, i))
+            .on_press_tx(move |s: &mut S, tx: &mut Tx| pick(s, i, tx))
             .child(text(name.to_string()).font(TextStyle { line_height: 13.0, ..k.ty.ui }).color(ink).a11y_hidden());
         seg = if on { seg.fill(c.bg_base).box_shadow(hairline(c.border_strong)) } else { seg.hover(c.hover) };
         group = group.child(seg);

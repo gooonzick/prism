@@ -2,11 +2,11 @@
 
 use rune::{El, Tx, col, row};
 use rune_kit::shell::Toolbar;
-use rune_kit::{Button, ButtonVariant, Checkbox, Kit, Select, TextInput};
+use rune_kit::{Button, Checkbox, Kit, Select, TextInput};
 
 use crate::agents::Scope;
 use crate::app::{App, RepoListing};
-use crate::ds::{self, Card, Inspector, ListRow, Page, Place, pair_row, size, space, stacked_row, text};
+use crate::ds::{self, Card, Inspector, ListRow, LoadingButton, Page, Place, pair_row, size, space, stacked_row, text};
 use crate::remote::RemoteSkill;
 
 /// The scopes installs can go to, as labels: global first, then the projects. They are this
@@ -97,8 +97,8 @@ fn from_source(s: &App, k: &Kit, width: Option<f32>) -> El {
                 .build(k)
                 .key("install-source"),
         );
-    let buttons_width = ds::button_width(k, "Show skills", Place::List, false) + ds::button_width(k, "Install all", Place::List, false) + space::S2;
-    let side_by_side = width.is_none_or(|w| w - 2.0 * size::PANE_EDGE >= size::FIELD_MIN + space::S2 + buttons_width);
+    let widths = [size::FIELD_MIN, ds::button_width(k, "Show skills", Place::List, false), ds::button_width(k, "Install all", Place::List, false)];
+    let side_by_side = width.is_none_or(|w| super::row_fits(&widths, w - 2.0 * size::PANE_EDGE));
     col()
         .key("from-source")
         .w_full()
@@ -155,8 +155,7 @@ fn log_card(s: &App, k: &Kit) -> Option<El> {
 
 /// The main action of the inspector: loading while an install runs.
 fn install_button(s: &App, label: String) -> Button {
-    let b = ds::primary(label, Place::Inspector).disabled(s.installing.is_some()).help(format!("Install into {}", s.install_label(s.local_scope())));
-    if s.installing.is_some() { b.variant(ButtonVariant::Loading) } else { b }
+    ds::primary(label, Place::Inspector).loading(s.installing.is_some()).help(format!("Install into {}", s.install_label(s.local_scope())))
 }
 
 fn details(s: &App, k: &Kit) -> El {

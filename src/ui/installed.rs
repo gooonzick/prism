@@ -13,13 +13,14 @@ use crate::scan::{Placement, Skill};
 const FILTERS: [Filter; 4] = [Filter::All, Filter::NeedsSync, Filter::Broken, Filter::Updates];
 
 /// `room` is what the toolbar has beside its tabs (`ui::toolbar_room`); `None` before the first
-/// layout. `inspector` is the inspector's drawn width (`ui::inspector_pane`).
-pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>, reduced: bool, room: Option<f32>, inspector: f32) -> (El, Toolbar, El) {
+/// layout. `inspector` is the inspector's drawn width (`ui::inspector_pane`), `None` when the
+/// window has no room for it: then there is no inspector, nor its "…" menu.
+pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>, reduced: bool, room: Option<f32>, inspector: Option<f32>) -> (El, Toolbar, Option<El>) {
     let targets = s.targets();
     let visible = s.visible();
     let unsynced = s.filter_count(Filter::NeedsSync);
     let toolbar = toolbar(s, unsynced, room, k, layer);
-    (main(s, &visible, &targets, k, reduced), toolbar, inspector::installed(s, k, layer, inspector))
+    (main(s, &visible, &targets, k, reduced), toolbar, inspector.map(|width| inspector::installed(s, k, layer, width)))
 }
 
 /// Tabs, the title, New skill, Check skills.sh for updates, Rescan and Sync. When the list pane
@@ -30,15 +31,10 @@ fn toolbar(s: &App, unsynced: usize, room: Option<f32>, k: &Kit, layer: &mut Vec
     // skills.sh is this machine's: a host's skills aren't checked against it.
     let remote = s.is_remote();
     let check_label = if checking { "Checking for updates…" } else { "Check skills.sh for updates" };
-    let sync_label = match unsynced {
-        0 => "Sync".to_string(),
-        1 => "Sync 1 skill".to_string(),
-        n => format!("Sync {n} skills"),
-    };
+    let sync_label = sync_label(unsynced);
     let title = scope_title(&s.scope, "skills");
     let trailing = row().gap(space::S2).center_y();
-    // The wide toolbar: the title, three icon buttons and Sync.
-    if !super::toolbar_fits(k, room, &title, 3, &sync_label) {
+    if toolbar_folds(s, k, room) {
         let actions = vec![
             MenuAction::new("New skill", |s: &mut App| s.open_new_skill()),
             MenuAction::new(check_label, |s: &mut App| s.check_updates()).disabled(checking || remote),
@@ -66,6 +62,21 @@ fn toolbar(s: &App, unsynced: usize, room: Option<f32>, k: &Kit, layer: &mut Vec
                     .key("sync"),
             ),
     )
+}
+
+/// "Sync", "Sync 1 skill", "Sync 3 skills".
+fn sync_label(unsynced: usize) -> String {
+    match unsynced {
+        0 => "Sync".to_string(),
+        1 => "Sync 1 skill".to_string(),
+        n => format!("Sync {n} skills"),
+    }
+}
+
+/// Whether the Skills toolbar folds into "…" in `room` (`ui::toolbar_room`): the wide one, the
+/// title, three icon buttons and Sync, doesn't fit.
+pub fn toolbar_folds(s: &App, k: &Kit, room: Option<f32>) -> bool {
+    !super::toolbar_fits(k, room, &scope_title(&s.scope, "skills"), 3, &sync_label(s.filter_count(Filter::NeedsSync)))
 }
 
 fn main(s: &App, visible: &[usize], targets: &[usize], k: &Kit, reduced: bool) -> El {

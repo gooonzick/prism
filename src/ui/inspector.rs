@@ -7,7 +7,7 @@ use super::UPDATE;
 use super::installed::placement_tone;
 use crate::agents::{AGENTS, CANONICAL, tilde};
 use crate::app::{App, open_path, reveal_path};
-use crate::ds::{self, Card, Inspector, MenuAction, Notice, Place, Tone, item_row, plain_row, size, space, text};
+use crate::ds::{self, Card, Inspector, LoadingButton, MenuAction, Notice, Place, Tone, item_row, plain_row, size, space, text};
 use crate::scan::{Placement, Skill};
 use crate::skill::manifest_path;
 
@@ -36,7 +36,7 @@ fn update_notice(s: &App, name: &str, k: &Kit) -> El {
     // Not `primary`: the toolbar's Sync is the view's next step.
     let update = ds::button(if updating { "Updating…" } else { "Update" }, Place::Inspector)
         .icon(&UPDATE)
-        .disabled(updating)
+        .loading(updating)
         .on_press(move |s: &mut App| s.update(vec![target.clone()]))
         .build(k)
         .key("update");
@@ -45,15 +45,15 @@ fn update_notice(s: &App, name: &str, k: &Kit) -> El {
 
 /// Whether the action row fits on one line in an inspector `width` wide with Open SKILL.md
 /// visible (Copy to… when `copy`), measured as the kit lays the buttons out.
-fn row_fits(k: &Kit, width: f32, copy: bool) -> bool {
+fn open_fits(k: &Kit, width: f32, copy: bool) -> bool {
     let place = Place::Inspector;
-    let mut buttons = vec![ds::button_width(k, "Open SKILL.md", place, false)];
+    let mut controls = vec![ds::button_width(k, "Open SKILL.md", place, false)];
     if copy {
-        buttons.push(ds::button_width(k, "Copy to…", place, false));
+        controls.push(ds::button_width(k, "Copy to…", place, false));
     }
-    // The overflow button, then Remove… pinned right; one gap before each control after the first.
-    let row = buttons.iter().sum::<f32>() + place.height() + ds::button_width(k, "Remove…", place, false) + (buttons.len() + 1) as f32 * space::S2;
-    row <= width - 2.0 * size::PANE_EDGE
+    // The overflow button, then Remove… pinned right.
+    controls.extend([place.height(), ds::button_width(k, "Remove…", place, false)]);
+    super::row_fits(&controls, width - 2.0 * size::PANE_EDGE)
 }
 
 /// Open SKILL.md and Copy to… on the left, then "…" with Reveal; Remove… on the right. When
@@ -65,7 +65,7 @@ fn actions(s: &App, skill: &Skill, k: &Kit, layer: &mut Vec<El>, width: f32) -> 
     let manifest = if remote { None } else { skill.source.as_deref().and_then(manifest_path) };
     let folder = skill.source.clone();
     let can_copy = s.can_copy();
-    let open_visible = row_fits(k, width, can_copy);
+    let open_visible = open_fits(k, width, can_copy);
     let open_disabled = remote || manifest.is_none();
     let open = move |_: &mut App| {
         if let Some(p) = &manifest {

@@ -11,11 +11,11 @@ mod mcp_dialogs;
 
 use rune::{Chrome, Cx, El, Icon, KeyEvent, ScrollSpec, Tx, col, row};
 use rune_kit::shell::{self, PaneState, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar};
-use rune_kit::{Kit, Toast, ToastRegion, glyphs};
+use rune_kit::{Button, Kit, Toast, ToastRegion, glyphs};
 
 use crate::agents::{Scope, tilde};
 use crate::app::{App, Page};
-use crate::ds::{self, Place, motion, size, space};
+use crate::ds::{self, LoadingButton, Place, motion, size, space};
 
 pub static HOME: Icon = Icon {
     name: "se-home",
@@ -60,15 +60,18 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         let g = crate::ds::gallery::<App>(&k, &mut layer);
         return rune_kit::root(g, layer);
     }
-    // The inspector as it will be drawn: its width decides which actions fit in its row.
+    // The inspector as it will be drawn: its width decides which actions fit in its row. With no
+    // room for it, its content (and its "…" menu, whatever its flag says) isn't built.
     let pane = inspector_pane(s, cx);
-    let inspector_width = pane.map_or(size::INSPECTOR_MIN, |p| p.width());
     let (main, toolbar, inspector) = match (s.page.clone(), hosts::pending(s, &k)) {
         // A host whose state isn't in yet: what is happening with it, in place of the page.
-        (Page::Installed | Page::Mcp, Some(pane)) => (pane, toolbar(s, &k, s.env_label(), row()), ds::Inspector::new().build(&k)),
-        (Page::Installed, None) => installed::page(s, &k, &mut layer, cx.is_reduced_motion(), toolbar_room(cx), inspector_width),
-        (Page::Mcp, None) => mcp::page(s, &k, &mut layer, cx.is_reduced_motion(), toolbar_room(cx)),
-        (Page::Browse, _) => browse::page(s, &k, &mut layer, cx.layout_with("main-pane", |r| r[2])),
+        (Page::Installed | Page::Mcp, Some(pending)) => (pending, toolbar(s, &k, s.env_label(), row()), Some(ds::Inspector::new().build(&k))),
+        (Page::Installed, None) => installed::page(s, &k, &mut layer, cx.is_reduced_motion(), toolbar_room(cx), pane.map(|p| p.width())),
+        (Page::Mcp, None) => mcp::page(s, &k, &mut layer, cx.is_reduced_motion(), toolbar_room(cx), pane.is_some()),
+        (Page::Browse, _) => {
+            let (main, toolbar, details) = browse::page(s, &k, &mut layer, cx.layout_with("main-pane", |r| r[2]));
+            (main, toolbar, Some(details))
+        }
     };
     dialogs::sync(s, &k, &mut layer);
     dialogs::remove(s, &k, &mut layer);
@@ -91,8 +94,14 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         toast = toast.icon(&k, if n.error { &glyphs::CIRCLE_X } else { &glyphs::CHECK });
         layer.push(ToastRegion::new().toast(toast.build(&k)).build(&k));
     }
+    // Key handling has no layout of its own: the list pane's edge goes into `App::seen` (no view
+    // reads it, so the report runs no view).
+    let main = main.on_layout_tx(|s: &mut App, r, tx: &mut Tx| {
+        s.seen.pane_end = Some(r[0] + r[2]);
+        tx.live_only();
+    });
     let mut split = SplitView::new(main).sidebar(&s.sidebar, |s: &mut App| &mut s.sidebar, sidebar(s, &k, &mut layer));
-    if let Some(pane) = pane {
+    if let (Some(pane), Some(inspector)) = (pane, inspector) {
         split = split.inspector(&pane, |s: &mut App| &mut s.inspector, scroll_pane("inspector-scroll", inspector));
     }
     let split = split
@@ -105,25 +114,17 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         .pane_motion(motion::panes())
         .reduced_motion(cx.is_reduced_motion())
         .build(&k);
-    rune_kit::root(split, layer)
+    // The window's width, for `App::inspector_drawn`.
+    rune_kit::root(split, layer).on_layout_tx(|s: &mut App, r, tx: &mut Tx| {
+        s.seen.window = Some(r[2]);
+        tx.live_only();
+    })
 }
 
-/// The inspector pane as it is drawn, or `None` when the window has no room for it. The list
-/// keeps `size::LIST_MIN`: the inspector is drawn at the stored width, or narrower (down to
-/// `size::INSPECTOR_MIN`) when that is all the room there is. Below that it hides. The stored
-/// width in `App::inspector` is never changed, so the inspector returns to the width the user
-/// chose when the window widens. Before the first layout there is no width yet, and it shows at
-/// the stored width.
+/// The inspector pane as it is drawn in this window (`App::inspector_pane`), or `None` when the
+/// window has no room for it.
 pub fn inspector_pane(s: &App, cx: &Cx<App>) -> Option<PaneState> {
-    let stored = s.inspector;
-    let Some(window) = cx.layout_with("kit-root", |r| r[2]) else { return Some(stored) };
-    let room = window - s.sidebar.shown_width() - size::LIST_MIN;
-    if room < size::INSPECTOR_MIN {
-        return None;
-    }
-    let mut pane = stored;
-    pane.set_width(stored.width().min(room));
-    Some(pane)
+    s.inspector_pane(cx.layout_with("kit-root", |r| r[2]))
 }
 
 fn sidebar(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
@@ -209,10 +210,14 @@ pub fn scope_title(scope: &Scope, what: &str) -> String {
 }
 
 /// Skills or MCP servers of the open scope, in the toolbar: `ds::tabs`, keyed so a test (or a
-/// scene) can pick one.
+/// scene) can pick one. Their end goes into `App::seen` for key handling.
 fn page_tabs(s: &App, k: &Kit) -> El {
     let current = if s.page == Page::Mcp { 1 } else { 0 };
-    ds::tabs(k, "Show", &[("tab-skills", "Skills"), ("tab-mcp", "MCP servers")], current, |s: &mut App, i| if i == 1 { s.open_mcp() } else { s.open_skills() }).key("page-tabs")
+    let pick = |s: &mut App, i, _: &mut Tx| if i == 1 { s.open_mcp() } else { s.open_skills() };
+    ds::tabs(k, "Show", &[("tab-skills", "Skills"), ("tab-mcp", "MCP servers")], current, pick).key("page-tabs").on_layout_tx(|s: &mut App, r, tx: &mut Tx| {
+        s.seen.tabs_end = Some(r[0] + r[2]);
+        tx.live_only();
+    })
 }
 
 /// The toolbar of a page with tabs: the page tabs, then the page's title (it truncates first),
@@ -229,25 +234,73 @@ pub fn toolbar_untitled(s: &App, k: &Kit, trailing: El) -> Toolbar {
     Toolbar::new().leading(page_tabs(s, k)).trailing(trailing)
 }
 
+/// What the toolbar of a page with tabs has left for the page's title and buttons
+/// (`room_beside_tabs`), as the view reads the layout. `None` before the first layout.
+fn toolbar_room(cx: &Cx<App>) -> Option<f32> {
+    room_beside_tabs(cx.layout_with("main-pane", |r| r[0] + r[2]), cx.layout_with("page-tabs", |r| r[0] + r[2]))
+}
+
 /// What the toolbar of a page with tabs has left for the page's title and buttons: from the
 /// tabs' end to the list pane's, less the kit band's end padding (`S3`) and the `S2` gaps either
 /// side of its spacer. `None` before the first layout. The pane's width does not depend on what
 /// the toolbar holds, so a page that folds its buttons by this never flips back and forth.
-fn toolbar_room(cx: &Cx<App>) -> Option<f32> {
-    let pane_end = cx.layout_with("main-pane", |r| r[0] + r[2])?;
-    let tabs_end = cx.layout_with("page-tabs", |r| r[0] + r[2])?;
-    Some(pane_end - tabs_end - space::S3 - 2.0 * space::S2)
+fn room_beside_tabs(pane_end: Option<f32>, tabs_end: Option<f32>) -> Option<f32> {
+    Some(pane_end? - tabs_end? - space::S3 - 2.0 * space::S2)
+}
+
+/// Whether controls `widths` wide fit side by side in `room`, `S2` apart: the toolbars, the
+/// skill inspector's action row and the skills.sh footer measure their rows with it before
+/// layout (`ds::button_width`).
+pub fn row_fits(widths: &[f32], room: f32) -> bool {
+    let gaps = widths.len().saturating_sub(1) as f32 * space::S2;
+    widths.iter().sum::<f32>() + gaps <= room
 }
 
 /// Whether a page's wide toolbar fits the `room` beside its tabs (`toolbar_room`; `None` before
-/// the first layout fits): the title, `icons` icon buttons and one text button with an icon
-/// labelled `button`, `S2` apart. The title counts at most `ROW_NAME_MIN`: past that it
-/// truncates, so a long project name never folds the buttons while they fit beside a shortened
-/// title.
+/// the first layout fits): the title `S3` after the tabs, then `icons` icon buttons and one text
+/// button with an icon labelled `button`, `S2` apart. The title counts at most `ROW_NAME_MIN`:
+/// past that it truncates, so a long project name never folds the buttons while they fit beside
+/// a shortened title.
 pub fn toolbar_fits(k: &Kit, room: Option<f32>, title: &str, icons: usize, button: &str) -> bool {
-    let icons = icons as f32 * (Place::Bar.height() + space::S2);
-    let wide = space::S3 + ds::toolbar_title_width(k, title).min(size::ROW_NAME_MIN) + icons + ds::button_width(k, button, Place::Bar, true);
-    room.is_none_or(|room| room >= wide)
+    let title = space::S3 + ds::toolbar_title_width(k, title).min(size::ROW_NAME_MIN);
+    let mut controls = vec![Place::Bar.height(); icons];
+    controls.push(ds::button_width(k, button, Place::Bar, true));
+    room.is_none_or(|room| row_fits(&controls, room - title))
+}
+
+/// The Skills toolbar's "…" menu is drawn: open, on the Skills page with no host's pane in its
+/// place, in a toolbar too narrow for its buttons (`installed::toolbar_folds`) as layout last
+/// reported it (`App::seen`). Only then does it hold the keys.
+fn toolbar_menu_shown(s: &App) -> bool {
+    // The kit's type is the same in both themes, so either measures the toolbar.
+    let k = Kit::neutral(false);
+    s.toolbar_menu && s.page == Page::Installed && !s.host_pending() && installed::toolbar_folds(s, &k, room_beside_tabs(s.seen.pane_end, s.seen.tabs_end))
+}
+
+/// Cancel in a dialog's footer.
+pub fn cancel(key: &str, k: &Kit, on: impl Fn(&mut App) + 'static) -> El {
+    ds::button("Cancel", Place::Bar).on_press(on).build(k).key(key.to_string())
+}
+
+/// "1 change", "3 changes".
+pub fn changes(n: usize) -> String {
+    format!("{n} change{}", if n == 1 { "" } else { "s" })
+}
+
+/// A plan's changes card label: "3 changes", or "Changes" when there are none.
+pub fn changes_heading(n: usize) -> String {
+    if n == 0 { "Changes".to_string() } else { changes(n) }
+}
+
+/// The apply button of a plan of `n` changes, `danger` when it removes: loading while it is
+/// applied, disabled when there is nothing to do.
+pub fn apply_button(applying: bool, n: usize, danger: bool) -> Button {
+    let label = if n == 0 { "Nothing to do".to_string() } else { format!("Apply {}", changes(n)) };
+    match (applying, danger) {
+        (true, _) => ds::primary("Applying…", Place::Bar).loading(true),
+        (false, true) => ds::danger(label, Place::Bar).disabled(n == 0),
+        (false, false) => ds::primary(label, Place::Bar).disabled(n == 0),
+    }
 }
 
 /// The toolbar of a page without tabs (skills.sh): the title on the leading side, `trailing` on
@@ -273,9 +326,9 @@ pub fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
         s.mcp_menu = false;
         return true;
     }
-    // An inspector's open "…" takes the keys: arrows move through it, Escape closes it. Only
-    // while it is drawn, so a flag left behind never swallows a key.
-    if s.skill_menu_shown() || s.mcp_menu_shown() {
+    // An open "…" takes the keys: arrows move through it, Escape closes it. Only while it is
+    // drawn, so a flag left behind never swallows a key.
+    if s.skill_menu_shown() || s.mcp_menu_shown() || toolbar_menu_shown(s) {
         return false;
     }
     if ev.key == rune::Key::Escape && !s.checked.is_empty() && !s.sync_open() && s.confirm_remove.is_none() {

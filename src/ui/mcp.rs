@@ -14,9 +14,10 @@ use crate::mcp::model::{EnvValue, McpCopy, Place as CopyPlace, Transport, masked
 use crate::mcp::scan::{McpServer, Status, safe_error};
 
 /// `room` is what the toolbar has beside its tabs (`ui::toolbar_room`); `None` before the first
-/// layout.
-pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>, reduced: bool, room: Option<f32>) -> (El, Toolbar, El) {
-    (main(s, k, reduced), toolbar(s, k, room), inspector(s, k, layer))
+/// layout. `drawn` says the window has room for the inspector (`ui::inspector_pane`); without
+/// it there is no inspector, nor its "…" menu.
+pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>, reduced: bool, room: Option<f32>, drawn: bool) -> (El, Toolbar, Option<El>) {
+    (main(s, k, reduced), toolbar(s, k, room), drawn.then(|| inspector(s, k, layer)))
 }
 
 /// Tabs, the title, Rescan and Add server. When the list pane is too narrow for them, the title

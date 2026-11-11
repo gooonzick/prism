@@ -63,6 +63,20 @@ pub enum Filter {
     Updates,
 }
 
+/// Where layout last put what decides which parts of the window are drawn, as `on_layout`
+/// handlers report it (`ui::view` attaches them). The view never writes it and never reads it:
+/// it reads layout through `Cx`. Key handling (`ui::on_key`) has no layout to read, so it goes by
+/// these to tell which menus are drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Seen {
+    /// The window's width.
+    pub window: Option<f32>,
+    /// The list pane's right edge.
+    pub pane_end: Option<f32>,
+    /// The page tabs' right edge.
+    pub tabs_end: Option<f32>,
+}
+
 pub struct Notice {
     pub title: String,
     pub detail: String,
@@ -133,6 +147,8 @@ pub struct App {
     /// goes, and when the scope or page changes; it holds the keys only while it is drawn
     /// (`mcp_menu_shown`).
     pub mcp_menu: bool,
+    /// The layout `ui::on_key` goes by (`Seen`).
+    pub seen: Seen,
     /// The open sync dialog's plan.
     pub sync_plan: Option<Plan>,
     /// The open sync dialog's plan, made by the host in view.
@@ -258,6 +274,7 @@ impl App {
             toolbar_menu: false,
             skill_menu: false,
             mcp_menu: false,
+            seen: Seen::default(),
             sync_plan: None,
             sync_host: None,
             sync_only: None,
@@ -651,6 +668,32 @@ impl App {
 }
 
 /// [`Latest::set_waker`] over answers of any type.
+impl App {
+    /// The inspector pane as it is drawn in a window `window` wide, or `None` when the window has
+    /// no room for it. The list keeps `size::LIST_MIN`: the inspector is drawn at the stored
+    /// width, or narrower (down to `size::INSPECTOR_MIN`) when that is all the room there is.
+    /// Below that it hides. The stored width in `App::inspector` is never changed, so the
+    /// inspector returns to the width the user chose when the window widens. Before the first
+    /// layout (`window` is `None`) it shows at the stored width. The view asks through
+    /// `ui::inspector_pane`, key handling with `Seen::window`.
+    pub fn inspector_pane(&self, window: Option<f32>) -> Option<PaneState> {
+        let stored = self.inspector;
+        let Some(window) = window else { return Some(stored) };
+        let room = window - self.sidebar.shown_width() - size::LIST_MIN;
+        if room < size::INSPECTOR_MIN {
+            return None;
+        }
+        let mut pane = stored;
+        pane.set_width(stored.width().min(room));
+        Some(pane)
+    }
+
+    /// Whether the inspector pane is drawn in the window as layout last reported it (`Seen`).
+    pub fn inspector_drawn(&self) -> bool {
+        self.inspector_pane(self.seen.window).is_some()
+    }
+}
+
 trait SetWaker {
     fn set(&self, waker: Waker);
 }

@@ -5,7 +5,7 @@ use rune::{El, TextEdit, Tx, col, row};
 use rune_kit::{Kit, glyphs};
 
 use super::{
-    Card, Inspector, ListRow, MenuAction, Notice, Page, Place, Plan, SecretInput, Selection, Tone, button, color, copy_button, danger, dot, empty,
+    Card, Inspector, ListRow, LoadingButton, MenuAction, Notice, Page, Place, Plan, SecretInput, Selection, Tone, button, color, copy_button, danger, dot, empty,
     empty_action, field, field_pair, filter, icon_button, item_row, loading, markdown, overflow, pair_row, plain_row, pressable, primary,
     quiet, reveal, segments, size, space, stacked_row, status, switch, tabs, tag, text,
 };
@@ -62,7 +62,7 @@ pub fn gallery<S: 'static>(k: &Kit, layer: &mut Vec<El>) -> El {
                 .min_h(0.0)
                 .padding(size::PANE_EDGE)
                 .gap(space::S4)
-                .child(section(k, "Tabs", row().child(tabs(k, "Show", &[("gallery-tab-skills", "Skills"), ("gallery-tab-mcp", "MCP servers")], 0, |_: &mut S, _| {}))))
+                .child(section(k, "Tabs", row().child(tabs(k, "Show", &[("gallery-tab-skills", "Skills"), ("gallery-tab-mcp", "MCP servers")], 0, |_: &mut S, _, _: &mut Tx| {}))))
                 .child(section(k, "Plan", col().w_full().gap(space::S4).children(plan(k))))
                 .child(section(k, "Command", text::command(k, "npx -y figma-developer-mcp --stdio --figma-api-key=${FIGMA_KEY}")))
                 .child(section(k, "Markdown", markdown::<S>(k, MARKDOWN)))
@@ -153,7 +153,8 @@ fn controls<S: 'static>(k: &Kit, layer: &mut Vec<El>) -> El {
                 .child(primary("Add host", Place::Bar).build(k))
                 .child(button("Edit", Place::Bar).build(k))
                 .child(quiet("Fewer", Place::Bar).build(k))
-                .child(danger("Remove…", Place::Bar).build(k)),
+                .child(danger("Remove…", Place::Bar).build(k))
+                .child(primary("Applying…", Place::Bar).loading(true).build(k)),
         )
         .child(
             row()

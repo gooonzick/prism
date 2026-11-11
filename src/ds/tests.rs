@@ -861,7 +861,7 @@ mod page_additions {
 
     fn two_tabs(picked: &usize, _: &mut Cx<usize>) -> El {
         let k = Kit::neutral(false);
-        let tabs = tabs(&k, "Show", &[("tab-a", "Skills"), ("tab-b", "MCP servers")], *picked, |s: &mut usize, i| *s = i).key("tabs");
+        let tabs = tabs(&k, "Show", &[("tab-a", "Skills"), ("tab-b", "MCP servers")], *picked, |s: &mut usize, i, _: &mut Tx| *s = i).key("tabs");
         col().padding(16.0).child(tabs)
     }
 
@@ -878,6 +878,31 @@ mod page_additions {
         assert_eq!(rt.state, 1);
         click(&mut rt, "tab-a");
         assert_eq!(rt.state, 0);
+    }
+
+    /// A primary that is running (state `true`) and the same button idle, each counting presses.
+    fn loading_buttons(running: &(bool, u32), _: &mut Cx<(bool, u32)>) -> El {
+        let k = Kit::neutral(false);
+        let label = if running.0 { "Applying…" } else { "Apply 2 changes" };
+        col().padding(16.0).child(primary(label, Place::Bar).loading(running.0).on_press(|s: &mut (bool, u32)| s.1 += 1).build(&k).key("apply"))
+    }
+
+    #[test]
+    fn loading_takes_no_presses_and_idle_is_unchanged() {
+        let mut rt = run((true, 0u32), loading_buttons, (400.0, 100.0));
+        let el = |rt: &Runtime<(bool, u32)>| rt.elements().into_iter().find(|e| e.key.as_deref() == Some("apply")).expect("no apply");
+        let running = el(&rt);
+        assert_eq!((running.role, running.label.as_deref(), running.focusable), ("button", Some("Applying…"), false));
+        assert_eq!(rect(&rt, "apply")[3], Place::Bar.height(), "a running button keeps its place's height");
+        assert_eq!(running.fill, Kit::neutral(false).c.layer_02, "the kit's loading look");
+        click(&mut rt, "apply");
+        assert_eq!(rt.state.1, 0, "a running button takes no presses");
+        // Idle, `.loading(false)` is the button as `primary` makes it.
+        rt.update(|s, _| s.0 = false);
+        rt.frame(0.0);
+        assert!(el(&rt).focusable, "an idle button takes focus");
+        click(&mut rt, "apply");
+        assert_eq!(rt.state.1, 1, "an idle button takes presses");
     }
 
     /// A page whose content is 244 wide: the list pane at the smallest window (`LIST_MIN` less

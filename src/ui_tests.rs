@@ -455,6 +455,25 @@ fn updates_show_as_tags_and_a_filter() {
     assert!(h.rt.find("update-banner").is_some());
 }
 
+#[test]
+fn a_running_update_shows_the_loading_button() {
+    let mut h = three_skills();
+    h.rescan();
+    let scope = h.rt.state.scope.clone();
+    let job_scope = scope.clone();
+    h.rt.update(move |s, _| s.updates.insert(scope, vec!["beta".into()]).map(|_| ()).unwrap_or(()));
+    h.settle();
+    h.click("skill-beta");
+    let update = |h: &Harness| h.rt.elements().into_iter().find(|e| e.key.as_deref() == Some("update") && !e.exiting).expect("Update in the banner");
+    let idle = update(&h);
+    assert_eq!((idle.label.as_deref(), idle.focusable), (Some("Update"), true));
+    h.rt.update(move |s, _| s.updating = Some(crate::app::UpdateJob { scope: job_scope, skills: vec!["beta".into()] }));
+    h.settle();
+    let running = update(&h);
+    assert_eq!((running.label.as_deref(), running.focusable), (Some("Updating…"), false), "says what runs and takes no presses");
+    assert_eq!(running.fill, rune_kit::Kit::neutral(false).c.layer_02, "the kit's loading look");
+}
+
 /// Installs a real skill from skills.sh through its CLI. Needs the network and Node:
 /// `cargo test -- --ignored`.
 #[test]
@@ -2321,6 +2340,31 @@ fn narrow_toolbar_keeps_its_shortcuts_and_menu() {
     assert!(!h.rt.state.toolbar_menu, "another page lets go of the menu");
 }
 
+#[test]
+fn an_open_toolbar_menu_keeps_shortcuts_from_the_window() {
+    let cmd = rune::Mods { cmd: true, ..rune::Mods::default() };
+    let mut h = smallest_with_selection();
+    h.click("toolbar-more");
+    assert!(h.rt.state.toolbar_menu && h.rt.find("toolbar-more-popup-item0").is_some(), "the menu is open");
+    key(&mut h, rune::Key::Command('n'), cmd);
+    assert!(h.rt.state.new_skill.is_none(), "⌘N doesn't open New skill behind the menu");
+    assert!(h.rt.find("toolbar-more-popup-item0").is_some(), "the menu stays");
+    key(&mut h, rune::Key::Escape, rune::Mods::default());
+    assert!(!h.rt.state.toolbar_menu, "Escape closes it");
+    key(&mut h, rune::Key::Command('n'), cmd);
+    assert!(h.rt.state.new_skill.is_some(), "with the menu closed ⌘N opens New skill");
+
+    // A wide toolbar draws no "…": a flag left behind holds no keys.
+    h.rt.update(|s, _| s.new_skill = None);
+    h.settle();
+    h.click("toolbar-more");
+    h.rt.set_viewport((1180.0, 760.0), 2.0);
+    h.settle();
+    assert!(h.rt.state.toolbar_menu && h.rt.find("toolbar-more").is_none(), "the flag stays, the menu is gone");
+    key(&mut h, rune::Key::Command('n'), cmd);
+    assert!(h.rt.state.new_skill.is_some(), "⌘N opens New skill");
+}
+
 impl Harness {
     /// Whether the narrow toolbar's menu item `i` takes presses (a disabled item isn't focusable).
     fn menu_item_enabled(&self, i: usize) -> bool {
@@ -2530,6 +2574,28 @@ fn an_open_skill_menu_keeps_list_keys_from_the_list() {
     key(&mut h, rune::Key::Command('a'), rune::Mods { cmd: true, ..rune::Mods::default() });
     assert!(h.rt.state.checked.is_empty(), "⌘A doesn't tick rows behind the menu");
     assert!(h.rt.state.skill_menu);
+}
+
+#[test]
+fn a_skill_menu_in_a_hidden_inspector_lets_go_of_the_keys() {
+    let mut h = three_skills();
+    h.rescan();
+    // A wide sidebar: at the smallest window the list keeps its room and the inspector goes.
+    h.rt.update(|s, _| s.sidebar.set_width(300.0));
+    h.settle();
+    h.click("skill-alpha");
+    h.click("skill-more");
+    assert!(h.rt.state.skill_menu_shown() && h.rt.find("skill-more-popup-item0").is_some(), "the menu is open");
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
+    h.settle();
+    assert!(h.rt.find("inspector").is_none(), "no room for the inspector");
+    assert!(h.rt.state.skill_menu, "no event cleared the flag");
+    assert!(h.rt.find("skill-more-popup-item0").is_none(), "the menu went with the inspector");
+    assert!(!h.rt.state.skill_menu_shown());
+    key(&mut h, rune::Key::Command('a'), rune::Mods { cmd: true, ..rune::Mods::default() });
+    assert_eq!(h.rt.state.checked.len(), h.rt.state.visible().len(), "⌘A ticks every row");
+    key(&mut h, rune::Key::Down, rune::Mods::default());
+    assert_eq!(h.rt.state.selected.as_deref(), Some("beta"), "↓ moves the selection");
 }
 
 #[test]
@@ -2802,6 +2868,23 @@ fn mcp_menu_closes_on_selection_change() {
     h.click("mcp-more");
     key(&mut h, rune::Key::Command('b'), rune::Mods { cmd: true, shift: true, ..rune::Mods::default() });
     assert!(!h.rt.state.mcp_menu, "⇧⌘B lets go of the menu");
+}
+
+#[test]
+fn an_mcp_menu_in_a_hidden_inspector_lets_go_of_the_keys() {
+    let mut h = secrets_home();
+    h.rt.update(|s, _| s.sidebar.set_width(300.0));
+    h.settle();
+    h.click("mcp-row-envy");
+    h.click("mcp-more");
+    assert!(h.rt.state.mcp_menu_shown(), "the menu is open");
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
+    h.settle();
+    assert!(h.rt.find("inspector").is_none(), "no room for the inspector");
+    assert!(h.rt.state.mcp_menu && h.rt.find("mcp-more-popup-item0").is_none(), "the flag stays, the menu is gone");
+    assert!(!h.rt.state.mcp_menu_shown());
+    key(&mut h, rune::Key::Command('n'), rune::Mods { cmd: true, ..rune::Mods::default() });
+    assert!(h.rt.state.mcp_form.is_some(), "⌘N opens Add server");
 }
 
 #[test]

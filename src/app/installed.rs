@@ -64,11 +64,14 @@ impl App {
     }
 
     /// The skill inspector's "…" menu is drawn: open, on the Skills page, over a skill that is
-    /// there, with no host's connecting or error pane in place of the page. Only then does it
-    /// hold the keys.
+    /// there, with no host's connecting or error pane in place of the page, in an inspector the
+    /// window has room for (`inspector_drawn`). Only then does it hold the keys.
     pub fn skill_menu_shown(&self) -> bool {
-        let host_pending = matches!(&self.env, super::Env::Remote { state, .. } if *state != super::RemoteState::Ready);
-        self.skill_menu && self.page == super::Page::Installed && !host_pending && self.selected.as_deref().is_some_and(|n| self.inv.get(n).is_some())
+        self.skill_menu
+            && self.page == super::Page::Installed
+            && !self.host_pending()
+            && self.inspector_drawn()
+            && self.selected.as_deref().is_some_and(|n| self.inv.get(n).is_some())
     }
 
     pub(super) fn load_preview(&mut self) {

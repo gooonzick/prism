@@ -4,8 +4,9 @@
 //! `Plan`s.
 
 use rune::{El, Tx, col, row};
-use rune_kit::{ButtonVariant, Checkbox, Kit, Placement, RadioItem, Select, TextInput, glyphs};
+use rune_kit::{Checkbox, Kit, Placement, RadioItem, Select, TextInput, glyphs};
 
+use super::{apply_button, cancel, changes_heading};
 use crate::agents::tilde;
 use crate::app::{App, McpChange, McpDialog, McpForm, Planned, Target};
 use crate::ds::{self, Card, DialogFrame, DialogKind, Notice, Place, Plan, Tone, field, field_pair, loading, plain_row, size, space, text};
@@ -16,11 +17,6 @@ use crate::plan_view::PlanView;
 
 fn form_mut(s: &mut App) -> &mut McpForm {
     s.mcp_form.as_mut().expect("the MCP form is open")
-}
-
-/// Cancel in a dialog's footer.
-fn cancel(key: &str, k: &Kit, on: impl Fn(&mut App) + 'static) -> El {
-    ds::button("Cancel", Place::Bar).on_press(on).build(k).key(key.to_string())
 }
 
 /// A control with a hint under it.
@@ -41,7 +37,7 @@ fn server_card(f: &McpForm, k: &Kit) -> El {
         .key("mcp-add-name");
     let items = [("mcp-add-kind-stdio", "Command"), ("mcp-add-kind-http", "URL")];
     // In a row, so the segments keep their own width instead of stretching across the field.
-    let kind = ds::tabs(k, "Runs as", &items, usize::from(f.http), |s: &mut App, i: usize| s.set_mcp_kind(i == 1)).key("mcp-add-kind");
+    let kind = ds::tabs(k, "Runs as", &items, usize::from(f.http), |s: &mut App, i: usize, _: &mut Tx| s.set_mcp_kind(i == 1)).key("mcp-add-kind");
     Card::new("mcp-add-server").label("Server").row(field_pair(field(k, "Name", name), field(k, "Runs as", row().child(kind)), None)).build(k).expect("one row")
 }
 
@@ -379,11 +375,6 @@ fn picks(s: &App, d: &McpDialog, k: &Kit, menus: &mut Vec<El>) -> Option<Vec<El>
     Some(cards)
 }
 
-/// "3 changes", or "Changes" when there are none.
-fn changes_heading(n: usize) -> String {
-    if n == 0 { "Changes".to_string() } else { format!("{n} change{}", if n == 1 { "" } else { "s" }) }
-}
-
 /// The plan, as the CLI prints it: its lines, the skipped agents and the heads-ups. On a host,
 /// the plan the host made, once it is in. Also the count the apply button names.
 fn plan_of(s: &App, d: &McpDialog, k: &Kit) -> (Plan, usize) {
@@ -457,13 +448,7 @@ pub fn plan(s: &App, k: &Kit, layer: &mut Vec<El>) {
     };
     let danger = matches!(d.change, McpChange::Remove { .. });
     let applying = d.host_plan.as_ref().is_some_and(|p| p.applying) || d.across.as_ref().is_some_and(|t| t.applying);
-    let apply = match (applying, n) {
-        (true, _) => ds::primary("Applying…", Place::Bar).variant(ButtonVariant::Loading).disabled(true),
-        (false, n) => {
-            let label = if n == 0 { "Nothing to do".to_string() } else { format!("Apply {n} change{}", if n == 1 { "" } else { "s" }) };
-            if danger { ds::danger(label, Place::Bar) } else { ds::primary(label, Place::Bar) }.disabled(n == 0)
-        }
-    };
+    let apply = apply_button(applying, n, danger);
     let mut frame = DialogFrame::new("mcp-plan", plan_title(d), kind);
     for b in body {
         frame = frame.body(b);

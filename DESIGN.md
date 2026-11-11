@@ -19,9 +19,10 @@ is Keysmith's copy plus the items listed under "Prism additions" at the end of t
 of these and names the file and line.
 
 Widths of individual fields (`.width(220.0)` on a select) are allowed. A width used in more than
-one place, or one a layout decision depends on, goes into `size::`. `src/ui/` keeps no numeric
-size constants of its own: the window's minimum (`MIN_WINDOW`) is in `src/main.rs`, everything
-else in `size::`.
+one place, or one a layout decision depends on, goes into `size::`. `src/ui/` keeps no size
+constants of its own: the window's minimum (`MIN_WINDOW`) is in `src/main.rs`, every other width
+and height in `size::`. A count is not a size: the Remove dialog's `SHOWN` (how many skill names
+it lists before "and N more") stays where it is used.
 
 If a screen needs a value `ds` does not have, add it to `src/ds/tokens.rs` (or a block to `ds`),
 never at the call site, and record it under "Prism additions". A number may be tuned when a
@@ -134,9 +135,10 @@ kit. Never a coloured fill behind text (a red banner, a green row).
    (`ds::toolbar_title`).
 9. **An inspector's action row never wraps.** It holds at most three buttons plus the overflow
    on the left and one action (usually the destructive one) on the right; the rest goes in
-   "…" (`ds::overflow`). The builder measures the row (`ds::button_width`) against the width
-   the inspector is drawn at, so check it at `INSPECTOR_MIN`. Menu order is fixed; an item that
-   does not apply is disabled, not hidden.
+   "…" (`ds::overflow`). The builder measures the row (`ds::button_width`, summed by
+   `ui::row_fits`, which the toolbars and the skills.sh footer use too) against the width the
+   inspector is drawn at, so check it at `INSPECTOR_MIN`. Menu order is fixed; an item that does
+   not apply is disabled, not hidden.
 10. **No empty frames**: a card with no rows is not drawn (`Card::build` returns `None`); an
     inspector with nothing selected shows an empty state (`Inspector::empty`) or nothing.
 
@@ -155,7 +157,8 @@ reduced motion passed through.
   `tab-mcp`) and the page's title (`scope_title`, through `ds::toolbar_title`). Pages live in
   the toolbar, not the sidebar, because the sidebar holds scopes. Trailing: `icon_button`s at
   `Place::Bar`, then at most one text button at `Place::Bar`. New skill and Add server take ⌘N,
-  Rescan ⌘R (`ui::on_key`; hints spell them with `key_label`). When the toolbar does not fit
+  Rescan ⌘R (`ui::on_key`; the buttons show them through `.shortcut(…)`, hints spell them with
+  `key_label`). When the toolbar does not fit
   the list pane (`toolbar_fits`), the title hides, the Skills toolbar's icon actions move into a
   toolbar "…", and the text button shows its icon alone, its label as tooltip and accessible
   name.
@@ -169,6 +172,24 @@ reduced motion passed through.
   closable, with Undo when the change can be undone. Never a dialog to report success. A change
   on another machine ends its title with "on <machine>"; the toast's Undo acts there
   (`App::undo_toast`), while ⌘Z acts on the machine in view.
+
+## Keys and interaction
+
+- **Every interactive control has a stable key.** Buttons, fields, rows, switches, tabs, menus
+  and dialogs each get a `.key(...)` that does not change between builds (`sync`, `skill-more`,
+  `mcp-add-kind-http`, `skill-<name>`). Tests and snapshot scenes find and press elements by
+  key, so a key is part of the screen's interface: change a key and its test together, in one
+  commit. rune-kit's `Menu` keys its items `<key>-popup-item<i>` (see "Recorded exceptions"), so
+  a menu's order is fixed and an item that does not apply is disabled, not hidden.
+- **Values are selectable, labels are not.** What a person may copy (a URL, a command and its
+  args, a path, an env or header key) is set in Code, Command or Path, which are selectable;
+  labels, hints, status words, buttons and tags never are.
+- **Icon buttons always carry an accessible label and a tooltip** (`icon_button` makes its label
+  both), **and show their shortcut where one exists** (`.shortcut("cmd+n")` on New skill and the
+  narrow Add server, `.shortcut("cmd+r")` on Rescan).
+- **A running action shows on its button.** While a button's job runs, the button takes
+  `.loading(true)` (`ds::LoadingButton`): the kit's loading look, and no presses. Apply in a plan
+  ("Applying…"), Update in the skill inspector ("Updating…"), Install / Reinstall on skills.sh.
 
 ## Motion
 
@@ -215,7 +236,8 @@ reduced motion passed through.
 | `quiet` | A secondary action with no outline ("Show 6 more agents", "Add variable"). |
 | `reveal` | A `quiet` eye button, "Show values" / "Hide values": the trailing control of a card whose values are masked. |
 | `copy_button` | A button that copies and confirms with a check (not used in Prism yet). |
-| `icon_button` | An icon-only button; its label is the accessible name and tooltip. |
+| `icon_button` | An icon-only button; its label is the accessible name and tooltip; `.shortcut(…)` where it has one. |
+| `LoadingButton::loading` | A text button whose action runs: the kit's loading look, no presses; the label says what runs ("Applying…"). |
 | `button_width`, `toolbar_title_width` | What a text button and an untruncated toolbar title take, measured before layout, for a row that folds into "…". |
 | `filter` | The search field at the top of a page, with a clear button once there is text. |
 | `tabs` | Keyed segments that switch what the window shows (page tabs) or a choice inside a form (Command / URL). |
@@ -282,8 +304,9 @@ will do.
   "Copy to…", "Edit…", "Remove…", "Merge…", "Add project…". A button that acts at once has
   none: "Sync 3 skills", "Install", "Use link".
 - **Buttons name the action and its object or count**: "Sync 3 skills", "Remove 3", "Review
-  changes". Never "OK", "Submit", "Confirm", "Yes". While a button's job runs its label says so
-  ("Updating…") and it is disabled.
+  changes". Never "OK", "Submit", "Confirm", "Yes". While a button's job runs it is
+  `.loading(true)`, and its label says so where it has a running form ("Updating…",
+  "Applying…").
 - **Status words are a closed set**; reuse one, never coin a new one ("off", "error", "ok" don't
   exist). Lowercase, after a dot, no verb:
   - skill rows (`sync_status`, `src/ui/installed.rs`): "synced", "N to link", "not in .agents",
@@ -311,7 +334,8 @@ will do.
   one you pick."
 - **Agent names as each tool writes them**: Claude Code, Claude Desktop, Codex, Cursor, OpenCode,
   Gemini CLI, GitHub Copilot, Windsurf, Goose, Kiro, Roo Code; short forms only in tags
-  ("Claude", "Gemini"). The shared folder is `.agents`, always with the dot.
+  ("Claude", "Gemini", "Desktop" for Claude Desktop on an MCP row). The shared folder is
+  `.agents`, always with the dot.
 
 ```rust
 // Correct: an ellipsis because it opens a dialog, sentence case, a specific verb
@@ -348,9 +372,12 @@ From Keysmith, and true in Prism:
   setter, so the toolbar's buttons sit 4 outside the page's 16 content edge.
 - **Menu items are keyed by index.** rune-kit's `Menu` has no item key setter, so overflow items
   are `<key>-popup-item<i>`. Menu lists keep a stable order and disable an item that does not
-  apply rather than hide it, so each index keeps its meaning. An inspector's "…" takes the
-  keys only while it is drawn (`skill_menu_shown`, `mcp_menu_shown`), and its open flag is
-  cleared when the selection changes or goes.
+  apply rather than hide it, so each index keeps its meaning. A "…" takes the keys only while
+  it is drawn (`skill_menu_shown`, `mcp_menu_shown`, `ui::toolbar_menu_shown`): an inspector's
+  while the window has room for the inspector (`App::inspector_drawn`; with no room the
+  inspector and its menu aren't built), the toolbar's while the toolbar is folded. `ui::on_key`
+  has no layout to read, so it goes by `App::seen`, which `on_layout` handlers fill (the view
+  writes no state). An inspector's open flag is cleared when the selection changes or goes.
 - **Dialog top in a short window.** The rule "top 16 when the window is too short for
   `DIALOG_TOP`" is not implemented: Rune gives `build` no window size, and the window's minimum
   height is 520. The dialog shrinks instead and its body scrolls; the footer stays visible (the
@@ -381,8 +408,6 @@ Prism's own:
 - **The skills.sh footer placeholder wraps at the minimum window.** "owner/repo, owner/repo@skill
   or a URL" is kept as written; in a 244 list it wraps. The footer's buttons sit beside the
   input when there is room (`size::FIELD_MIN`), under it otherwise.
-- **No spinner in buttons.** `ds` has no loading button; a running Update reads "Updating…" and
-  is disabled.
 
 ### Motion gaps
 
@@ -444,7 +469,8 @@ backport to Keysmith is a copy plus this list.
 | `tokens.rs` | `Place::height()` (24 / 28 / 28) | A control's height for a place, as the kit draws `Place::control()`: `tabs` uses it, and tests assert heights without a literal. |
 | `tokens.rs` | `#[allow(dead_code)]` on `motion::COPY_CONFIRM_SECS` | Prism has no copy button, so the token is unused here; it stays for Keysmith. |
 | `controls.rs` | `segments(labels, current, label, on_pick)` (`on_pick: Fn + Clone`, passed straight to the kit) | Kit `SegmentedControl`, fitted to its labels at `Place::List` height: Skills and MCP status filters. |
-| `controls.rs` | `tabs<S>(k, label, items: &[(key, label)], current, on_pick) -> El` | Segments that switch what the window shows, drawn as the kit's `SegmentedControl` at `Place::Bar` height (radiogroup of radios, `radius::CONTROL`, `space::S3` sides), with a caller key on each segment: the kit keys its segments `segment<i>`, and the page tabs must stay `tab-skills` / `tab-mcp`. Its raw values (0.5 hairline, 2/1 focus ring, 13 line) and direct `k.c` / `k.ty` mirror the kit's control, with a comment saying so. Also serves the MCP form's Command / URL switch (`mcp-add-kind-stdio` / `mcp-add-kind-http`). |
+| `controls.rs` | `tabs<S>(k, label, items: &[(key, label)], current, on_pick: Fn(&mut S, usize, &mut Tx) + Clone) -> El` | Segments that switch what the window shows, drawn as the kit's `SegmentedControl` at `Place::Bar` height (radiogroup of radios, `radius::CONTROL`, `space::S3` sides), with a caller key on each segment: the kit keys its segments `segment<i>`, and the page tabs must stay `tab-skills` / `tab-mcp`. Its raw values (0.5 hairline, 2/1 focus ring, 13 line) and direct `k.c` / `k.ty` mirror the kit's control, with a comment saying so. Also serves the MCP form's Command / URL switch (`mcp-add-kind-stdio` / `mcp-add-kind-http`). `on_pick` gets the press's `Tx`, as `segments` does. |
+| `controls.rs` | `LoadingButton` trait: `.loading(on)` on a kit `Button` (`button`, `primary`, `quiet`, `danger`) | A running action shows on its button: while `on`, the kit's `ButtonVariant::Loading` look and disabled, so it takes no presses; `false` leaves the button unchanged. Keysmith's `ds` had no loading button; Prism's plan Apply buttons, Update and Install use it. In the gallery ("Applying…" under Controls). |
 | `controls.rs` | `reveal(shown, place)` | A `quiet` button with an eye: "Show values" / "Hide values", the trailing control of a card whose values are masked. |
 | `controls.rs` | `secret_input(edit, on_edit, shown, on_toggle)` → `SecretInput` (`label`, `placeholder`, `invalid`, `on_submit`, `key`, `eye_key`, `build(k)`; `pub(super) SecretInput::unwired` for the gallery) | A masked `TextInput` at full width and its eye `icon_button` ("Show value" / "Hide value"): env and header values, a command or URL with a secret. A builder rather than an `El`, because building needs the kit and the field and eye carry their own keys. |
 | `controls.rs` | `switch(k, on)` | Kit `Switch` at the kit's size (Mini, 36×16) in dark, the standard switch in light, where the compact one disappears on a light pane when off: linking a skill into an agent. |
@@ -463,8 +489,8 @@ backport to Keysmith is a copy plus this list.
 | `dialog.rs` | `DialogFrame::footer_cancel(cancel)` | A footer with Cancel and no main action: Copy to…, where picking a scope is the action. `footer` keeps its signature and behaviour. |
 | `dialog.rs` | `DialogFrame::error_key(key)` | A second key on the error line's text, besides the line's `<key>-error`: the MCP form's `mcp-add-error` and Add host's `host-error` stayed when their errors moved into the frame. `error` keeps its behaviour. |
 | (rule) | Kit controls `Switch`, `SegmentedControl`, `RadioItem`, `TextArea`, `Spinner` | Allowed in `ds` and its callers, through the wrappers above where there is one (`switch`, `segments`, `loading`); `RadioItem` and `TextArea` as the kit draws them, inside card rows, like `Checkbox`. |
-| `gallery.rs` | A picking page under the inspector; a summary selection line ("Selection"); `loading` and `empty_action` ("States"); a fifth column with "Tabs", a `Plan` (grouped, skipped, heads-up), `command`, `markdown`, and "Inspector controls" (`switch` off / on, `reveal` both ways, `secret_input`) | Every new block in the gallery; the `ds` scene snaps at 1500×760 (`scripts/snap-scenes.sh`) to fit it. A Wide dialog is too big for a column; dialog kinds are covered by tests. |
-| `tests.rs` | Tests for the additions: `wide_dialog_is_760_and_fits_860`, `cancel_only_footer`, `error_line_keeps_its_key_and_takes_another`, and the `page_additions` and later modules (segments, picking, trailing, selection line, footer, `build_tx`, loading / empty_action, tabs, rows and segments at the smallest width, `button_width`, `command`, `markdown`, `Plan` states, `reveal`, `secret_input`, `switch`) | Each addition with logic has a test; Keysmith's tests are unchanged. |
+| `gallery.rs` | A loading primary ("Applying…") in the Controls row; a picking page under the inspector; a summary selection line ("Selection"); `loading` and `empty_action` ("States"); a fifth column with "Tabs", a `Plan` (grouped, skipped, heads-up), `command`, `markdown`, and "Inspector controls" (`switch` off / on, `reveal` both ways, `secret_input`) | Every new block in the gallery; the `ds` scene snaps at 1500×760 (`scripts/snap-scenes.sh`) to fit it. A Wide dialog is too big for a column; dialog kinds are covered by tests. |
+| `tests.rs` | Tests for the additions: `wide_dialog_is_760_and_fits_860`, `cancel_only_footer`, `error_line_keeps_its_key_and_takes_another`, and the `page_additions` and later modules (segments, picking, trailing, selection line, footer, `build_tx`, loading / empty_action, tabs, rows and segments at the smallest width, `button_width`, `command`, `markdown`, `Plan` states, `reveal`, `secret_input`, `switch`, `loading_takes_no_presses_and_idle_is_unchanged`) | Each addition with logic has a test; Keysmith's tests are unchanged. |
 
 ### Fixes to Keysmith's ds
 

@@ -67,12 +67,11 @@ impl App {
     }
 
     /// The MCP inspector's "…" menu is drawn: open, on the MCP page, over a server that is there
-    /// and has actions, with no host's connecting or error pane in place of the page. Only then
-    /// does it hold the keys.
+    /// and has actions, with no host's connecting or error pane in place of the page, in an
+    /// inspector the window has room for (`inspector_drawn`). Only then does it hold the keys.
     pub fn mcp_menu_shown(&self) -> bool {
-        let host_pending = matches!(&self.env, super::Env::Remote { state, .. } if *state != super::RemoteState::Ready);
         let server = self.mcp_selected.as_deref().and_then(|n| self.mcp.get(n));
-        self.mcp_menu && self.page == Page::Mcp && !host_pending && server.is_some_and(|s| s.status != Status::ReadOnly)
+        self.mcp_menu && self.page == Page::Mcp && !self.host_pending() && self.inspector_drawn() && server.is_some_and(|s| s.status != Status::ReadOnly)
     }
 
     /// Indices of the servers the filter lets through.

@@ -126,6 +126,12 @@ impl App {
         matches!(self.env, Env::Remote { .. })
     }
 
+    /// A host is in view and its state isn't in yet: its connecting, install or error pane
+    /// stands in place of the Skills and MCP pages (`ui::hosts::pending`).
+    pub fn host_pending(&self) -> bool {
+        matches!(&self.env, Env::Remote { state, .. } if *state != RemoteState::Ready)
+    }
+
     /// The host in view.
     pub fn host(&self) -> Option<&Host> {
         match &self.env {
