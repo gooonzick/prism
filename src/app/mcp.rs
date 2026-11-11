@@ -30,11 +30,17 @@ impl McpFilter {
 impl App {
     pub fn open_mcp(&mut self) {
         self.page = Page::Mcp;
+        self.toolbar_menu = false;
+        self.skill_menu = false;
+        self.mcp_menu = false;
         self.rescan_mcp();
     }
 
     pub fn open_skills(&mut self) {
         self.page = Page::Installed;
+        self.toolbar_menu = false;
+        self.skill_menu = false;
+        self.mcp_menu = false;
     }
 
     pub fn rescan_mcp(&mut self) {
@@ -45,6 +51,7 @@ impl App {
         self.mcp = scan::scan(&self.scope, &self.paths);
         if self.mcp_selected.as_deref().is_some_and(|n| self.mcp.get(n).is_none()) {
             self.mcp_selected = None;
+            self.mcp_menu = false;
         }
         let mcp = &self.mcp;
         self.mcp_revealed.retain(|n| mcp.get(n).is_some());
@@ -52,9 +59,19 @@ impl App {
 
     pub fn select_mcp(&mut self, name: &str) {
         self.mcp_selected = Some(name.to_string());
+        // The inspector's "…" was for the server selected before.
+        self.mcp_menu = false;
         if !self.inspector.is_open() {
             self.inspector.toggle();
         }
+    }
+
+    /// The MCP inspector's "…" menu is drawn: open, on the MCP page, over a server that is there
+    /// and has actions, with no host's connecting or error pane in place of the page, in an
+    /// inspector the window has room for (`inspector_drawn`). Only then does it hold the keys.
+    pub fn mcp_menu_shown(&self) -> bool {
+        let server = self.mcp_selected.as_deref().and_then(|n| self.mcp.get(n));
+        self.mcp_menu && self.page == Page::Mcp && !self.host_pending() && self.inspector_drawn() && server.is_some_and(|s| s.status != Status::ReadOnly)
     }
 
     /// Indices of the servers the filter lets through.

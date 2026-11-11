@@ -455,6 +455,25 @@ fn updates_show_as_tags_and_a_filter() {
     assert!(h.rt.find("update-banner").is_some());
 }
 
+#[test]
+fn a_running_update_shows_the_loading_button() {
+    let mut h = three_skills();
+    h.rescan();
+    let scope = h.rt.state.scope.clone();
+    let job_scope = scope.clone();
+    h.rt.update(move |s, _| s.updates.insert(scope, vec!["beta".into()]).map(|_| ()).unwrap_or(()));
+    h.settle();
+    h.click("skill-beta");
+    let update = |h: &Harness| h.rt.elements().into_iter().find(|e| e.key.as_deref() == Some("update") && !e.exiting).expect("Update in the banner");
+    let idle = update(&h);
+    assert_eq!((idle.label.as_deref(), idle.focusable), (Some("Update"), true));
+    h.rt.update(move |s, _| s.updating = Some(crate::app::UpdateJob { scope: job_scope, skills: vec!["beta".into()] }));
+    h.settle();
+    let running = update(&h);
+    assert_eq!((running.label.as_deref(), running.focusable), (Some("Updating…"), false), "says what runs and takes no presses");
+    assert_eq!(running.fill, rune_kit::Kit::neutral(false).c.layer_02, "the kit's loading look");
+}
+
 /// Installs a real skill from skills.sh through its CLI. Needs the network and Node:
 /// `cargo test -- --ignored`.
 #[test]
@@ -555,6 +574,12 @@ impl Harness {
     fn texts(&self) -> String {
         self.rt.elements().into_iter().filter_map(|e| e.text).collect::<Vec<_>>().join("\n")
     }
+
+    /// Whether an element keyed `key` is drawn inside the row keyed `row`.
+    fn in_row(&self, row: &str, key: &str) -> bool {
+        let inside = format!("/{row}/");
+        self.rt.elements().into_iter().any(|e| e.key.as_deref() == Some(key) && e.path.contains(&inside) && !e.exiting)
+    }
 }
 
 #[test]
@@ -565,7 +590,7 @@ fn mcp_tab_lists_servers_with_agents() {
     assert_eq!(h.rt.state.page, crate::app::Page::Mcp);
     assert!(h.rt.find("mcp-row-plata").is_some());
     for agent in ["claude", "cursor"] {
-        assert!(h.rt.find(&format!("mcp-row-plata/agents/agent-{agent}")).is_some(), "{agent} chip");
+        assert!(h.in_row("mcp-row-plata", &format!("agent-{agent}")), "{agent} chip");
     }
     assert!(h.texts().contains("in sync"), "{}", h.texts());
 
@@ -625,10 +650,10 @@ fn inherited_global_server_shows_in_project() {
     h.click("tab-mcp");
     assert_eq!(h.rt.state.scope, Scope::Project(h.project_dir()));
     assert!(h.rt.state.mcp.get("plata").is_some_and(|s| s.inherited));
-    assert!(h.rt.find("mcp-row-plata/tags/global-tag").is_some(), "the inherited row says global");
-    assert!(h.rt.find("mcp-row-plata/tags/disabled-tag").is_some(), "Claude Code skips it here");
+    assert!(h.in_row("mcp-row-plata", "global-tag"), "the inherited row says global");
+    assert!(h.in_row("mcp-row-plata", "disabled-tag"), "Claude Code skips it here");
     assert!(h.rt.find("mcp-row-local-db").is_some());
-    assert!(h.rt.find("mcp-row-local-db/tags/global-tag").is_none(), "the project's own server isn't");
+    assert!(!h.in_row("mcp-row-local-db", "global-tag"), "the project's own server isn't");
 }
 
 #[test]
@@ -790,9 +815,13 @@ fn read_only_server_has_no_actions() {
         assert!(h.rt.find(key).is_some(), "plata offers {key}");
     }
     h.click("mcp-row-pencil");
-    for key in ["mcp-copy", "mcp-edit", "mcp-remove", "mcp-disable", "mcp-enable"] {
+    for key in ["mcp-copy", "mcp-edit", "mcp-remove", "mcp-more"] {
         assert!(h.rt.find(key).is_none(), "pencil offers no {key}");
     }
+    assert!(h.in_row("copy-0", "mcp-copy-0-lock"), "the app's copy carries the lock");
+    assert!(h.texts().contains("managed by"), "and says who manages it: {}", h.texts());
+    h.click("mcp-row-plata");
+    assert!(h.rt.find("mcp-copy-0-lock").is_none(), "a copy Prism may change has none");
 }
 
 #[test]
@@ -800,7 +829,9 @@ fn inherited_row_offers_edit_and_switch_only() {
     let mut h = mcp_home();
     h.click("tab-mcp");
     h.click("mcp-row-plata");
-    assert!(h.rt.find("mcp-enable").is_some(), "Claude Code skips plata here");
+    h.click("mcp-more");
+    assert_eq!(h.item_label("mcp-more", 0).as_deref(), Some("Enable here"), "Claude Code skips plata here");
+    key(&mut h, rune::Key::Escape, rune::Mods::default());
     assert!(h.rt.find("mcp-edit").is_some(), "editing an inherited row edits the global server");
     for key in ["mcp-copy", "mcp-remove"] {
         assert!(h.rt.find(key).is_none(), "a global server offers no {key} in a project");
@@ -811,7 +842,8 @@ fn inherited_row_offers_edit_and_switch_only() {
     let d = h.rt.state.mcp_dialog.as_ref().expect("the edit plan is open");
     assert!(d.plan.clone().unwrap().unwrap().warnings.iter().any(|w| w == "edits the global server"));
     h.click("mcp-cancel");
-    h.click("mcp-enable");
+    h.click("mcp-more");
+    h.click("mcp-more-popup-item0");
     h.click("mcp-apply");
     let claude = json(&h.root.join(".claude.json"));
     let project = h.project_dir().display().to_string();
@@ -931,7 +963,8 @@ fn cmd_n_opens_add_on_mcp_page() {
     assert_eq!(h.rt.state.mcp_form.as_ref().unwrap().name.text, "typed");
     h.click("mcp-add-cancel");
     h.click("mcp-row-plata");
-    h.click("mcp-enable");
+    h.click("mcp-more");
+    h.click("mcp-more-popup-item0");
     key(&mut h, rune::Key::Command('n'), cmd);
     assert!(h.rt.state.mcp_form.is_none() && h.rt.state.mcp_dialog.is_some());
 }
@@ -1188,7 +1221,7 @@ fn unreachable_host_shows_retry() {
     assert!(matches!(h.remote_state(), Some(crate::app::RemoteState::Unreachable(e)) if e.contains("Connection refused")));
     assert!(h.texts().contains("Can't reach box"));
     assert!(h.rt.find("env-retry").is_some());
-    assert!(h.rt.find("skills").is_none(), "no list in place of the host's");
+    assert!(h.rt.find("installed").is_none(), "no list in place of the host's");
 
     h.click("env-retry");
     assert_eq!(h.remote_state(), Some(crate::app::RemoteState::Connecting));
@@ -2138,4 +2171,1081 @@ fn a_double_pressed_toast_undo_runs_one_undo() {
     assert!(!laptop.path().join(".agents/skills/review").exists());
     let undos = log.lock().unwrap().iter().filter(|(argv, _)| argv.first().is_some_and(|w| w == "undo")).count();
     assert_eq!(undos, 1, "one undo ran on laptop");
+}
+
+// The shell.
+
+/// The pane defaults leave room for all three panes in the smallest window.
+#[test]
+fn pane_widths() {
+    use crate::ds::size;
+    const { assert!(232.0 + size::LIST_MIN + size::INSPECTOR_MIN <= 860.0) };
+    assert_eq!(crate::MIN_WINDOW, (860.0, 520.0));
+    let h = Harness::project();
+    let (sidebar, inspector) = (h.rt.state.sidebar, h.rt.state.inspector);
+    assert_eq!(sidebar.width(), 232.0);
+    assert!(sidebar.width() + size::LIST_MIN + size::INSPECTOR_MIN <= crate::MIN_WINDOW.0);
+    assert_eq!((inspector.min_width(), inspector.max_width()), (size::INSPECTOR_MIN, size::INSPECTOR_READ_MAX));
+    assert!(!inspector.is_open(), "the inspector starts closed and opens on a selection");
+}
+
+/// The window at its minimum, with a skill selected.
+fn smallest_with_selection() -> Harness {
+    let mut h = Harness::project();
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
+    h.settle();
+    h.click("skill-review");
+    h
+}
+
+#[test]
+fn inspector_shows_at_minimum_window() {
+    use crate::ds::size;
+    let h = smallest_with_selection();
+    let (pane, opacity) = h.rt.presented("inspector").expect("the inspector at 860");
+    assert!(opacity > 0.99, "the inspector is visible: {opacity}");
+    assert!(pane[2] >= size::INSPECTOR_MIN, "the inspector is {} wide at 860", pane[2]);
+    let (list, _) = h.rt.presented("main-pane").expect("the list");
+    assert!(list[2] >= size::LIST_MIN, "the list is {} wide at 860", list[2]);
+}
+
+#[test]
+fn inspector_hides_when_sidebar_is_wide() {
+    use crate::ds::size;
+    let mut h = smallest_with_selection();
+    let stored = h.rt.state.inspector.width();
+    h.rt.state.sidebar.set_width(300.0);
+    h.rt.invalidate();
+    h.settle();
+    assert!(h.rt.find("inspector").is_none(), "a 300 sidebar at 860: the list keeps its room and the inspector goes");
+    assert!(h.rt.find("skill-review").is_some(), "the list is still there");
+
+    h.rt.state.sidebar.set_width(232.0);
+    h.rt.invalidate();
+    h.settle();
+    let (pane, _) = h.rt.presented("inspector").expect("back with the default sidebar");
+    assert!(pane[2] >= size::INSPECTOR_MIN, "{pane:?}");
+    assert_eq!(h.rt.state.inspector.width(), stored, "the stored width was never touched");
+    h.rt.set_viewport((1180.0, 760.0), 2.0);
+    h.settle();
+    let (pane, _) = h.rt.presented("inspector").unwrap();
+    assert_eq!(pane[2], stored, "a wide window draws it at the stored width");
+}
+
+#[test]
+fn toolbar_title_follows_tabs() {
+    let h = Harness::project();
+    let (leading, _) = h.rt.presented("leading").expect("the toolbar's leading slot");
+    let (tab, _) = h.rt.presented("tab-mcp").expect("the MCP tab");
+    let (title, _) = h.rt.presented("title").expect("the title");
+    let inside = |r: [f32; 4]| r[0] >= leading[0] && r[0] + r[2] <= leading[0] + leading[2] + 0.5;
+    assert!(inside(tab) && inside(title), "tabs {tab:?} and title {title:?} in the leading slot {leading:?}");
+    assert!(tab[0] + tab[2] < title[0], "the title {title:?} after the tabs {tab:?}");
+}
+
+// The Skills page.
+
+#[test]
+fn skill_rows_are_one_anatomy() {
+    use crate::ds::size;
+    let h = Harness::project();
+    let (row, _) = h.rt.presented("skill-review").expect("the review row");
+    assert_eq!(row[3], size::ROW_2, "a row with a description is two lines");
+    let (filter, _) = h.rt.presented("filter").expect("the filter");
+    let (check, _) = h.rt.presented("check-review").expect("the row's checkbox");
+    let (all, _) = h.rt.presented("check-all").expect("the select-all checkbox");
+    let (name, _) = h.rt.presented("skill-review-name").expect("the row's name");
+    // One content edge: the filter, the select-all checkbox and the rows' checkboxes; the name follows.
+    assert_eq!(check[0], filter[0], "the row's checkbox {check:?} on the filter's edge {filter:?}");
+    assert_eq!(all[0], check[0], "select-all {all:?} over the rows' checkboxes {check:?}");
+    assert!(name[0] > check[0] + check[2], "the name {name:?} after the checkbox {check:?}");
+    let (status, _) = h.rt.presented("skill-review-trailing").expect("the status column");
+    assert!((status[0] + status[2] - (filter[0] + filter[2])).abs() < 0.5, "the status {status:?} ends on the filter's right edge {filter:?}");
+}
+
+#[test]
+fn bulk_bar_replaces_summary() {
+    let mut h = Harness::project();
+    h.click("check-review");
+    assert!(h.rt.find("bulk-bar").is_some());
+    assert!(h.rt.find("bulk-sync").is_some());
+    let (filter, _) = h.rt.presented("filter").unwrap();
+    let (remove, _) = h.rt.presented("bulk-remove").expect("Remove… in the bulk bar");
+    assert!((remove[0] + remove[2] - (filter[0] + filter[2])).abs() < 0.5, "Remove… {remove:?} ends on the content edge {filter:?}");
+    h.click("bulk-clear");
+    assert!(h.rt.state.checked.is_empty());
+    assert!(h.rt.find("bulk-bar").is_none(), "the summary is back");
+}
+
+/// The toolbar's elements as drawn: none may cover another.
+fn toolbar_overlaps(h: &Harness) -> Vec<String> {
+    let keys = ["tab-skills", "tab-mcp", "title", "new-skill", "check-updates", "rescan", "toolbar-more", "sync", "mcp-add"];
+    let rects: Vec<(&str, [f32; 4])> = keys.iter().filter_map(|&k| h.rt.presented(k).map(|(r, _)| (k, r))).collect();
+    let (pane, _) = h.rt.presented("main-pane").unwrap();
+    let mut bad = Vec::new();
+    for (i, (a, ra)) in rects.iter().enumerate() {
+        if ra[0] < pane[0] || ra[0] + ra[2] > pane[0] + pane[2] + 0.5 {
+            bad.push(format!("{a} {ra:?} outside the pane {pane:?}"));
+        }
+        for (b, rb) in &rects[i + 1..] {
+            let apart = ra[0] + ra[2] <= rb[0] + 0.5 || rb[0] + rb[2] <= ra[0] + 0.5;
+            if !apart && ra[2] > 0.0 && rb[2] > 0.0 {
+                bad.push(format!("{a} {ra:?} overlaps {b} {rb:?}"));
+            }
+        }
+    }
+    bad
+}
+
+#[test]
+fn skills_toolbar_fits_the_smallest_window() {
+    let h = smallest_with_selection();
+    assert!(h.rt.find("inspector").is_some(), "the inspector is open");
+    let bad = toolbar_overlaps(&h);
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+    assert!(h.rt.find("sync").is_some() && h.rt.find("toolbar-more").is_some(), "Sync and the menu stay");
+    assert!(h.rt.find("title").is_none(), "no room for the title");
+
+    let wide = Harness::project();
+    assert!(toolbar_overlaps(&wide).is_empty(), "{}", toolbar_overlaps(&wide).join("\n"));
+    for k in ["title", "new-skill", "check-updates", "rescan", "sync"] {
+        assert!(wide.rt.find(k).is_some(), "{k} in a wide toolbar");
+    }
+    assert!(wide.rt.find("toolbar-more").is_none(), "no menu when everything fits");
+}
+
+#[test]
+fn narrow_toolbar_keeps_its_shortcuts_and_menu() {
+    let mut h = smallest_with_selection();
+    assert!(h.rt.find("new-skill").is_none(), "New skill is in the menu");
+    key(&mut h, rune::Key::Command('n'), rune::Mods { cmd: true, ..rune::Mods::default() });
+    assert!(h.rt.state.new_skill.is_some(), "⌘N still opens New skill");
+    h.rt.update(|s, _| s.new_skill = None);
+    h.settle();
+
+    h.click("toolbar-more");
+    assert!(h.rt.state.toolbar_menu);
+    let label = |h: &Harness, i: usize| h.rt.elements().into_iter().find(|e| e.key.as_deref() == Some(format!("toolbar-more-popup-item{i}").as_str())).and_then(|e| e.label);
+    assert_eq!(label(&h, 0).as_deref(), Some("New skill"));
+    assert_eq!(label(&h, 1).as_deref(), Some("Check skills.sh for updates"));
+    assert_eq!(label(&h, 2).as_deref(), Some("Rescan"));
+    h.click("toolbar-more-popup-item0");
+    assert!(h.rt.state.new_skill.is_some(), "the menu's New skill opens it");
+    assert!(!h.rt.state.toolbar_menu, "choosing closes the menu");
+
+    h.rt.update(|s, _| s.new_skill = None);
+    h.settle();
+    h.click("toolbar-more");
+    h.click("tab-mcp");
+    assert!(!h.rt.state.toolbar_menu, "another page lets go of the menu");
+}
+
+#[test]
+fn an_open_toolbar_menu_keeps_shortcuts_from_the_window() {
+    let cmd = rune::Mods { cmd: true, ..rune::Mods::default() };
+    let mut h = smallest_with_selection();
+    h.click("toolbar-more");
+    assert!(h.rt.state.toolbar_menu && h.rt.find("toolbar-more-popup-item0").is_some(), "the menu is open");
+    key(&mut h, rune::Key::Command('n'), cmd);
+    assert!(h.rt.state.new_skill.is_none(), "⌘N doesn't open New skill behind the menu");
+    assert!(h.rt.find("toolbar-more-popup-item0").is_some(), "the menu stays");
+    key(&mut h, rune::Key::Escape, rune::Mods::default());
+    assert!(!h.rt.state.toolbar_menu, "Escape closes it");
+    key(&mut h, rune::Key::Command('n'), cmd);
+    assert!(h.rt.state.new_skill.is_some(), "with the menu closed ⌘N opens New skill");
+
+    // A wide toolbar draws no "…": a flag left behind holds no keys.
+    h.rt.update(|s, _| s.new_skill = None);
+    h.settle();
+    h.click("toolbar-more");
+    h.rt.set_viewport((1180.0, 760.0), 2.0);
+    h.settle();
+    assert!(h.rt.state.toolbar_menu && h.rt.find("toolbar-more").is_none(), "the flag stays, the menu is gone");
+    key(&mut h, rune::Key::Command('n'), cmd);
+    assert!(h.rt.state.new_skill.is_some(), "⌘N opens New skill");
+}
+
+impl Harness {
+    /// Whether the narrow toolbar's menu item `i` takes presses (a disabled item isn't focusable).
+    fn menu_item_enabled(&self, i: usize) -> bool {
+        let key = format!("toolbar-more-popup-item{i}");
+        self.rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key.as_str())).unwrap_or_else(|| panic!("no {key}")).focusable
+    }
+}
+
+#[test]
+fn narrow_menu_disables_the_check_while_checking_and_on_a_host() {
+    let mut h = smallest_with_selection();
+    let scope = h.rt.state.scope.clone();
+    h.rt.update(move |s, _| {
+        s.checking.insert(scope);
+    });
+    h.settle();
+    h.click("toolbar-more");
+    assert!(h.menu_item_enabled(0) && h.menu_item_enabled(2), "New skill and Rescan stay");
+    assert!(!h.menu_item_enabled(1), "Checking for updates… is disabled while it runs");
+
+    let (mut h, _remote) = on_host();
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
+    h.settle();
+    h.click("skill-far");
+    assert!(h.rt.find("new-skill").is_none(), "narrow on the host too");
+    h.click("toolbar-more");
+    assert!(!h.menu_item_enabled(1), "a host's skills aren't checked against skills.sh");
+    assert!(h.menu_item_enabled(0) && h.menu_item_enabled(2));
+}
+
+#[test]
+fn cmd_r_rescans_in_a_narrow_toolbar() {
+    let mut h = smallest_with_selection();
+    assert!(h.rt.find("rescan").is_none(), "Rescan is in the menu");
+    skill(&h.project_dir().join(".claude/skills"), "fresh");
+    key(&mut h, rune::Key::Command('r'), rune::Mods { cmd: true, ..rune::Mods::default() });
+    assert!(h.rt.state.inv.get("fresh").is_some(), "⌘R rescanned");
+}
+
+#[test]
+fn selecting_a_row_lets_go_of_a_stale_menu() {
+    let mut h = smallest_with_selection();
+    h.click("toolbar-more");
+    assert!(h.rt.state.toolbar_menu);
+    // Widening hides the menu with the flag still set; a new selection drops it.
+    h.rt.set_viewport((1180.0, 760.0), 2.0);
+    h.settle();
+    assert!(h.rt.find("toolbar-more").is_none());
+    h.click("skill-review");
+    assert!(!h.rt.state.toolbar_menu, "a selection clears it");
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
+    h.settle();
+    assert!(h.rt.find("toolbar-more-popup-item0").is_none(), "the menu doesn't reopen by itself");
+}
+
+/// What a presented element covers, by key.
+fn rect_of(h: &Harness, key: &str) -> [f32; 4] {
+    h.rt.presented(key).unwrap_or_else(|| panic!("no element keyed {key}")).0
+}
+
+#[test]
+fn skill_actions_fit_one_row_at_minimum() {
+    use crate::ds::size;
+    let long = "vercel-react-best-practices-for-large-apps";
+    // 315 points of title: one line at 320. The longer one has to wrap.
+    let longer = "vercel-react-best-practices-for-large-apps-and-monorepos";
+    let mut h = Harness::project();
+    skill(&h.project_dir().join(".claude/skills"), long);
+    skill(&h.project_dir().join(".claude/skills"), longer);
+    h.rescan();
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
+    h.settle();
+    h.click(&format!("skill-{long}"));
+    let pane = rect_of(&h, "inspector");
+    assert!((pane[2] - size::INSPECTOR_MIN).abs() < 0.5, "the inspector at its minimum: {pane:?}");
+
+    // Open SKILL.md, Copy to…, "…" and Remove… are 340 points; the narrowest inspector has 320,
+    // so Open SKILL.md goes into "…" after Reveal.
+    assert!(h.rt.find("open-md").is_none(), "Open SKILL.md doesn't fit beside Copy to…");
+    let keys = ["copy", "skill-more", "remove"];
+    let rects: Vec<[f32; 4]> = keys.iter().map(|k| rect_of(&h, k)).collect();
+    let mid = |r: &[f32; 4]| r[1] + r[3] / 2.0;
+    for (k, r) in keys.iter().zip(&rects) {
+        assert!((mid(r) - mid(&rects[0])).abs() < 0.5, "{k} {r:?} is on the row of copy {:?}", rects[0]);
+    }
+    for w in rects.windows(2) {
+        assert!(w[0][0] + w[0][2] <= w[1][0] + 0.5, "in order and apart: {rects:?}");
+    }
+    let remove = rects[2];
+    assert!(remove[0] + remove[2] <= pane[0] + pane[2] - size::PANE_EDGE + 0.5, "Remove… {remove:?} ends on the content edge of {pane:?}");
+
+    let overflowing = |h: &Harness| -> Vec<String> {
+        h.rt.elements()
+            .into_iter()
+            .filter(|e| e.path.contains("inspector-scroll") && !e.exiting && e.rect[2] > 0.0)
+            .filter(|e| e.rect[0] < pane[0] - 0.5 || e.rect[0] + e.rect[2] > pane[0] + pane[2] + 0.5)
+            .map(|e| format!("{} {:?}", e.path, e.rect))
+            .collect()
+    };
+    let wide = overflowing(&h);
+    assert!(wide.is_empty(), "wider than the inspector {pane:?}:\n{}", wide.join("\n"));
+
+    h.click(&format!("skill-{longer}"));
+    let title = h.rt.elements().into_iter().find(|e| e.text.as_deref() == Some(longer) && e.path.contains("inspector")).expect("the title");
+    assert!(title.rect[3] > 30.0, "the longer title wraps: {:?}", title.rect);
+    assert!(title.rect[0] + title.rect[2] <= pane[0] + pane[2] - size::PANE_EDGE + 0.5, "inside the content edge: {:?}", title.rect);
+    let wide = overflowing(&h);
+    assert!(wide.is_empty(), "wider than the inspector {pane:?}:\n{}", wide.join("\n"));
+
+    h.click("skill-more");
+    assert_eq!(h.item_label("skill-more", 0).as_deref(), Some("Reveal"));
+    assert_eq!(h.item_label("skill-more", 1).as_deref(), Some("Open SKILL.md"), "after Reveal");
+    assert!(h.item_enabled("skill-more", 1));
+}
+
+#[test]
+fn open_md_stays_in_the_row_when_it_fits() {
+    // A global skill with no project and no host: nowhere to copy to, so no Copy to….
+    let home = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(home.path()).unwrap();
+    skill(&root.join(".agents/skills"), "solo");
+    let mut app = App::new(Paths::isolated(&root), Settings::default());
+    app.open_scope(Scope::Global);
+    let mut rt = Runtime::new(app, crate::ui::view, crate::MIN_WINDOW, Env { system_dark: false, scale: 2.0 });
+    rt.on_key = Some(crate::ui::on_key);
+    rt.frame(0.0);
+    let mut h = Harness { _home: home, root, rt };
+    h.settle();
+    h.click("skill-solo");
+    assert!(h.rt.find("copy").is_none(), "nowhere to copy to");
+    let (open, more, remove) = (rect_of(&h, "open-md"), rect_of(&h, "skill-more"), rect_of(&h, "remove"));
+    assert!((open[1] - more[1]).abs() < 0.5 && (open[1] - remove[1]).abs() < 0.5, "one row: {open:?} {more:?} {remove:?}");
+    h.click("skill-more");
+    assert_eq!(h.item_label("skill-more", 0).as_deref(), Some("Reveal"));
+    assert!(h.rt.find("skill-more-popup-item1").is_none(), "Reveal alone in the menu");
+}
+
+impl Harness {
+    /// Whether item `i` of the menu keyed `menu` takes presses (a disabled item isn't focusable).
+    fn item_enabled(&self, menu: &str, i: usize) -> bool {
+        let key = format!("{menu}-popup-item{i}");
+        self.rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key.as_str())).unwrap_or_else(|| panic!("no {key}")).focusable
+    }
+
+    fn item_label(&self, menu: &str, i: usize) -> Option<String> {
+        let key = format!("{menu}-popup-item{i}");
+        self.rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key.as_str())).and_then(|e| e.label)
+    }
+}
+
+#[test]
+fn reveal_is_in_the_menu() {
+    let mut h = Harness::project();
+    h.click("skill-review");
+    assert!(h.rt.find("reveal").is_none(), "Reveal is no longer a button in the row");
+    h.click("skill-more");
+    assert!(h.rt.state.skill_menu, "the menu is open");
+    assert_eq!(h.item_label("skill-more", 0).as_deref(), Some("Reveal"));
+    assert!(h.item_enabled("skill-more", 0), "a skill on this machine can be revealed");
+    let revealed = crate::app::reveal_log();
+    h.click("skill-more-popup-item0");
+    assert!(!h.rt.state.skill_menu, "choosing closes the menu");
+    let folder = h.project_dir().join(".claude/skills/review");
+    assert_eq!(crate::app::reveal_log()[revealed.len()..], [folder], "Reveal shows the skill's folder");
+}
+
+#[test]
+fn menu_closes_on_selection_change() {
+    let mut h = three_skills();
+    h.rescan();
+    h.click("skill-alpha");
+    h.click("skill-more");
+    assert!(h.rt.state.skill_menu && h.rt.find("skill-more-popup-item0").is_some(), "the menu is open");
+    // While it is drawn the menu holds the arrows, as a menu does; the list stays put.
+    key(&mut h, rune::Key::Down, rune::Mods::default());
+    key(&mut h, rune::Key::Down, rune::Mods::default());
+    assert_eq!(h.rt.state.selected.as_deref(), Some("alpha"), "the arrows move through the menu");
+    assert!(h.rt.find("skill-more-popup-item0").is_some());
+    // The selection moves under it (what ↓ does in the list): the menu goes, and the arrows are
+    // the list's again.
+    h.rt.update(|s, _| {
+        s.step_selection(1, false);
+    });
+    h.settle();
+    assert_eq!(h.rt.state.selected.as_deref(), Some("beta"));
+    assert!(!h.rt.state.skill_menu, "the flag clears");
+    assert!(h.rt.find("skill-more-popup-item0").is_none(), "the menu is gone");
+    key(&mut h, rune::Key::Down, rune::Mods::default());
+    assert_eq!(h.rt.state.selected.as_deref(), Some("gamma"), "↓ moves the selection");
+    key(&mut h, rune::Key::Up, rune::Mods::default());
+    assert_eq!(h.rt.state.selected.as_deref(), Some("beta"), "and keeps moving");
+
+    // Escape closes it too, and ↓ is the list's at once.
+    h.click("skill-more");
+    key(&mut h, rune::Key::Escape, rune::Mods::default());
+    assert!(!h.rt.state.skill_menu && h.rt.find("skill-more-popup-item0").is_none());
+    key(&mut h, rune::Key::Down, rune::Mods::default());
+    assert_eq!(h.rt.state.selected.as_deref(), Some("gamma"));
+}
+
+#[test]
+fn an_open_skill_menu_keeps_list_keys_from_the_list() {
+    let mut h = three_skills();
+    h.rescan();
+    h.click("skill-alpha");
+    h.click("skill-more");
+    key(&mut h, rune::Key::Command('a'), rune::Mods { cmd: true, ..rune::Mods::default() });
+    assert!(h.rt.state.checked.is_empty(), "⌘A doesn't tick rows behind the menu");
+    assert!(h.rt.state.skill_menu);
+}
+
+#[test]
+fn a_skill_menu_in_a_hidden_inspector_lets_go_of_the_keys() {
+    let mut h = three_skills();
+    h.rescan();
+    // A wide sidebar: at the smallest window the list keeps its room and the inspector goes.
+    h.rt.update(|s, _| s.sidebar.set_width(300.0));
+    h.settle();
+    h.click("skill-alpha");
+    h.click("skill-more");
+    assert!(h.rt.state.skill_menu_shown() && h.rt.find("skill-more-popup-item0").is_some(), "the menu is open");
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
+    h.settle();
+    assert!(h.rt.find("inspector").is_none(), "no room for the inspector");
+    assert!(h.rt.state.skill_menu, "no event cleared the flag");
+    assert!(h.rt.find("skill-more-popup-item0").is_none(), "the menu went with the inspector");
+    assert!(!h.rt.state.skill_menu_shown());
+    key(&mut h, rune::Key::Command('a'), rune::Mods { cmd: true, ..rune::Mods::default() });
+    assert_eq!(h.rt.state.checked.len(), h.rt.state.visible().len(), "⌘A ticks every row");
+    key(&mut h, rune::Key::Down, rune::Mods::default());
+    assert_eq!(h.rt.state.selected.as_deref(), Some("beta"), "↓ moves the selection");
+}
+
+#[test]
+fn a_skill_menu_left_open_lets_go_when_the_skill_goes() {
+    let mut h = three_skills();
+    h.rescan();
+    h.click("skill-alpha");
+    h.click("skill-more");
+    assert!(h.rt.state.skill_menu);
+    fs::remove_dir_all(h.project_dir().join(".claude/skills/alpha")).unwrap();
+    h.rescan();
+    assert!(h.rt.state.selected.is_none(), "the skill is gone");
+    assert!(!h.rt.state.skill_menu, "and its menu with it");
+    assert!(h.rt.find("skill-more-popup-item0").is_none());
+    key(&mut h, rune::Key::Down, rune::Mods::default());
+    assert!(h.rt.state.selected.is_some(), "↓ selects again");
+}
+
+#[test]
+fn host_disables_local_actions() {
+    let (mut h, _remote) = on_host();
+    h.click("skill-far");
+    h.land_remote();
+    let open = h.rt.elements().into_iter().find(|e| e.key.as_deref() == Some("open-md")).expect("Open SKILL.md in the row");
+    assert!(!open.focusable, "a host's SKILL.md can't be opened here");
+    h.click("skill-more");
+    assert_eq!(h.item_label("skill-more", 0).as_deref(), Some("Reveal"));
+    assert!(!h.item_enabled("skill-more", 0), "Reveal stays in the menu, disabled");
+    key(&mut h, rune::Key::Escape, rune::Mods::default());
+    // At 352 Open SKILL.md is in the menu, disabled there too.
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
+    h.settle();
+    h.click("skill-more");
+    assert_eq!(h.item_label("skill-more", 1).as_deref(), Some("Open SKILL.md"));
+    assert!(!h.item_enabled("skill-more", 1), "disabled in the menu too");
+}
+
+#[test]
+fn open_md_follows_the_inspector_width() {
+    // The default window: a 380 inspector has room for Open SKILL.md beside Copy to….
+    let mut h = Harness::project();
+    h.click("skill-review");
+    assert!((rect_of(&h, "inspector")[2] - 380.0).abs() < 0.5, "the default inspector");
+    let keys = ["open-md", "copy", "skill-more", "remove"];
+    let rects: Vec<[f32; 4]> = keys.iter().map(|k| rect_of(&h, k)).collect();
+    for (k, r) in keys.iter().zip(&rects) {
+        assert!((r[1] - rects[0][1]).abs() < 0.5, "{k} {r:?} on one row with open-md {:?}", rects[0]);
+    }
+    h.click("skill-more");
+    assert_eq!(h.item_label("skill-more", 0).as_deref(), Some("Reveal"));
+    assert!(h.rt.find("skill-more-popup-item1").is_none(), "Open SKILL.md is in the row, not the menu");
+    key(&mut h, rune::Key::Escape, rune::Mods::default());
+
+    // The smallest window: a 352 inspector, so Open SKILL.md goes into "…" after Reveal.
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
+    h.settle();
+    assert!(h.rt.find("open-md").is_none(), "no room at 352");
+    let (copy, remove) = (rect_of(&h, "copy"), rect_of(&h, "remove"));
+    assert!((copy[1] - remove[1]).abs() < 0.5, "one row: {copy:?} {remove:?}");
+    h.click("skill-more");
+    assert_eq!(h.item_label("skill-more", 1).as_deref(), Some("Open SKILL.md"));
+}
+
+#[test]
+fn show_more_agents_lines_up_with_the_names() {
+    let mut h = Harness::project();
+    h.click("skill-review");
+    let elements = h.rt.elements();
+    let text_x = |pred: &dyn Fn(&str) -> bool| elements.iter().find(|e| e.text.as_deref().is_some_and(pred) && e.path.contains("placements")).map(|e| e.rect[0]);
+    let name = text_x(&|t| t == ".agents").expect("the .agents name");
+    let more = text_x(&|t| t.starts_with("Show ") && t.ends_with(" more agents")).expect("Show N more agents");
+    assert!((more - name).abs() < 0.5, "Show more agents at {more}, names at {name}");
+}
+
+#[test]
+fn sidebar_toggle_lets_go_of_the_skill_menu() {
+    let mut h = Harness::project();
+    h.click("skill-review");
+    h.click("skill-more");
+    assert!(h.rt.state.skill_menu);
+    let open = h.rt.state.sidebar.is_open();
+    key(&mut h, rune::Key::Command('b'), rune::Mods { cmd: true, shift: true, ..rune::Mods::default() });
+    assert_ne!(h.rt.state.sidebar.is_open(), open, "⇧⌘B toggles the sidebar");
+    assert!(!h.rt.state.skill_menu, "and lets go of the menu");
+}
+
+// The MCP page and inspector.
+
+/// Global scope, Claude Code with `envy` (a token in its env) and `webby` (a bearer token in a
+/// header).
+fn secrets_home() -> Harness {
+    let mut h = Harness::project();
+    fs::create_dir_all(h.root.join(".claude")).unwrap();
+    let servers = serde_json::json!({ "mcpServers": {
+        "envy": { "command": "envy-mcp", "env": { "TOKEN": "sk-live-abc" } },
+        "webby": { "type": "http", "url": "https://mcp.example.com/mcp", "headers": { "Authorization": "Bearer abc" } },
+    } });
+    fs::write(h.root.join(".claude.json"), servers.to_string()).unwrap();
+    h.mcp_global();
+    h
+}
+
+impl Harness {
+    /// Every text, accessible name and tooltip in the window that holds `needle`.
+    fn presenting(&self, needle: &str) -> Vec<String> {
+        self.rt
+            .elements()
+            .into_iter()
+            .filter(|e| !e.exiting)
+            .flat_map(|e| [e.text, e.label, e.help].into_iter().flatten().map(move |t| (e.path.clone(), t)))
+            .filter(|(_, t)| t.contains(needle))
+            .map(|(path, t)| format!("{path}: {t}"))
+            .collect()
+    }
+}
+
+#[test]
+fn secrets_masked_until_shown() {
+    let mut h = secrets_home();
+    assert!(h.presenting("abc").is_empty(), "the rows: {:?}", h.presenting("abc"));
+    h.click("mcp-row-envy");
+    assert!(h.presenting("abc").is_empty(), "envy before Show values: {:?}", h.presenting("abc"));
+    assert!(h.in_row("mcp-env", "mcp-env-TOKEN"), "an Environment card with TOKEN");
+    h.click("mcp-row-webby");
+    assert!(h.presenting("abc").is_empty(), "webby before Show values: {:?}", h.presenting("abc"));
+    assert!(h.in_row("mcp-headers", "mcp-headers-Authorization"), "a Headers card with Authorization");
+
+    h.click("mcp-row-envy");
+    h.click("mcp-reveal");
+    let shown = h.presenting("sk-live-abc");
+    assert!(!shown.is_empty() && shown.iter().all(|t| t.contains("/mcp-env/")), "the Environment card shows it: {shown:?}");
+    // Only the selected server: webby stays masked.
+    h.click("mcp-row-webby");
+    assert!(h.presenting("abc").is_empty(), "webby is still masked: {:?}", h.presenting("abc"));
+    h.click("mcp-reveal");
+    let shown = h.presenting("Bearer abc");
+    assert!(!shown.is_empty() && shown.iter().all(|t| t.contains("/mcp-headers/")), "the Headers card shows it: {shown:?}");
+    // As today, Show values is remembered per server until hidden or a rescan drops it.
+    h.click("mcp-reveal");
+    h.click("mcp-row-envy");
+    assert!(!h.presenting("sk-live-abc").is_empty(), "envy was shown and stays shown");
+}
+
+#[test]
+fn long_command_wraps_in_card() {
+    use crate::ds::size;
+    let mut h = Harness::project();
+    fs::create_dir_all(h.root.join(".claude")).unwrap();
+    let args: Vec<String> = (0..12).map(|i| format!("--verbose-option-{i:02}")).collect();
+    let line = std::iter::once("npx".to_string()).chain(args.iter().cloned()).collect::<Vec<_>>().join(" ");
+    assert!(line.len() >= 200, "{} characters", line.len());
+    fs::write(h.root.join(".claude.json"), serde_json::json!({ "mcpServers": { "long": { "command": "npx", "args": args } } }).to_string()).unwrap();
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
+    h.settle();
+    h.mcp_global();
+    h.click("mcp-row-long");
+    let pane = rect_of(&h, "inspector");
+    assert!((pane[2] - size::INSPECTOR_MIN).abs() < 0.5, "the inspector at its minimum: {pane:?}");
+    let (command, card) = (rect_of(&h, "mcp-command"), rect_of(&h, "mcp-values"));
+    assert!(command[0] >= card[0] - 0.5 && command[0] + command[2] <= card[0] + card[2] + 0.5, "the command {command:?} inside the card {card:?}");
+    let word = h.rt.elements().into_iter().find(|e| e.text.as_deref() == Some("--verbose-option-00")).expect("a word").rect;
+    assert!(command[3] > 2.0 * word[3], "the command wraps: {command:?}, a line is {}", word[3]);
+}
+
+#[test]
+fn mcp_actions_fit_one_row_at_minimum() {
+    use crate::ds::size;
+    let mut h = mcp_home();
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
+    h.settle();
+    h.mcp_global();
+    h.click("mcp-row-plata");
+    let pane = rect_of(&h, "inspector");
+    let keys = ["mcp-copy", "mcp-edit", "mcp-more", "mcp-remove"];
+    let rects: Vec<[f32; 4]> = keys.iter().map(|k| rect_of(&h, k)).collect();
+    let mid = |r: &[f32; 4]| r[1] + r[3] / 2.0;
+    for (k, r) in keys.iter().zip(&rects) {
+        assert!((mid(r) - mid(&rects[0])).abs() < 0.5, "{k} {r:?} on the row of mcp-copy {:?}", rects[0]);
+    }
+    for w in rects.windows(2) {
+        assert!(w[0][0] + w[0][2] <= w[1][0] + 0.5, "in order and apart: {rects:?}");
+    }
+    let remove = rects[3];
+    assert!((remove[0] + remove[2] - (pane[0] + pane[2] - size::PANE_EDGE)).abs() < 0.5, "Remove… {remove:?} ends on the content edge of {pane:?}");
+}
+
+#[test]
+fn merge_notice_in_status_line() {
+    let mut h = Harness::project();
+    fs::create_dir_all(h.root.join(".cursor")).unwrap();
+    let servers = serde_json::json!({ "mcpServers": {
+        "figma": { "command": "npx", "args": ["-y", "figma-developer-mcp", "--stdio"] },
+        "figma-dev": { "command": "npx", "args": ["figma-developer-mcp"] },
+    } });
+    fs::write(h.root.join(".cursor/mcp.json"), servers.to_string()).unwrap();
+    h.mcp_global();
+    let (notice, row) = (rect_of(&h, "mcp-merge-notice-0"), rect_of(&h, "mcp-row-figma"));
+    assert!(notice[1] + notice[3] <= row[1], "the notice {notice:?} above the first row {row:?}");
+    let count = h.rt.elements().into_iter().find(|e| e.text.as_deref() == Some("2 servers for ~")).expect("the count line").rect;
+    assert!(count[1] < notice[1], "under the count {count:?}");
+    assert!(h.in_row("mcp-merge-notice-0", "mcp-merge-0"), "Merge… in the notice");
+    h.click("mcp-merge-0");
+    assert!(h.rt.state.mcp_dialog.is_some(), "Merge… opens the merge");
+}
+
+#[test]
+fn disable_here_in_menu() {
+    let mut h = mcp_home();
+    let own = h.project_dir().join(".cursor/mcp.json");
+    fs::create_dir_all(own.parent().unwrap()).unwrap();
+    fs::write(&own, r#"{"mcpServers":{"local-db":{"command":"db-mcp"}}}"#).unwrap();
+    h.rescan();
+    h.click("tab-mcp");
+    h.click("mcp-row-local-db");
+    h.click("mcp-more");
+    assert_eq!(h.item_label("mcp-more", 0).as_deref(), Some("Disable here"));
+    assert!(h.item_enabled("mcp-more", 0));
+    assert!(h.rt.find("mcp-more-popup-item1").is_none(), "one item");
+    key(&mut h, rune::Key::Escape, rune::Mods::default());
+    h.click("mcp-row-plata");
+    h.click("mcp-more");
+    assert_eq!(h.item_label("mcp-more", 0).as_deref(), Some("Enable here"), "Claude Code skips plata here");
+    key(&mut h, rune::Key::Escape, rune::Mods::default());
+
+    h.mcp_global();
+    h.click("mcp-row-plata");
+    h.click("mcp-more");
+    assert_eq!(h.item_label("mcp-more", 0).as_deref(), Some("Disable here"));
+    assert!(!h.item_enabled("mcp-more", 0), "nothing to disable a server for in Global");
+}
+
+#[test]
+fn mcp_menu_closes_on_selection_change() {
+    let mut h = secrets_home();
+    h.click("mcp-row-envy");
+    h.click("mcp-more");
+    assert!(h.rt.state.mcp_menu && h.rt.find("mcp-more-popup-item0").is_some(), "the menu is open");
+    // While it is drawn the menu holds the keys: ⌘N doesn't open Add server behind it.
+    let cmd = rune::Mods { cmd: true, ..rune::Mods::default() };
+    key(&mut h, rune::Key::Command('n'), cmd);
+    assert!(h.rt.state.mcp_form.is_none(), "⌘N waits while the menu is open");
+    assert!(h.rt.find("mcp-more-popup-item0").is_some(), "the menu stays");
+    key(&mut h, rune::Key::Escape, rune::Mods::default());
+    assert!(!h.rt.state.mcp_menu);
+    key(&mut h, rune::Key::Command('n'), cmd);
+    assert!(h.rt.state.mcp_form.is_some(), "with the menu closed ⌘N opens Add server");
+    h.click("mcp-add-cancel");
+    h.click("mcp-more");
+    // The selection changes under it: the menu goes and the flag clears.
+    h.rt.update(|s, _| s.select_mcp("webby"));
+    h.settle();
+    assert!(!h.rt.state.mcp_menu, "the flag clears");
+    assert!(h.rt.find("mcp-more-popup-item0").is_none(), "the menu is gone");
+
+    // Escape closes it.
+    h.click("mcp-more");
+    key(&mut h, rune::Key::Escape, rune::Mods::default());
+    assert!(!h.rt.state.mcp_menu && h.rt.find("mcp-more-popup-item0").is_none());
+
+    // The server goes: so does its menu.
+    h.click("mcp-more");
+    assert!(h.rt.state.mcp_menu);
+    fs::write(h.root.join(".claude.json"), r#"{"mcpServers":{"envy":{"command":"envy-mcp"}}}"#).unwrap();
+    h.rescan();
+    assert!(h.rt.state.mcp_selected.is_none() && !h.rt.state.mcp_menu, "the server and its menu are gone");
+    assert!(!h.rt.state.mcp_menu_shown());
+
+    // The sidebar toggle lets go of it too.
+    h.click("mcp-row-envy");
+    h.click("mcp-more");
+    key(&mut h, rune::Key::Command('b'), rune::Mods { cmd: true, shift: true, ..rune::Mods::default() });
+    assert!(!h.rt.state.mcp_menu, "⇧⌘B lets go of the menu");
+}
+
+#[test]
+fn an_mcp_menu_in_a_hidden_inspector_lets_go_of_the_keys() {
+    let mut h = secrets_home();
+    h.rt.update(|s, _| s.sidebar.set_width(300.0));
+    h.settle();
+    h.click("mcp-row-envy");
+    h.click("mcp-more");
+    assert!(h.rt.state.mcp_menu_shown(), "the menu is open");
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
+    h.settle();
+    assert!(h.rt.find("inspector").is_none(), "no room for the inspector");
+    assert!(h.rt.state.mcp_menu && h.rt.find("mcp-more-popup-item0").is_none(), "the flag stays, the menu is gone");
+    assert!(!h.rt.state.mcp_menu_shown());
+    key(&mut h, rune::Key::Command('n'), rune::Mods { cmd: true, ..rune::Mods::default() });
+    assert!(h.rt.state.mcp_form.is_some(), "⌘N opens Add server");
+}
+
+#[test]
+fn mcp_toolbar_fits_the_smallest_window() {
+    let mut h = mcp_home();
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
+    h.settle();
+    h.mcp_global();
+    h.click("mcp-row-plata");
+    assert!(h.rt.find("inspector").is_some(), "the inspector is open");
+    let bad = toolbar_overlaps(&h);
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+    assert!(h.rt.find("title").is_none(), "no room for the title");
+    assert!(h.rt.find("rescan").is_some(), "Rescan stays");
+    let add = h.rt.elements().into_iter().find(|e| e.key.as_deref() == Some("mcp-add")).expect("Add server");
+    assert_eq!(add.label.as_deref(), Some("Add server"), "the icon keeps the label as its name");
+    assert!(add.text.is_none() && add.rect[2] <= crate::ds::Place::Bar.height() + 0.5, "icon only: {:?}", add.rect);
+    h.click("mcp-add");
+    assert!(h.rt.state.mcp_form.is_some(), "and opens the form");
+
+    let mut wide = mcp_home();
+    wide.mcp_global();
+    wide.click("mcp-row-plata");
+    assert!(toolbar_overlaps(&wide).is_empty(), "{}", toolbar_overlaps(&wide).join("\n"));
+    for k in ["title", "rescan", "mcp-add"] {
+        assert!(wide.rt.find(k).is_some(), "{k} in a wide toolbar");
+    }
+    assert!(wide.texts().contains("Add server"), "the wide button has its words");
+}
+
+/// The skills.sh page with `n` results, of very different install counts, and the first selected.
+fn browse_with(n: usize) -> Harness {
+    let mut h = Harness::project();
+    h.click("browse");
+    let found: Vec<crate::remote::RemoteSkill> = (0..n)
+        .map(|i| crate::remote::RemoteSkill {
+            id: format!("owner/repo/skill-{i}"),
+            source: "owner/repo".into(),
+            skill_id: format!("skill-{i}"),
+            name: format!("skill-{i}"),
+            installs: [7, 12_345, 1_256_574][i % 3],
+        })
+        .collect();
+    h.rt.update(move |s, _| s.results = Ok(found));
+    h.settle();
+    h
+}
+
+#[test]
+fn install_count_in_trailing_column() {
+    let h = browse_with(3);
+    let ends: Vec<f32> = (0..3)
+        .map(|i| {
+            let (r, _) = h.rt.presented(&format!("result-owner/repo/skill-{i}-trailing")).expect("the trailing column");
+            r[0] + r[2]
+        })
+        .collect();
+    assert!(ends.iter().all(|e| (e - ends[0]).abs() < 0.5), "install counts share a right edge: {ends:?}");
+    assert!(h.texts().contains("1.3M installs") && h.texts().contains("7 installs"));
+}
+
+#[test]
+fn installed_skill_wears_a_tag() {
+    let mut h = browse_with(2);
+    assert!(h.rt.find("installed-tag").is_none());
+    let name = "review";
+    fs::create_dir_all(h.project_dir().join(".agents/skills/review")).unwrap();
+    h.rt.update(move |s, _| {
+        s.results = Ok(vec![crate::remote::RemoteSkill { id: "o/r/review".into(), source: "o/r".into(), skill_id: name.into(), name: name.into(), installs: 3 }]);
+    });
+    h.settle();
+    assert!(h.rt.find("installed-tag").is_some(), "review is in the project");
+}
+
+#[test]
+fn repo_footer_stays_visible() {
+    let h = browse_with(40);
+    let (window, _) = h.rt.presented("main-pane").expect("the pane");
+    let (source, _) = h.rt.presented("source").expect("the repository input");
+    let (list, _) = h.rt.presented("list").expect("the results");
+    assert!(source[1] >= window[1] && source[1] + source[3] <= window[1] + window[3] + 0.5, "the input {source:?} is inside the page {window:?}");
+    assert!(list[1] + list[3] <= source[1] + 0.5, "the footer is under the list: {list:?} / {source:?}");
+    for k in ["list-source", "install-source"] {
+        let (r, _) = h.rt.presented(k).unwrap();
+        assert!(r[1] + r[3] <= window[1] + window[3] + 0.5, "{k} {r:?} is inside the page {window:?}");
+    }
+}
+
+#[test]
+fn skills_sh_toolbar_fits_the_smallest_window() {
+    let mut h = browse_with(3);
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
+    h.settle();
+    h.click("result-owner/repo/skill-0");
+    assert!(h.rt.find("inspector").is_some(), "the inspector is open");
+    let (pane, _) = h.rt.presented("main-pane").unwrap();
+    let (scope, _) = h.rt.presented("install-scope").expect("the scope select");
+    assert!(scope[0] >= pane[0] && scope[0] + scope[2] <= pane[0] + pane[2] + 0.5, "the select {scope:?} is inside the pane {pane:?}");
+    let (title, _) = h.rt.presented("title").expect("the title");
+    assert!(title[0] + title[2] <= scope[0] + 0.5, "the title {title:?} ends before the select {scope:?}");
+}
+
+#[test]
+fn repo_footer_is_side_by_side_when_it_fits_and_stacks_when_not() {
+    let h = browse_with(3);
+    let rect = |k: &str| h.rt.presented(k).unwrap().0;
+    let (source, show, all) = (rect("source"), rect("list-source"), rect("install-source"));
+    assert!((source[1] - show[1]).abs() < 14.0 && (show[1] - all[1]).abs() < 0.5, "one row: {source:?} {show:?} {all:?}");
+    assert!(source[0] + source[2] <= show[0] && show[0] + show[2] <= all[0] + 0.5, "input, Show skills, Install all in order");
+
+    let mut h = browse_with(3);
+    h.rt.set_viewport(crate::MIN_WINDOW, 2.0);
+    h.settle();
+    h.click("result-owner/repo/skill-0");
+    assert!(h.rt.find("inspector").is_some());
+    let rect = |k: &str| h.rt.presented(k).unwrap().0;
+    let (pane, source, show, all) = (rect("main-pane"), rect("source"), rect("list-source"), rect("install-source"));
+    assert!(source[1] + source[3] <= show[1] + 0.5 && show[1] == all[1], "stacked: {source:?} {show:?} {all:?}");
+    for r in [source, show, all] {
+        assert!(r[0] >= pane[0] && r[0] + r[2] <= pane[0] + pane[2] + 0.5 && r[1] + r[3] <= pane[1] + pane[3] + 0.5, "{r:?} inside {pane:?}");
+    }
+}
+
+// Skill dialogs.
+
+impl Harness {
+    /// Sets the window up as the scene `name` does (`--scene name`).
+    fn scene(&mut self, name: &str) {
+        let (_, set) = crate::SCENES.iter().find(|(n, _)| *n == name).unwrap_or_else(|| panic!("no scene {name}"));
+        let set = *set;
+        self.rt.update(move |s, _| set(s));
+        self.settle();
+    }
+}
+
+/// Each skill dialog has its kind's width: Sync is Wide, the confirmations Confirm, the forms
+/// and a host's copy plan Form.
+#[test]
+fn dialog_widths() {
+    use crate::ds::size;
+    let width = |scene: &str, key: &str| {
+        let mut h = three_skills();
+        h.rescan();
+        h.scene(scene);
+        rect_of(&h, key)[2]
+    };
+    assert_eq!(width("sync", "sync-dialog"), size::DIALOG_WIDE);
+    assert_eq!(width("remove", "remove-dialog"), size::DIALOG_CONFIRM);
+    assert_eq!(width("bulk-remove", "remove-dialog"), size::DIALOG_CONFIRM);
+    assert_eq!(width("copy", "copy-dialog"), size::DIALOG_CONFIRM);
+    assert_eq!(width("copy-to-host", "copy-dialog"), size::DIALOG_CONFIRM);
+    assert_eq!(width("new-skill", "new-skill-dialog"), size::DIALOG_FORM);
+    assert_eq!(width("found", "found-dialog"), size::DIALOG_FORM);
+
+    let mut h = Harness::project();
+    let laptop = host_home(crate::hosts::install::VERSION);
+    h.with_laptop(laptop.path());
+    h.click("skill-review");
+    h.click("copy");
+    h.land_remote();
+    h.click("copy-to-laptop-0");
+    h.land_remote();
+    assert!(h.rt.find("copy-apply").is_some(), "the copy plan is open");
+    assert_eq!(rect_of(&h, "copy-dialog")[2], size::DIALOG_FORM);
+}
+
+/// Review Focus 3: Sync in the smallest window with 10 targets and 20 skills keeps its footer
+/// in view; the body scrolls instead.
+#[test]
+fn sync_fits_minimum_window() {
+    let home = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(home.path()).unwrap();
+    let project = root.join("work/app");
+    for i in 0..20 {
+        skill(&project.join(".claude/skills"), &format!("skill-{i:02}"));
+    }
+    let targets = ["claude", "codex", "opencode", "cursor", "gemini", "copilot", "windsurf", "goose", "kiro", "roo"];
+    let settings = Settings { targets: Some(targets.iter().map(|t| t.to_string()).collect()), ..Settings::default() };
+    let mut app = App::new(Paths::isolated(&root), settings);
+    app.add_project(project);
+    let mut rt = Runtime::new(app, crate::ui::view, crate::MIN_WINDOW, Env { system_dark: false, scale: 2.0 });
+    rt.on_key = Some(crate::ui::on_key);
+    rt.frame(0.0);
+    let mut h = Harness { _home: home, root, rt };
+    h.scene("sync");
+
+    let (w, hgt) = crate::MIN_WINDOW;
+    let panel = rect_of(&h, "sync-dialog");
+    assert!(panel[0] >= 0.0 && panel[0] + panel[2] <= w && panel[1] + panel[3] <= hgt, "the dialog {panel:?} is inside the window");
+    for key in ["sync-cancel", "sync-apply"] {
+        let r = rect_of(&h, key);
+        assert!(r[1] >= panel[1] && r[1] + r[3] <= panel[1] + panel[3] + 0.5 && r[1] + r[3] <= hgt, "{key} {r:?} is fully visible in {panel:?}");
+    }
+    let body = rect_of(&h, "sync-body");
+    let content = h.rt.elements().into_iter().find(|e| e.key.as_deref() == Some("sync-targets")).expect("the targets card");
+    assert!(content.visible[3] < content.rect[3] && content.visible[3] <= body[3] + 0.5, "the body scrolls: shows {} of {}", content.visible[3], content.rect[3]);
+}
+
+/// Escape closes every skill dialog, as the kit's dialog did.
+#[test]
+fn escape_closes_skill_dialogs() {
+    for (scene, dialog) in [("sync", "sync-dialog"), ("remove", "remove-dialog"), ("copy", "copy-dialog"), ("new-skill", "new-skill-dialog"), ("found", "found-dialog")] {
+        let mut h = three_skills();
+        h.rescan();
+        h.scene(scene);
+        assert!(h.rt.find(dialog).is_some(), "{scene} opens {dialog}");
+        key(&mut h, rune::Key::Escape, rune::Mods::default());
+        assert!(h.rt.find(dialog).is_none(), "Escape closes {dialog}");
+    }
+}
+
+// MCP and host dialogs.
+
+/// The text drawn inside the element keyed `key` (its own and its descendants').
+fn texts_in(h: &Harness, key: &str) -> String {
+    let es = h.rt.elements();
+    let path = es.iter().find(|e| e.key.as_deref() == Some(key) && !e.exiting).map(|e| e.path.clone()).unwrap_or_else(|| panic!("no element keyed {key}"));
+    es.into_iter().filter(|e| e.path.starts_with(&path) && !e.exiting).filter_map(|e| e.text).collect::<Vec<_>>().join("\n")
+}
+
+/// Each MCP and host dialog has its kind's width: a plan with picks (Copy, Merge) is Wide, the
+/// form, the plans without picks beside them (Edit, Remove) and the host dialogs Form.
+#[test]
+fn mcp_dialog_widths() {
+    use crate::ds::size;
+    let mut h = mcp_home();
+    h.mcp_global();
+    h.click("mcp-add");
+    assert_eq!(rect_of(&h, "mcp-form-dialog")[2], size::DIALOG_FORM, "the add form");
+    h.click("mcp-add-cancel");
+
+    h.click("mcp-row-plata");
+    h.click("mcp-copy");
+    assert_eq!(rect_of(&h, "mcp-plan-dialog")[2], size::DIALOG_WIDE, "copy, with picks");
+    h.click("mcp-cancel");
+
+    h.click("mcp-remove");
+    assert!(h.rt.find("mcp-remove-from-claude").is_some(), "remove's picks");
+    assert_eq!(rect_of(&h, "mcp-plan-dialog")[2], size::DIALOG_FORM, "remove: its picks above the plan");
+    h.click("mcp-cancel");
+
+    h.click("mcp-edit");
+    assert_eq!(rect_of(&h, "mcp-form-dialog")[2], size::DIALOG_FORM, "the edit form");
+    h.fill_form(|f| f.env.retain(|p| p.key.text != "PLATA_HOST"));
+    h.click("mcp-add-save");
+    assert!(h.rt.state.mcp_dialog.is_some(), "the edit plan is open");
+    assert_eq!(rect_of(&h, "mcp-plan-dialog")[2], size::DIALOG_FORM, "edit's plan, no picks");
+    h.click("mcp-cancel");
+
+    let mut h = mcp_home();
+    fs::write(h.root.join(".cursor/mcp.json"), r#"{"mcpServers":{"plata-two":{"command":"npx","args":["-y","plata-mcp"]}}}"#).unwrap();
+    h.mcp_global();
+    h.click("mcp-merge-0");
+    assert!(h.rt.find("mcp-merge-into").is_some(), "merge's picks");
+    assert_eq!(rect_of(&h, "mcp-plan-dialog")[2], size::DIALOG_WIDE, "merge, with picks");
+
+    let mut h = Harness::project();
+    h.rt.update(|s, _| s.open_add_host());
+    h.settle();
+    assert_eq!(rect_of(&h, "add-host-dialog")[2], size::DIALOG_FORM, "add host");
+
+    let (mut h, _remote) = on_host();
+    h.click("add-project");
+    assert_eq!(rect_of(&h, "host-project-dialog")[2], size::DIALOG_FORM, "add a project on a host");
+}
+
+/// Review Focus 2: editing a server with secrets masks its prefilled values; an eye shows one.
+#[test]
+fn edit_form_masks_prefilled_secrets() {
+    let mut h = mcp_home();
+    h.mcp_global();
+    h.click("mcp-row-plata");
+    h.click("mcp-edit");
+    let i = h.rt.state.mcp_form.as_ref().unwrap().env.iter().position(|p| p.key.text == "PLATA_TOKEN").unwrap();
+    let value = format!("mcp-add-env-{i}-value");
+    let masked = texts_in(&h, &value);
+    // A secure field reports no text while masked.
+    assert!(!masked.contains("fake-env-secret"), "the env value is masked: {masked:?}");
+    let line = texts_in(&h, "mcp-add-command");
+    assert!(!line.contains("fake-arg-secret"), "the command with a secret is masked: {line:?}");
+
+    let eye = |h: &Harness, key: &str| h.rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key) && !e.exiting).and_then(|e| e.label);
+    let f = h.rt.state.mcp_form.as_ref().unwrap();
+    assert!(f.line_secret && !f.line_shown && !f.env[i].shown, "both start masked");
+    assert_eq!(eye(&h, &format!("mcp-add-env-{i}-show")).as_deref(), Some("Show value"));
+    assert_eq!(eye(&h, "mcp-add-line-show").as_deref(), Some("Show value"));
+
+    h.click(&format!("mcp-add-env-{i}-show"));
+    assert!(h.rt.state.mcp_form.as_ref().unwrap().env[i].shown, "its eye shows it");
+    assert_eq!(eye(&h, &format!("mcp-add-env-{i}-show")).as_deref(), Some("Hide value"));
+    h.click("mcp-add-line-show");
+    assert!(h.rt.state.mcp_form.as_ref().unwrap().line_shown, "and the command's eye shows the command");
+}
+
+/// The machine and scope Selects in MCP Copy open their menus by the select, not in the
+/// window's corner: the menus are laid out after the dialog that holds the selects.
+#[test]
+fn copy_scope_menu_opens_by_its_select() {
+    let mut h = mcp_home();
+    let laptop = host_home(crate::hosts::install::VERSION);
+    // A project on laptop, so copying there offers a Scope.
+    let site = fs::canonicalize(laptop.path()).unwrap().join("work/site");
+    fs::create_dir_all(&site).unwrap();
+    let there = Paths::isolated(laptop.path());
+    let mut settings = Settings::load_from(&there);
+    settings.projects = vec![site];
+    settings.save_to(&there);
+    h.with_laptop(laptop.path());
+    h.mcp_global();
+    h.click("mcp-row-plata");
+    h.click("mcp-copy");
+    h.land_remote();
+    let near = |h: &Harness, select: &str, menu: &str| {
+        let (select, menu) = (rect_of(h, select), rect_of(h, menu));
+        let below = (menu[1] - (select[1] + select[3])).abs() < 40.0;
+        let above = (select[1] - (menu[1] + menu[3])).abs() < 40.0;
+        assert!((below || above) && (menu[0] - select[0]).abs() < 40.0, "the menu {menu:?} opens by the select {select:?}");
+    };
+    h.click("mcp-copy-machine-trigger");
+    assert!(h.rt.state.across.machine_menu, "the machine menu is open");
+    near(&h, "mcp-copy-machine-trigger", "mcp-copy-machine-content");
+
+    h.rt.update(|s, _| {
+        s.across.machine_menu = false;
+        s.set_mcp_copy_machine("laptop");
+    });
+    h.settle();
+    h.land_remote();
+    h.click("mcp-copy-scope-trigger");
+    assert!(h.rt.state.across.scope_menu, "the scope menu is open");
+    near(&h, "mcp-copy-scope-trigger", "mcp-copy-scope-content");
+}
+
+/// Errors moved into the frame's error line keep the keys they had.
+#[test]
+fn dialog_errors_keep_their_keys() {
+    let shows = |h: &Harness, key: &str| h.rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key) && !e.exiting).and_then(|e| e.text);
+    let mut h = mcp_home();
+    h.mcp_global();
+    h.click("mcp-add");
+    h.click("mcp-add-save");
+    let e = h.rt.state.mcp_form.as_ref().and_then(|f| f.error.clone()).expect("an empty form is refused");
+    assert_eq!(shows(&h, "mcp-add-error"), Some(e));
+
+    let mut h = Harness::project();
+    h.rt.update(|s, _| {
+        s.open_add_host();
+        let f = s.add_host.as_mut().unwrap();
+        f.name = rune::TextEdit::new("box");
+        f.ssh = rune::TextEdit::new("-oProxyCommand=x");
+    });
+    h.settle();
+    h.click("host-add");
+    let e = h.rt.state.add_host.as_ref().and_then(|f| f.error.clone()).expect("an option for a target is refused");
+    assert_eq!(shows(&h, "host-error"), Some(e));
+
+    let (mut h, _remote) = on_host();
+    h.click("add-project");
+    h.click("host-project-add");
+    h.land_remote();
+    let e = h.rt.state.host_project.as_ref().and_then(|f| f.error.clone()).expect("an empty folder is refused");
+    assert!(h.rt.find("host-project-error").is_some(), "the error line");
+    assert!(h.texts().contains(&e), "says {e}");
 }

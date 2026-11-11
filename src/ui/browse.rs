@@ -1,12 +1,12 @@
 //! Searching skills.sh and installing from it into the chosen scope.
 
-use rune::{El, Tx, col, row, text};
+use rune::{El, Tx, col, row};
 use rune_kit::shell::Toolbar;
-use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, Checkbox, ControlSize, Divider, Kit, Select, Spinner, TextInput, glyphs};
+use rune_kit::{Button, Checkbox, Kit, Select, TextInput};
 
-use super::{code_box, empty, heading, inspector_body, inspector_title, mono, prop, row_gap, scroll_pane, section, skill_md};
 use crate::agents::Scope;
 use crate::app::{App, RepoListing};
+use crate::ds::{self, Card, Inspector, ListRow, LoadingButton, Page, Place, pair_row, size, space, stacked_row, text};
 use crate::remote::RemoteSkill;
 
 /// The scopes installs can go to, as labels: global first, then the projects. They are this
@@ -17,7 +17,8 @@ fn scope_options(s: &App) -> Vec<(String, Scope)> {
     v
 }
 
-pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>) -> (El, Toolbar, El) {
+/// `width` is the list pane's drawn width (`None` before the first layout).
+pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>, width: Option<f32>) -> (El, Toolbar, El) {
     let options = scope_options(s);
     let labels: Vec<String> = options.iter().map(|(l, _)| l.clone()).collect();
     let current = s.install_label(s.local_scope());
@@ -35,37 +36,39 @@ pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>) -> (El, Toolbar, El) {
         })
         .build(k, layer)
         .key("install-scope");
-    let toolbar = Toolbar::new()
-        .title("skills.sh")
-        .trailing(row().gap(8.0).center_y().child(text("Install into").font(k.ty.small).color(k.c.text_muted)).child(scope_select));
+    let toolbar = super::toolbar_untabbed(k, "skills.sh", row().gap(space::S2).center_y().child(text::label(k, "Install into")).child(scope_select));
+    (main(s, k, width), toolbar, details(s, k))
+}
 
-    let search = TextInput::new(&s.query)
-        .placeholder("Search skills.sh")
-        .leading_icon(&glyphs::SEARCH)
-        .clear_button()
-        .large()
-        .width(None)
+fn main(s: &App, k: &Kit, width: Option<f32>) -> El {
+    let search = ds::filter(&s.query, "Search skills.sh")
         .label("Search skills.sh")
         .on_edit(|s: &mut App| &mut s.query)
         .on_change(|s: &mut App, _: &mut Tx| s.search_changed())
         .build(k)
         .key("query");
-
-    let mut list = col().key("results").w_full().gap(2.0);
-    match &s.results {
-        Err(e) => list = list.child(empty("Search failed", e, k)),
-        Ok(r) if r.is_empty() && s.search.is_pending() => list = list.child(row().w_full().py(32.0).center().child(Spinner::new().build(k))),
-        Ok(r) if r.is_empty() && s.query.text.trim().len() >= 2 => list = list.child(empty("No skills found", "Try another search.", k)),
-        Ok(r) if r.is_empty() => {
-            list = list.child(empty("Find skills on skills.sh", "Type at least two letters, e.g. \"react\" or \"testing\".", k));
-        }
-        Ok(r) => {
-            for skill in r {
-                list = list.child(result_row(s, skill, k));
-            }
-        }
+    let mut page = Page::new("browse-page").filter(search);
+    if let Some(note) = super::hosts::browse_note(s, k) {
+        page = page.notice(note);
     }
+    match &s.results {
+        Err(e) => page = page.empty(ds::empty(k, "Search failed", e.clone())),
+        Ok(r) if r.is_empty() && s.search.is_pending() => {
+            page = page.empty(row().w_full().py(space::S6).center().child(ds::loading(k, "Searching skills.sh…")));
+        }
+        Ok(r) if r.is_empty() && s.query.text.trim().len() >= 2 => page = page.empty(ds::empty(k, "No skills found", "Try another search.")),
+        Ok(r) if r.is_empty() => {
+            page = page.empty(ds::empty(k, "Find skills on skills.sh", "Type at least two letters, e.g. \"react\" or \"testing\"."));
+        }
+        Ok(r) => page = page.rows(r.iter().map(|skill| result_row(s, skill, k))),
+    }
+    page.footer(from_source(s, k, width)).build(k)
+}
 
+/// "Or install straight from a repository": the source, Show skills and Install all on one line
+/// when the list pane `width` has room for them, else the buttons under the input so it keeps
+/// its width in the narrowest list.
+fn from_source(s: &App, k: &Kit, width: Option<f32>) -> El {
     let source = TextInput::new(&s.source)
         .placeholder("owner/repo, owner/repo@skill or a URL")
         .width(None)
@@ -75,14 +78,11 @@ pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>) -> (El, Toolbar, El) {
         .build(k)
         .key("source");
     let installing = s.installing.is_some();
-    let from_source = row()
-        .w_full()
-        .gap(8.0)
+    let buttons = row()
+        .gap(space::S2)
         .center_y()
-        .child(col().grow(1.0).min_w(0.0).child(source))
         .child(
-            Button::new("Show skills")
-                .variant(ButtonVariant::Outline)
+            ds::button("Show skills", Place::List)
                 .help("List the skills in this repository to pick from")
                 .disabled(s.source.text.trim().is_empty())
                 .on_press(|s: &mut App| s.list_repo())
@@ -90,55 +90,39 @@ pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>) -> (El, Toolbar, El) {
                 .key("list-source"),
         )
         .child(
-            Button::new("Install all")
-                .variant(ButtonVariant::Ghost)
+            ds::quiet("Install all", Place::List)
                 .help("Install every skill in it (or the one named after @)")
                 .disabled(installing || s.source.text.trim().is_empty())
                 .on_press(|s: &mut App| s.install_source())
                 .build(k)
                 .key("install-source"),
         );
-
-    let mut main = col().key("browse-page").w_full().h_full().min_h(0.0).padding(16.0).gap(12.0);
-    if let Some(note) = super::hosts::browse_note(s, k) {
-        main = main.child(note);
-    }
-    let main = main
-        .child(search)
-        .child(scroll_pane("results-scroll", list).grow(1.0))
-        .child(Divider::horizontal().build(k))
-        .child(heading("Or install straight from a repository", k))
-        .child(from_source);
-    (main, toolbar, details(s, k))
+    let widths = [size::FIELD_MIN, ds::button_width(k, "Show skills", Place::List, false), ds::button_width(k, "Install all", Place::List, false)];
+    let side_by_side = width.is_none_or(|w| super::row_fits(&widths, w - 2.0 * size::PANE_EDGE));
+    col()
+        .key("from-source")
+        .w_full()
+        .gap(space::S2)
+        .child(text::label(k, "Or install straight from a repository"))
+        .child(if side_by_side {
+            row().w_full().gap(space::S2).center_y().child(col().grow(1.0).min_w(0.0).child(source)).child(buttons)
+        } else {
+            col().w_full().gap(space::S2).child(source).child(buttons)
+        })
 }
 
 fn result_row(s: &App, skill: &RemoteSkill, k: &Kit) -> El {
-    let selected = s.remote.as_ref().is_some_and(|r| r.id == skill.id);
     let pick = skill.clone();
-    let mut info = col()
-        .gap(2.0)
-        .grow(1.0)
-        .min_w(0.0)
-        .child(text(skill.name.clone()).font(k.ty.ui_medium).color(k.c.text_base).truncate())
-        .child(text(skill.source.clone()).font(k.ty.small).color(k.c.text_muted).truncate());
+    let mut tags = Vec::new();
     if s.installed_in(&skill.name) {
-        info = info.child(row().child(Badge::new("installed").variant(BadgeVariant::Subtle).build(k)));
+        tags.push(ds::tag(k, "installed", None, "Already in this scope").key("installed-tag"));
     }
-    let r = row()
-        .key(format!("result-{}", skill.id))
-        .role("button")
-        .label(skill.name.clone())
-        .focusable(true)
-        .w_full()
-        .px(12.0)
-        .py(8.0)
-        .gap(12.0)
-        .center_y()
-        .radius(k.radius.md)
-        .on_press(move |s: &mut App| s.select_remote(pick.clone()))
-        .child(info)
-        .child(text(installs(skill.installs)).font(k.ty.small).color(k.c.text_faint));
-    if selected { r.fill(k.c.layer_02) } else { r.hover(k.c.hover) }
+    ListRow::new(format!("result-{}", skill.id), skill.name.clone())
+        .meta(skill.source.clone())
+        .tags(tags)
+        .trailing(text::label(k, installs(skill.installs)))
+        .selected(s.remote.as_ref().is_some_and(|r| r.id == skill.id))
+        .build(k, move |s: &mut App| s.select_remote(pick.clone()))
 }
 
 /// `1234567` as `1.2M installs`.
@@ -151,121 +135,107 @@ pub fn installs(n: u64) -> String {
     format!("{} install{}", short.replace(".0", ""), if n == 1 { "" } else { "s" })
 }
 
+/// What is under way (installing) and, when `hint` is given, the note under the actions.
+fn status(s: &App, k: &Kit, hint: Option<El>) -> Option<El> {
+    let busy = s.installing.as_ref().map(|job| ds::loading(k, format!("Installing {} into {}…", job.label, s.install_label(&job.scope))).key("installing"));
+    if busy.is_none() && hint.is_none() {
+        return None;
+    }
+    Some(col().w_full().gap(space::S2).children(busy).children(hint))
+}
+
+/// The last install's output, or why it failed.
+fn log_card(s: &App, k: &Kit) -> Option<El> {
+    let (title, out) = match s.install_log.as_ref()? {
+        Ok(o) => ("Install log", o),
+        Err(e) => ("Install failed", e),
+    };
+    Card::new("install-log").label(title).row(text::code(k, out.trim().to_string())).build(k)
+}
+
+/// The main action of the inspector: loading while an install runs.
+fn install_button(s: &App, label: String) -> Button {
+    ds::primary(label, Place::Inspector).loading(s.installing.is_some()).help(format!("Install into {}", s.install_label(s.local_scope())))
+}
+
 fn details(s: &App, k: &Kit) -> El {
-    let mut body = inspector_body(k);
-    if let Some(job) = &s.installing {
-        body = body.child(
-            row_gap()
-                .key("installing")
-                .child(Spinner::new().build(k))
-                .child(text(format!("Installing {} into {}…", job.label, s.install_label(&job.scope))).font(k.ty.small).color(k.c.text_muted).wrap()),
-        );
-    }
-    if let Some(log) = &s.install_log {
-        let (title, out) = match log {
-            Ok(o) => ("Install log", o),
-            Err(e) => ("Install failed", e),
-        };
-        body = body.child(prop(title, code_box(mono(out.trim().to_string(), k).color(k.c.text_base), k), k).key("install-log"));
-    }
     if let Some(repo) = &s.repo {
-        return body.child(repo_listing(s, repo, k));
+        return repo_listing(s, repo, k);
     }
     let Some(r) = &s.remote else {
         if s.installing.is_none() && s.install_log.is_none() {
-            body = body.child(empty("No skill selected", "Pick a search result to preview and install it.", k));
+            return Inspector::empty(k, "No skill selected", "Pick a search result to preview and install it.");
         }
-        return body;
+        let mut ins = Inspector::new();
+        if let Some(n) = status(s, k, None) {
+            ins = ins.notice(n);
+        }
+        return ins.card(log_card(s, k)).build(k);
     };
     let installed = s.installed_in(&r.name);
     let url = r.url();
-    body = body
-        .child(inspector_title(r.name.clone(), k))
-        .child(prop("Source", mono(r.source.clone(), k).color(k.c.text_base), k))
-        .child(prop("Popularity", text(installs(r.installs)).font(k.ty.ui).color(k.c.text_base), k))
-        .child(
-            row_gap()
-                .child(
-                    Button::new(if installed { "Reinstall" } else { "Install" })
-                        .variant(if s.installing.is_some() { ButtonVariant::Loading } else { ButtonVariant::Contrast })
-                        .control_size(ControlSize::Regular)
-                        .disabled(s.installing.is_some())
-                        .help(format!("Install into {}", s.install_label(s.local_scope())))
-                        .on_press(|s: &mut App| s.install_remote())
-                        .build(k)
-                        .key("install"),
-                )
-                .child(
-                    Button::new("Open on skills.sh")
-                        .variant(ButtonVariant::Ghost)
-                        .on_press_tx(move |_: &mut App, tx: &mut Tx| {
-                            let _ = tx.open_url(&url);
-                        })
-                        .build(k)
-                        .key("open-web"),
-                ),
-        )
-        .child(
-            text(format!(
-                "Installs into {} and links it into your sync targets.",
-                crate::agents::tilde(&crate::agents::AGENTS[crate::agents::CANONICAL].dir(s.local_scope(), s.local_paths()), s.local_paths())
-            ))
-                .font(k.ty.caption())
-                .color(k.c.text_faint)
-                .wrap(),
-        );
-    body = body.child(Divider::horizontal().build(k)).child(section("SKILL.md", None, k));
-    body.child(match &s.remote_md {
-        None => row().py(16.0).child(Spinner::new().build(k)),
-        Some(Err(e)) => text(e.clone()).font(k.ty.small).color(k.c.text_faint).wrap(),
-        Some(Ok(md)) => skill_md(crate::skill::parse(md).body, k).key("remote-md"),
-    })
+    let hint = text::hint(
+        k,
+        format!(
+            "Installs into {} and links it into your sync targets.",
+            crate::agents::tilde(&crate::agents::AGENTS[crate::agents::CANONICAL].dir(s.local_scope(), s.local_paths()), s.local_paths())
+        ),
+    );
+    let install = install_button(s, if installed { "Reinstall" } else { "Install" }.to_string()).on_press(|s: &mut App| s.install_remote()).build(k).key("install");
+    let open = ds::button("Open on skills.sh", Place::Inspector)
+        .on_press_tx(move |_: &mut App, tx: &mut Tx| {
+            let _ = tx.open_url(&url);
+        })
+        .build(k)
+        .key("open-web");
+    let mut ins = Inspector::new().title(r.name.clone()).actions(vec![install, open], None);
+    if let Some(n) = status(s, k, Some(hint)) {
+        ins = ins.notice(n);
+    }
+    let details = Card::new("remote-details")
+        .label("Details")
+        .row(stacked_row(k, "Source", text::code(k, r.source.clone())))
+        .row(pair_row(k, "Popularity", text::value(k, installs(r.installs))))
+        .build(k);
+    let md = Card::new("remote-md-card")
+        .label("SKILL.md")
+        .row(match &s.remote_md {
+            None => ds::loading(k, "Loading SKILL.md…"),
+            Some(Err(e)) => text::hint(k, e.clone()),
+            Some(Ok(md)) => ds::markdown::<App>(k, crate::skill::parse(md).body).key("remote-md"),
+        })
+        .build(k);
+    ins.card(log_card(s, k)).card(details).card(md).build(k)
 }
-
 
 /// A repository's skills with a tick each, and one button to install the ticked ones.
 fn repo_listing(s: &App, repo: &RepoListing, k: &Kit) -> El {
-    let mut body = col()
-        .key("repo")
-        .w_full()
-        .gap(12.0)
-        .child(inspector_title(repo.source.clone(), k));
+    let mut ins = Inspector::new().title(repo.source.clone());
     let skills = match &repo.skills {
-        None => return body.child(row_gap().child(Spinner::new().build(k)).child(text("Reading the repository…").font(k.ty.small).color(k.c.text_muted))),
-        Some(Err(e)) => return body.child(text(e.clone()).font(k.ty.small).color(k.c.text_muted).wrap()),
+        None => return ins.notice(ds::loading(k, "Reading the repository…")).build(k),
+        Some(Err(e)) => return ins.description(e.clone()).build(k),
         Some(Ok(v)) => v,
     };
     let picked = skills.iter().filter(|r| r.2).count();
-    body = body.child(
-        row_gap()
-            .child(
-                Button::new(match picked {
-                    0 => "Pick skills to install".to_string(),
-                    1 => "Install 1 skill".to_string(),
-                    n => format!("Install {n} skills"),
-                })
-                .variant(if s.installing.is_some() { ButtonVariant::Loading } else { ButtonVariant::Contrast })
-                .control_size(ControlSize::Regular)
-                .disabled(picked == 0 || s.installing.is_some())
-                .help(format!("Install into {}", s.install_label(s.local_scope())))
-                .on_press(|s: &mut App| s.install_repo_ticked())
-                .build(k)
-                .key("install-ticked"),
-            )
-            .child(Button::new("Close").variant(ButtonVariant::Ghost).on_press(|s: &mut App| s.repo = None).build(k).key("repo-close")),
-    );
-    let mut list = col().w_full().gap(10.0);
-    for (i, (name, desc, on)) in skills.iter().enumerate() {
-        let mut cb = Checkbox::new(*on).label(name.clone()).on_toggle(move |s: &mut App| s.toggle_repo_skill(i));
+    let label = match picked {
+        0 => "Pick skills to install".to_string(),
+        1 => "Install 1 skill".to_string(),
+        n => format!("Install {n} skills"),
+    };
+    let install = install_button(s, label).disabled(picked == 0 || s.installing.is_some()).on_press(|s: &mut App| s.install_repo_ticked()).build(k).key("install-ticked");
+    let close = ds::quiet("Close", Place::Inspector).on_press(|s: &mut App| s.repo = None).build(k).key("repo-close");
+    ins = ins.actions(vec![install, close], None);
+    if let Some(n) = status(s, k, None) {
+        ins = ins.notice(n);
+    }
+    let rows = skills.iter().enumerate().map(|(i, (name, desc, on))| {
+        let mut cb = Checkbox::new(*on).label(if s.installed_in(name) { format!("{name} (installed)") } else { name.clone() }).on_toggle(move |s: &mut App| s.toggle_repo_skill(i));
         if !desc.is_empty() {
             cb = cb.description(desc.clone());
         }
-        if s.installed_in(name) {
-            cb = cb.label(format!("{name} (installed)"));
-        }
-        list = list.child(cb.build(k).key(format!("repo-skill-{i}")));
-    }
-    body.child(list)
+        cb.build(k).key(format!("repo-skill-{i}"))
+    });
+    ins.card(log_card(s, k)).card(Card::new("repo-skills").rows(rows).build(k)).build(k)
 }
 
 #[cfg(test)]

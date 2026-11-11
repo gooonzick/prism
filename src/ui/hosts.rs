@@ -1,12 +1,12 @@
 //! Environments in the window: the switcher above the scopes, the Add host dialog, and what
 //! the main pane shows until a host's state is in.
 
-use rune::{El, Tx, col, icon, row, text};
-use rune_kit::{Button, ButtonVariant, Dialog, Kit, Placement, Select, Spinner, TextInput, glyphs};
+use rune::{El, Tx, col, row};
+use rune_kit::{Kit, Placement, Select, SelectAppearance, TextInput};
 
-use super::dialogs::{dialog_body, field_block, note};
-use super::{empty, row_gap};
+use super::cancel;
 use crate::app::{App, Env, RemoteState};
+use crate::ds::{self, Card, DialogFrame, DialogKind, Place, field, size, space, text};
 use crate::hosts::copy::this_machine;
 use crate::hosts::install::{Health, VERSION};
 
@@ -21,6 +21,8 @@ pub fn switcher(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let select = Select::new("env-switch", &labels)
         .current(Some(&current))
         .label("Machine")
+        // A field, the list's control height (`Place::List`); across the sidebar, not its 280.
+        .appearance(SelectAppearance::Field)
         .placement(Placement::BottomStart)
         .open(s.env_menu)
         .on_toggle(|s: &mut App| s.env_menu = !s.env_menu)
@@ -33,7 +35,8 @@ pub fn switcher(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 v => s.switch_env(Some(v)),
             }
         })
-        .build(k, layer);
+        .build(k, layer)
+        .w_full();
     row().key("env").w_full().center_y().child(select)
 }
 
@@ -45,7 +48,7 @@ pub fn pending(s: &App, k: &Kit) -> Option<El> {
         RemoteState::Ready => return None,
         RemoteState::Connecting => {
             let line = if s.installing_prism { format!("Installing prism {VERSION} on {name}…") } else { format!("Connecting to {name}…") };
-            row().w_full().py(48.0).center().child(row_gap().child(Spinner::new().build(k)).child(text(line).font(k.ty.small).color(k.c.text_muted)))
+            row().w_full().py(space::S6).center().child(ds::loading(k, line))
         }
         RemoteState::NeedsInstall(health) => {
             let detail = match health {
@@ -54,28 +57,23 @@ pub fn pending(s: &App, k: &Kit) -> Option<El> {
                 Health::Missing(Some(why)) => format!("Its prism doesn't run ({why}); Install puts {VERSION} in ~/.local/bin in its place."),
                 Health::Missing(None) | Health::Ready => format!("Install puts it in ~/.local/bin on {name}; nothing else there changes."),
             };
-            let install = Button::new("Install prism")
-                .variant(ButtonVariant::Contrast)
-                .disabled(matches!(health, Health::Unsupported(_)))
-                .on_press(|s: &mut App| s.install_prism())
-                .build(k)
-                .key("env-install");
-            empty(&format!("prism {VERSION} isn't on {name}"), &detail, k).child(row().pt(10.0).child(install))
+            let install = ds::primary("Install prism", Place::List).disabled(matches!(health, Health::Unsupported(_))).on_press(|s: &mut App| s.install_prism()).build(k).key("env-install");
+            ds::empty_action(k, format!("prism {VERSION} isn't on {name}"), detail, install)
         }
         RemoteState::Unreachable(e) => {
             let why = e.strip_prefix(&format!("Can't reach {name}: ")).unwrap_or(e);
-            let retry = Button::new("Retry").variant(ButtonVariant::Ghost).on_press(|s: &mut App| s.retry_remote()).build(k).key("env-retry");
-            empty(&format!("Can't reach {name}"), why, k).child(row().pt(10.0).child(retry))
+            let retry = ds::button("Retry", Place::List).on_press(|s: &mut App| s.retry_remote()).build(k).key("env-retry");
+            ds::empty_action(k, format!("Can't reach {name}"), why, retry)
         }
     };
-    Some(col().key("env-status").w_full().h_full().min_h(0.0).padding(16.0).child(body))
+    Some(col().key("env-status").w_full().h_full().min_h(0.0).padding(size::PANE_EDGE).child(body))
 }
 
 /// The note on skills.sh while a host is in view: installs land here, not there.
 pub fn browse_note(s: &App, k: &Kit) -> Option<El> {
     let host = s.host()?;
     let here = if cfg!(target_os = "macos") { "this Mac" } else { "this computer" };
-    Some(text(format!("skills.sh installs go to {here}; copy them to {} afterwards", host.name)).font(k.ty.caption()).color(k.c.text_muted).wrap().key("browse-host-note"))
+    Some(ds::text::hint(k, format!("skills.sh installs go to {here}; copy them to {} afterwards", host.name)).key("browse-host-note"))
 }
 
 /// A name and an ssh target, saved on this machine; then the window connects.
@@ -97,33 +95,15 @@ pub fn add_host(s: &App, k: &Kit, layer: &mut Vec<El>) {
         .on_submit(|s: &mut App, _: &mut Tx| s.save_host())
         .build(k)
         .key("host-ssh");
-    let mut body = dialog_body()
-        .child(note("Prism connects with ssh and your keys, never a password; the host needs this version of prism, which the window can install.", k))
-        .child(field_block("Name", name, k))
-        .child(field_block("ssh target", ssh, k));
-    if let Some(e) = &form.error {
-        body = body.child(
-            row()
-                .key("host-error")
-                .gap(6.0)
-                .center_y()
-                .child(icon(&glyphs::CIRCLE_X, 14.0).color(k.c.danger.icon))
-                .child(text(e.clone()).font(k.ty.small).color(k.c.text_muted).wrap()),
-        );
-    }
-    let buttons = row()
-        .w_full()
-        .gap(8.0)
-        .justify_end()
-        .child(Button::new("Cancel").variant(ButtonVariant::Ghost).on_press(|s: &mut App| s.add_host = None).build(k).key("host-cancel"))
-        .child(Button::new("Add host").variant(ButtonVariant::Contrast).on_press(|s: &mut App| s.save_host()).build(k).key("host-add"));
-    Dialog::new("add-host-dialog", "Add host")
-        .width(480.0)
-        .fit()
-        .open(true)
-        .on_close(|s: &mut App| s.add_host = None)
-        .child(body.child(buttons))
-        .build(k, layer);
+    let fields = Card::new("add-host-fields").row(field(k, "Name", name)).row(field(k, "ssh target", ssh));
+    let add = ds::primary("Add host", Place::Bar).on_press(|s: &mut App| s.save_host()).build(k).key("host-add");
+    DialogFrame::new("add-host", "Add host", DialogKind::Form)
+        .body(text::body(k, "Prism connects with ssh and your keys, never a password; the host needs this version of prism, which the window can install."))
+        .body(fields.build(k).expect("two fields"))
+        .error(form.error.clone())
+        .error_key("host-error")
+        .footer(cancel("host-cancel", k, |s| s.add_host = None), add)
+        .build(k, |s: &mut App| s.add_host = None, layer);
 }
 
 /// Add project… on a host: the folder's path on that machine, typed, since no folder picker
@@ -140,30 +120,13 @@ pub fn add_project(s: &App, k: &Kit, layer: &mut Vec<El>) {
         .on_submit(|s: &mut App, _: &mut Tx| s.save_host_project())
         .build(k)
         .key("host-project-path");
-    let mut body = dialog_body()
-        .child(note(&format!("Type the project's folder on {name}. Its skills and MCP servers show once {name} lists it."), k))
-        .child(field_block("Folder", path, k));
-    if let Some(e) = &form.error {
-        body = body.child(
-            row()
-                .key("host-project-error")
-                .gap(6.0)
-                .center_y()
-                .child(icon(&glyphs::CIRCLE_X, 14.0).color(k.c.danger.icon))
-                .child(text(e.clone()).font(k.ty.small).color(k.c.text_muted).wrap()),
-        );
-    }
-    let buttons = row()
-        .w_full()
-        .gap(8.0)
-        .justify_end()
-        .child(Button::new("Cancel").variant(ButtonVariant::Ghost).on_press(|s: &mut App| s.host_project = None).build(k).key("host-project-cancel"))
-        .child(Button::new("Add project").variant(ButtonVariant::Contrast).on_press(|s: &mut App| s.save_host_project()).build(k).key("host-project-add"));
-    Dialog::new("host-project-dialog", format!("Add a project on {name}"))
-        .width(480.0)
-        .fit()
-        .open(true)
-        .on_close(|s: &mut App| s.host_project = None)
-        .child(body.child(buttons))
-        .build(k, layer);
+    let fields = Card::new("host-project-fields").row(field(k, "Folder", path));
+    let add = ds::primary("Add project", Place::Bar).on_press(|s: &mut App| s.save_host_project()).build(k).key("host-project-add");
+    // The frame keys its error line `host-project-error`.
+    DialogFrame::new("host-project", format!("Add a project on {name}"), DialogKind::Form)
+        .body(text::body(k, format!("Type the project's folder on {name}. Its skills and MCP servers show once {name} lists it.")))
+        .body(fields.build(k).expect("one field"))
+        .error(form.error.clone())
+        .footer(cancel("host-project-cancel", k, |s| s.host_project = None), add)
+        .build(k, |s: &mut App| s.host_project = None, layer);
 }

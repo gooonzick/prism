@@ -9,12 +9,13 @@ mod installed;
 mod mcp;
 mod mcp_dialogs;
 
-use rune::{Chrome, Color, Cx, El, Icon, KeyEvent, ScrollSpec, Spring, TextStyle, Tx, col, el, row, text};
-use rune_kit::shell::{self, PaneMotion, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar};
-use rune_kit::{ControlSize, Kit, Markdown, MarkdownStyle, Toast, ToastRegion, glyphs};
+use rune::{Chrome, Cx, El, Icon, KeyEvent, ScrollSpec, Tx, col, row};
+use rune_kit::shell::{self, PaneState, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar};
+use rune_kit::{Button, Kit, Toast, ToastRegion, glyphs};
 
 use crate::agents::{Scope, tilde};
 use crate::app::{App, Page};
+use crate::ds::{self, LoadingButton, Place, motion, size, space};
 
 pub static HOME: Icon = Icon {
     name: "se-home",
@@ -55,16 +56,26 @@ pub fn chrome() -> Chrome {
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     let k = Kit::neutral(cx.system_dark());
     let mut layer = Vec::new();
+    if s.gallery {
+        let g = crate::ds::gallery::<App>(&k, &mut layer);
+        return rune_kit::root(g, layer);
+    }
+    // The inspector as it will be drawn: its width decides which actions fit in its row. With no
+    // room for it, its content (and its "…" menu, whatever its flag says) isn't built.
+    let pane = inspector_pane(s, cx);
     let (main, toolbar, inspector) = match (s.page.clone(), hosts::pending(s, &k)) {
         // A host whose state isn't in yet: what is happening with it, in place of the page.
-        (Page::Installed | Page::Mcp, Some(pane)) => (pane, Toolbar::new().leading(page_tabs(s, &k)).title(s.env_label()), inspector_body(&k)),
-        (Page::Installed, None) => installed::page(s, &k, &mut layer),
-        (Page::Mcp, None) => mcp::page(s, &k, &mut layer),
-        (Page::Browse, _) => browse::page(s, &k, &mut layer),
+        (Page::Installed | Page::Mcp, Some(pending)) => (pending, toolbar(s, &k, s.env_label(), row()), Some(ds::Inspector::new().build(&k))),
+        (Page::Installed, None) => installed::page(s, &k, &mut layer, cx.is_reduced_motion(), toolbar_room(cx), pane.map(|p| p.width())),
+        (Page::Mcp, None) => mcp::page(s, &k, &mut layer, cx.is_reduced_motion(), toolbar_room(cx), pane.is_some()),
+        (Page::Browse, _) => {
+            let (main, toolbar, details) = browse::page(s, &k, &mut layer, cx.layout_with("main-pane", |r| r[2]));
+            (main, toolbar, Some(details))
+        }
     };
     dialogs::sync(s, &k, &mut layer);
     dialogs::remove(s, &k, &mut layer);
-    dialogs::copy(s, &k, &mut layer);
+    dialogs::copy(s, &k, &mut layer, cx.is_reduced_motion());
     dialogs::new_skill(s, &k, &mut layer);
     dialogs::found(s, &k, &mut layer);
     mcp_dialogs::form(s, &k, &mut layer);
@@ -83,19 +94,37 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         toast = toast.icon(&k, if n.error { &glyphs::CIRCLE_X } else { &glyphs::CHECK });
         layer.push(ToastRegion::new().toast(toast.build(&k)).build(&k));
     }
-    let split = SplitView::new(main)
-        .sidebar(&s.sidebar, |s: &mut App| &mut s.sidebar, sidebar(s, &k, &mut layer))
-        .inspector(&s.inspector, |s: &mut App| &mut s.inspector, scroll_pane("inspector-scroll", inspector))
+    // Key handling has no layout of its own: the list pane's edge goes into `App::seen` (no view
+    // reads it, so the report runs no view).
+    let main = main.on_layout_tx(|s: &mut App, r, tx: &mut Tx| {
+        s.seen.pane_end = Some(r[0] + r[2]);
+        tx.live_only();
+    });
+    let mut split = SplitView::new(main).sidebar(&s.sidebar, |s: &mut App| &mut s.sidebar, sidebar(s, &k, &mut layer));
+    if let (Some(pane), Some(inspector)) = (pane, inspector) {
+        split = split.inspector(&pane, |s: &mut App| &mut s.inspector, scroll_pane("inspector-scroll", inspector));
+    }
+    let split = split
         .toolbar(toolbar)
         .titlebar_inset(cx.titlebar_inset())
-        .frame_inset(8.0)
+        .frame_inset(space::S2)
         .toolbar_in_panel()
-        .sidebar_padding(18.0, 10.0)
-        .sidebar_toggle(SidebarToggle::new().size(ControlSize::Large).past_lights(16.0).edge(18.0).gap(4.0).in_header())
-        .pane_motion(PaneMotion::new().spring(Spring::new(0.3, 0.0)).scale_with_width(480.0, 0.15, 0.3).fade_tail(0.15))
+        .sidebar_padding(space::S2, space::S2)
+        .sidebar_toggle(SidebarToggle::new().size(Place::Bar.control()).past_lights(space::S4).edge(space::S4).gap(space::S1).in_header())
+        .pane_motion(motion::panes())
         .reduced_motion(cx.is_reduced_motion())
         .build(&k);
-    rune_kit::root(split, layer)
+    // The window's width, for `App::inspector_drawn`.
+    rune_kit::root(split, layer).on_layout_tx(|s: &mut App, r, tx: &mut Tx| {
+        s.seen.window = Some(r[2]);
+        tx.live_only();
+    })
+}
+
+/// The inspector pane as it is drawn in this window (`App::inspector_pane`), or `None` when the
+/// window has no room for it.
+pub fn inspector_pane(s: &App, cx: &Cx<App>) -> Option<PaneState> {
+    s.inspector_pane(cx.layout_with("kit-root", |r| r[2]))
 }
 
 fn sidebar(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
@@ -106,14 +135,14 @@ fn sidebar(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         if stats.unsynced > 0 { row.badge(stats.unsynced.to_string()) } else { row }
     };
     let global = counted(SidebarRow::new("Global").icon(&HOME), &Scope::Global)
-        .height(32.0)
+        .height(size::ROW_1)
         .selected(installed && s.scope == Scope::Global)
         .on_select(|s: &mut App, _| s.open_scope(Scope::Global))
         .build(k)
         .key("scope-global");
     let browse = SidebarRow::new("skills.sh")
         .icon(&GLOBE)
-        .height(32.0)
+        .height(size::ROW_1)
         .selected(s.page == Page::Browse)
         .on_select(|s: &mut App, _| s.open_browse())
         .build(k)
@@ -126,7 +155,7 @@ fn sidebar(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 let n = s.stats.get(&Scope::Project(p.clone())).map_or(0, |x| x.total);
                 format!("{} · {n} skill{}", tilde(p.parent().unwrap_or(p), &s.paths), if n == 1 { "" } else { "s" })
             })
-            .height(40.0)
+            .height(size::ROW_2)
             .selected(installed && s.scope == Scope::Project(p.clone()))
             .on_select(move |s: &mut App, _| s.open_scope(Scope::Project(open.clone())))
             .on_close(move |s: &mut App, _| s.forget_project(&forget));
@@ -134,7 +163,7 @@ fn sidebar(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     });
     let add = SidebarRow::new(if s.discovering { "Looking for projects…" } else { "Add project…" })
         .icon(&PLUS)
-        .height(32.0)
+        .height(size::ROW_1)
         .on_select(|s: &mut App, tx: &mut Tx| {
             if s.discovering {
                 return;
@@ -162,9 +191,9 @@ fn sidebar(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     Sidebar::new()
         .label("Scopes")
         .inset(0.0)
-        .header_gap(4.0)
-        .header_padding(0.0, 12.0)
-        .row_gap(2.0)
+        .header_gap(space::S1)
+        .header_padding(0.0, space::S3)
+        .row_gap(space::ROW_GAP)
         .header(hosts::switcher(s, k, layer))
         .header(global)
         .header(browse)
@@ -180,43 +209,106 @@ pub fn scope_title(scope: &Scope, what: &str) -> String {
     }
 }
 
-/// Skills or MCP servers of the open scope, in the toolbar: segments as the kit draws them,
-/// keyed so a test (or a scene) can pick one.
-pub fn page_tabs(s: &App, k: &Kit) -> El {
-    let c = &k.c;
-    let tab = |key: &str, label: &str, on: bool, open: fn(&mut App)| {
-        let seg = row()
-            .key(key.to_string())
-            .role("radio")
-            .label(label.to_string())
-            .focusable(true)
-            .focus_selected(on)
-            .focus_ring(2.0, 1.0, c.border_focus)
-            .h(28.0)
-            .px(12.0)
-            .center()
-            .radius(6.0)
-            .cursor(rune::Cursor::Pointer)
-            .on_press(open)
-            .child(text(label.to_string()).font(rune::TextStyle { line_height: 13.0, ..k.ty.ui }).color(if on { c.text_base } else { c.text_muted }).a11y_hidden());
-        if on {
-            seg.fill(c.bg_base).box_shadow(rune::Shadow { spread: 0.5, color: c.border_strong, ..Default::default() })
-        } else {
-            seg.hover(c.hover)
-        }
-    };
-    row()
-        .key("page-tabs")
-        .role("radiogroup")
-        .label("Show")
-        .focus_group()
-        .h(28.0)
-        .center_y()
-        .radius(6.0)
-        .fill(c.layer_01)
-        .box_shadow(rune::Shadow { spread: 0.5, color: c.border_base, ..Default::default() })
-        .child(tab("tab-skills", "Skills", s.page == Page::Installed, |s| s.open_skills()))
-        .child(tab("tab-mcp", "MCP servers", s.page == Page::Mcp, |s| s.open_mcp()))
+/// Skills or MCP servers of the open scope, in the toolbar: `ds::tabs`, keyed so a test (or a
+/// scene) can pick one. Their end goes into `App::seen` for key handling.
+fn page_tabs(s: &App, k: &Kit) -> El {
+    let current = if s.page == Page::Mcp { 1 } else { 0 };
+    let pick = |s: &mut App, i, _: &mut Tx| if i == 1 { s.open_mcp() } else { s.open_skills() };
+    ds::tabs(k, "Show", &[("tab-skills", "Skills"), ("tab-mcp", "MCP servers")], current, pick).key("page-tabs").on_layout_tx(|s: &mut App, r, tx: &mut Tx| {
+        s.seen.tabs_end = Some(r[0] + r[2]);
+        tx.live_only();
+    })
+}
+
+/// The toolbar of a page with tabs: the page tabs, then the page's title (it truncates first),
+/// on the leading side; `trailing` (the page's buttons) on the other.
+pub fn toolbar(s: &App, k: &Kit, title: impl Into<String>, trailing: El) -> Toolbar {
+    // One leading child, so the tabs and the title sit `S3` apart rather than at the kit's slot gap.
+    let leading = row().gap(space::S3).center_y().shrink().min_w(0.0).child(page_tabs(s, k)).child(ds::toolbar_title(k, title).shrink().min_w(0.0));
+    Toolbar::new().leading(leading).trailing(trailing)
+}
+
+/// The toolbar of a page with tabs and no title: a narrow list pane, where the title has no room
+/// left beside the page's buttons.
+pub fn toolbar_untitled(s: &App, k: &Kit, trailing: El) -> Toolbar {
+    Toolbar::new().leading(page_tabs(s, k)).trailing(trailing)
+}
+
+/// What the toolbar of a page with tabs has left for the page's title and buttons
+/// (`room_beside_tabs`), as the view reads the layout. `None` before the first layout.
+fn toolbar_room(cx: &Cx<App>) -> Option<f32> {
+    room_beside_tabs(cx.layout_with("main-pane", |r| r[0] + r[2]), cx.layout_with("page-tabs", |r| r[0] + r[2]))
+}
+
+/// What the toolbar of a page with tabs has left for the page's title and buttons: from the
+/// tabs' end to the list pane's, less the kit band's end padding (`S3`) and the `S2` gaps either
+/// side of its spacer. `None` before the first layout. The pane's width does not depend on what
+/// the toolbar holds, so a page that folds its buttons by this never flips back and forth.
+fn room_beside_tabs(pane_end: Option<f32>, tabs_end: Option<f32>) -> Option<f32> {
+    Some(pane_end? - tabs_end? - space::S3 - 2.0 * space::S2)
+}
+
+/// Whether controls `widths` wide fit side by side in `room`, `S2` apart: the toolbars, the
+/// skill inspector's action row and the skills.sh footer measure their rows with it before
+/// layout (`ds::button_width`).
+pub fn row_fits(widths: &[f32], room: f32) -> bool {
+    let gaps = widths.len().saturating_sub(1) as f32 * space::S2;
+    widths.iter().sum::<f32>() + gaps <= room
+}
+
+/// Whether a page's wide toolbar fits the `room` beside its tabs (`toolbar_room`; `None` before
+/// the first layout fits): the title `S3` after the tabs, then `icons` icon buttons and one text
+/// button with an icon labelled `button`, `S2` apart. The title counts at most `ROW_NAME_MIN`:
+/// past that it truncates, so a long project name never folds the buttons while they fit beside
+/// a shortened title.
+pub fn toolbar_fits(k: &Kit, room: Option<f32>, title: &str, icons: usize, button: &str) -> bool {
+    let title = space::S3 + ds::toolbar_title_width(k, title).min(size::ROW_NAME_MIN);
+    let mut controls = vec![Place::Bar.height(); icons];
+    controls.push(ds::button_width(k, button, Place::Bar, true));
+    room.is_none_or(|room| row_fits(&controls, room - title))
+}
+
+/// The Skills toolbar's "…" menu is drawn: open, on the Skills page with no host's pane in its
+/// place, in a toolbar too narrow for its buttons (`installed::toolbar_folds`) as layout last
+/// reported it (`App::seen`). Only then does it hold the keys.
+fn toolbar_menu_shown(s: &App) -> bool {
+    // The kit's type is the same in both themes, so either measures the toolbar.
+    let k = Kit::neutral(false);
+    s.toolbar_menu && s.page == Page::Installed && !s.host_pending() && installed::toolbar_folds(s, &k, room_beside_tabs(s.seen.pane_end, s.seen.tabs_end))
+}
+
+/// Cancel in a dialog's footer.
+pub fn cancel(key: &str, k: &Kit, on: impl Fn(&mut App) + 'static) -> El {
+    ds::button("Cancel", Place::Bar).on_press(on).build(k).key(key.to_string())
+}
+
+/// "1 change", "3 changes".
+pub fn changes(n: usize) -> String {
+    format!("{n} change{}", if n == 1 { "" } else { "s" })
+}
+
+/// A plan's changes card label: "3 changes", or "Changes" when there are none.
+pub fn changes_heading(n: usize) -> String {
+    if n == 0 { "Changes".to_string() } else { changes(n) }
+}
+
+/// The apply button of a plan of `n` changes, `danger` when it removes: loading while it is
+/// applied, disabled when there is nothing to do.
+pub fn apply_button(applying: bool, n: usize, danger: bool) -> Button {
+    let label = if n == 0 { "Nothing to do".to_string() } else { format!("Apply {}", changes(n)) };
+    match (applying, danger) {
+        (true, _) => ds::primary("Applying…", Place::Bar).loading(true),
+        (false, true) => ds::danger(label, Place::Bar).disabled(n == 0),
+        (false, false) => ds::primary(label, Place::Bar).disabled(n == 0),
+    }
+}
+
+/// The toolbar of a page without tabs (skills.sh): the title on the leading side, `trailing` on
+/// the other.
+pub fn toolbar_untabbed(k: &Kit, title: impl Into<String>, trailing: El) -> Toolbar {
+    // The title truncates before the trailing controls give way.
+    let leading = row().shrink().min_w(0.0).child(ds::toolbar_title(k, title).shrink().min_w(0.0));
+    Toolbar::new().leading(leading).trailing(trailing)
 }
 
 /// A pane's content in a vertical scroll view that fills the pane.
@@ -224,29 +316,20 @@ pub fn scroll_pane(key: &str, content: El) -> El {
     col().key(key.to_string()).w_full().h_full().min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(content)
 }
 
-/// A small heading over a group in a pane.
-pub fn heading(label: &str, k: &Kit) -> El {
-    text(label.to_string()).font(k.ty.small_medium).color(k.c.text_faint)
-}
-
-pub fn dot(color: Color) -> El {
-    el().size(7.0, 7.0).radius(3.5).fill(color)
-}
-
-pub fn empty(title: &str, detail: &str, k: &Kit) -> El {
-    col()
-        .w_full()
-        .py(48.0)
-        .gap(6.0)
-        .items_center()
-        .child(text(title.to_string()).font(k.ty.ui_medium).color(k.c.text_muted))
-        .child(text(detail.to_string()).font(k.ty.small).color(k.c.text_faint).wrap())
-}
-
 pub fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if shell::is_sidebar_toggle(ev) {
         s.sidebar.toggle();
+        // The list's width changes, and with it whether the Skills toolbar folds into "…".
+        s.toolbar_menu = false;
+        // The inspector's width may change too, and with it what its "…" holds.
+        s.skill_menu = false;
+        s.mcp_menu = false;
         return true;
+    }
+    // An open "…" takes the keys: arrows move through it, Escape closes it. Only while it is
+    // drawn, so a flag left behind never swallows a key.
+    if s.skill_menu_shown() || s.mcp_menu_shown() || toolbar_menu_shown(s) {
+        return false;
     }
     if ev.key == rune::Key::Escape && !s.checked.is_empty() && !s.sync_open() && s.confirm_remove.is_none() {
         s.clear_checked();
@@ -303,7 +386,6 @@ pub fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
     false
 }
 
-/// The row of a key-value field in the inspector.
 /// `key` with the platform's command modifier, as shortcut hints show it: "⌘N", or "Ctrl+N".
 pub fn key_label(key: &str) -> String {
     if cfg!(target_os = "macos") { format!("⌘{key}") } else { format!("Ctrl+{key}") }
@@ -312,71 +394,4 @@ pub fn key_label(key: &str) -> String {
 /// How to pick several rows with the mouse.
 pub fn pick_hint() -> &'static str {
     if cfg!(target_os = "macos") { "⌘- or ⇧-click" } else { "Ctrl- or Shift-click" }
-}
-
-// The inspector's type ladder: title (15 semibold), section title (13 semibold), value (13 or
-// 12 mono, text colour), label (11, muted), path and note (11, faint).
-
-/// An inspector's title: a step above its section titles.
-pub fn inspector_title(t: impl Into<String>, k: &Kit) -> El {
-    text(t.into()).font(TextStyle::new(15.0, 600.0).lh(20.0)).color(k.c.text_base).wrap()
-}
-
-/// A section's title row in an inspector, with an optional control on the right.
-pub fn section(title: &str, trailing: Option<El>, k: &Kit) -> El {
-    let mut head = row().w_full().gap(8.0).center_y().child(text(title.to_string()).font(TextStyle::new(13.0, 600.0).lh(20.0)).color(k.c.text_base).grow(1.0).min_w(0.0));
-    if let Some(t) = trailing {
-        head = head.child(t);
-    }
-    head
-}
-
-/// A labelled value: the label quiet, the value in the text colour.
-pub fn prop(label: &str, value: El, k: &Kit) -> El {
-    col().w_full().gap(4.0).child(text(label.to_string()).font(k.ty.caption()).color(k.c.text_muted)).child(value)
-}
-
-/// A boxed block of monospace text.
-pub fn code_box(inner: El, k: &Kit) -> El {
-    col().w_full().px(10.0).py(7.0).radius(k.radius.md).fill(k.c.layer_01).border(1.0, k.c.border_muted).child(inner)
-}
-
-/// Monospace words that wrap only between words, so `--stdio` never splits; a word longer than
-/// the line still breaks.
-pub fn words(line: &str, k: &Kit) -> El {
-    let mut flow = row().w_full().flex_wrap().gaps(0.0, 7.0);
-    for w in line.split(' ').filter(|w| !w.is_empty()) {
-        flow = flow.child(text(w.to_string()).font(k.ty.mono).color(k.c.text_base).wrap_anywhere().shrink().min_w(0.0).selectable(true).selection_color(k.selection()));
-    }
-    flow
-}
-
-/// A SKILL.md body in an inspector: body text at UI size and headings below the inspector's
-/// own titles, so the file never outranks the pane around it.
-pub fn skill_md(md: String, k: &Kit) -> El {
-    let style = MarkdownStyle::from_kit(k)
-        .body_font(k.ty.ui)
-        .heading_font(1, TextStyle::new(13.0, 600.0).lh(20.0))
-        .heading_font(2, TextStyle::new(13.0, 600.0).lh(20.0))
-        .heading_font(3, TextStyle::new(13.0, 500.0).lh(20.0))
-        .code_block_font(k.ty.mono);
-    Markdown::new(md)
-        .style(style)
-        .on_link_tx(|_: &mut App, url: &str, tx: &mut Tx| {
-            let _ = tx.open_url(url);
-        })
-        .build(k)
-}
-
-pub fn mono(t: impl Into<String>, k: &Kit) -> El {
-    text(t.into()).font(k.ty.mono).color(k.c.text_muted).wrap_anywhere().selectable(true).selection_color(k.selection())
-}
-
-pub fn inspector_body(k: &Kit) -> El {
-    let _ = k;
-    col().key("inspector").w_full().padding(16.0).gap(16.0)
-}
-
-pub fn row_gap() -> El {
-    row().gap(8.0).center_y()
 }

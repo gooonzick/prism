@@ -616,6 +616,7 @@ impl App {
             && self.mcp.get(into.text.trim()).is_some()
         {
             self.mcp_selected = Some(into.text.trim().to_string());
+            self.mcp_menu = false;
         }
     }
 }

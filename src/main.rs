@@ -11,6 +11,8 @@ mod agents;
 #[cfg(feature = "gui")]
 mod app;
 mod cli;
+#[cfg(feature = "gui")]
+mod ds;
 mod fsops;
 mod hosts;
 mod mcp;
@@ -25,6 +27,8 @@ mod sync;
 #[cfg(feature = "gui")]
 mod ui;
 #[cfg(all(test, feature = "gui"))]
+mod ui_lint;
+#[cfg(all(test, feature = "gui"))]
 mod ui_tests;
 mod wire;
 
@@ -37,6 +41,11 @@ use crate::agents::Paths;
 use crate::app::App;
 #[cfg(feature = "gui")]
 use crate::store::Settings;
+
+/// The smallest window: with the default sidebar (232) it shows all three panes (232 +
+/// `ds::size::LIST_MIN` + `ds::size::INSPECTOR_MIN`).
+#[cfg(feature = "gui")]
+pub const MIN_WINDOW: (f32, f32) = (860.0, 520.0);
 
 #[cfg(feature = "gui")]
 fn init() -> App {
@@ -85,6 +94,7 @@ type Scene = (&'static str, fn(&mut App));
 
 #[cfg(feature = "gui")]
 static SCENES: &[Scene] = &[
+    ("ds", |s| s.gallery = true),
     ("detail", |s| {
         if let Some(name) = s.inv.skills.first().map(|x| x.name.clone()) {
             s.select(&name);
@@ -231,7 +241,7 @@ fn window() {
         setup: Some(setup),
         poll: Some(poll),
         on_key: Some(ui::on_key),
-        min_size: Some((820.0, 520.0)),
+        min_size: Some(MIN_WINDOW),
         scenes: SCENES,
         // Commands, paths and keys read as code: the system monospace (SF Mono on macOS).
         families: ("Inter", "ui-monospace"),

@@ -1,0 +1,302 @@
+//! Controls: buttons, the list filter and the overflow menu. Each returns a rune-kit builder
+//! already sized for its place; the caller adds `on_press`, `help` and a key, then builds it.
+
+use std::rc::Rc;
+
+use rune::{El, Icon, Shadow, TextEdit, TextStyle, Tx, row, text};
+use rune_kit::{Button, ButtonVariant, IconButton, IconButtonVariant, Kit, Menu, MenuItem, SegmentedControl, Switch, TextInput, glyphs};
+
+use super::{Place, radius, size, space};
+
+/// Three dots: rune-kit's glyph set has no "more".
+static MORE: Icon = Icon {
+    name: "ds-more",
+    view: 16.0,
+    body: r#"<circle cx="3.5" cy="8" r="1.1" fill="currentColor"/><circle cx="8" cy="8" r="1.1" fill="currentColor"/><circle cx="12.5" cy="8" r="1.1" fill="currentColor"/>"#,
+};
+
+fn with(label: impl Into<String>, place: Place, variant: ButtonVariant) -> Button {
+    Button::new(label).variant(variant).control_size(place.control())
+}
+
+/// The ordinary button: outlined.
+pub fn button(label: impl Into<String>, place: Place) -> Button {
+    with(label, place, ButtonVariant::Outline)
+}
+
+/// The one main action of a view.
+pub fn primary(label: impl Into<String>, place: Place) -> Button {
+    with(label, place, ButtonVariant::Contrast)
+}
+
+/// A destructive action.
+pub fn danger(label: impl Into<String>, place: Place) -> Button {
+    with(label, place, ButtonVariant::Danger)
+}
+
+/// A button with no outline, for secondary actions.
+pub fn quiet(label: impl Into<String>, place: Place) -> Button {
+    with(label, place, ButtonVariant::Ghost)
+}
+
+/// A text button whose action is running: `ds::primary("Applying…", Place::Bar).loading(true)`.
+/// While `on` it shows the kit's loading look and takes no presses, so the label says what runs
+/// ("Updating…"); `false` leaves the button as it was. For `button`, `primary`, `quiet` and
+/// `danger`.
+pub trait LoadingButton {
+    fn loading(self, on: bool) -> Self;
+}
+
+impl LoadingButton for Button {
+    fn loading(self, on: bool) -> Self {
+        if on { self.variant(ButtonVariant::Loading).disabled(true) } else { self }
+    }
+}
+
+/// The ordinary button with a copy icon, which becomes a check while `copied` (the app clears it
+/// after `motion::COPY_CONFIRM_SECS`). While copied its accessible name is "Copied"; the visible
+/// label stays.
+pub fn copy_button(label: impl Into<String>, place: Place, copied: bool) -> Button {
+    if !copied {
+        return button(label, place).icon(&glyphs::COPY);
+    }
+    let label = label.into();
+    button("Copied", place).icon(&glyphs::CHECK).label_with(move |font, ink| text(label).font(font).color(ink))
+}
+
+/// The width a text button (`button`, `primary`, `quiet`, `danger`) of `label` takes at `place`,
+/// with its icon or without, as the kit lays it out: for a caller that has to know what fits
+/// before layout, such as a toolbar that folds its buttons into "…".
+pub fn button_width(k: &Kit, label: &str, place: Place, icon: bool) -> f32 {
+    // The kit's push button: 12 points of padding a side at Regular, 14 at Large; its label in
+    // the medium UI face; a 16-point icon 6 points before the label.
+    let pad = match place {
+        Place::Inspector => 12.0,
+        Place::List | Place::Bar => 14.0,
+    };
+    let (label, _) = rune::text::measure(label, &[], k.ty.ui_medium, None);
+    let icon = if icon { size::ICON + 6.0 } else { 0.0 };
+    2.0 * pad + icon + label
+}
+
+/// An icon-only button; `label` is its accessible name and tooltip.
+pub fn icon_button(icon: &'static Icon, label: impl Into<String>, place: Place) -> IconButton {
+    let label = label.into();
+    IconButton::new(icon).variant(IconButtonVariant::GhostMuted).control_size(place.control()).label(label.clone()).help(label)
+}
+
+/// A `quiet` button with an eye that shows or hides a card's masked values: "Show values" while
+/// they are hidden, "Hide values" while `shown`. The caller adds `help`, `on_press` and a key.
+pub fn reveal(shown: bool, place: Place) -> Button {
+    let (label, icon) = if shown { ("Hide values", &glyphs::EYE_OFF) } else { ("Show values", &glyphs::EYE) };
+    quiet(label, place).icon(icon)
+}
+
+/// A switch at today's size: switches are not buttons, so `Place` does not apply. Dark gets the
+/// kit's compact switch at its default (Mini, 36 × 16); light gets the standard switch, because
+/// off, the compact one disappears on a light pane (and the standard one on a dark pane). The
+/// caller adds `label`, `hide_label`, `on_toggle`, then builds and keys it.
+pub fn switch(k: &Kit, on: bool) -> Switch {
+    let s = Switch::new(on);
+    if k.dark { s } else { s.standard() }
+}
+
+/// A text field whose text is masked until its eye is pressed, the eye after the field
+/// ("Show value" / "Hide value"). Build it with `secret_input`; `key` keys the field, `eye_key`
+/// the eye.
+pub struct SecretInput {
+    input: TextInput,
+    eye: IconButton,
+    key: Option<String>,
+    eye_key: Option<String>,
+}
+
+/// A `SecretInput` over `edit`, shown when `shown`; `on_toggle` flips `shown`. The field takes
+/// the width left beside the eye.
+pub fn secret_input<S: 'static>(edit: &TextEdit, on_edit: impl Fn(&mut S) -> &mut TextEdit + 'static, shown: bool, on_toggle: impl Fn(&mut S) + 'static) -> SecretInput {
+    let mut s = SecretInput::unwired(edit, shown, on_toggle);
+    s.input = s.input.on_edit(on_edit);
+    s
+}
+
+impl SecretInput {
+    /// The field with no edit handler, so typing changes nothing: the gallery's, which has no
+    /// state to edit.
+    pub(super) fn unwired<S: 'static>(edit: &TextEdit, shown: bool, on_toggle: impl Fn(&mut S) + 'static) -> SecretInput {
+        let input = TextInput::new(edit).width(None).secure().revealed(shown);
+        let (label, icon) = if shown { ("Hide value", &glyphs::EYE_OFF) } else { ("Show value", &glyphs::EYE) };
+        SecretInput { input, eye: icon_button(icon, label, Place::Inspector).on_press(on_toggle), key: None, eye_key: None }
+    }
+
+    /// The field's accessible name.
+    pub fn label(mut self, l: impl Into<String>) -> Self {
+        self.input = self.input.label(l);
+        self
+    }
+
+    pub fn placeholder(mut self, p: impl Into<String>) -> Self {
+        self.input = self.input.placeholder(p);
+        self
+    }
+
+    pub fn invalid(mut self, on: bool) -> Self {
+        self.input = self.input.invalid(on);
+        self
+    }
+
+    pub fn on_submit<S: 'static>(mut self, f: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
+        self.input = self.input.on_submit(f);
+        self
+    }
+
+    /// Keys the field.
+    pub fn key(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(key.into());
+        self
+    }
+
+    /// Keys the eye.
+    pub fn eye_key(mut self, key: impl Into<String>) -> Self {
+        self.eye_key = Some(key.into());
+        self
+    }
+
+    pub fn build(self, k: &Kit) -> El {
+        let mut input = self.input.build(k);
+        if let Some(key) = self.key {
+            input = input.key(key);
+        }
+        let mut eye = self.eye.build(k);
+        if let Some(key) = self.eye_key {
+            eye = eye.key(key);
+        }
+        rune::row().w_full().gap(space::S1).center_y().child(input.grow(1.0).min_w(0.0)).child(eye)
+    }
+}
+
+/// The list filter: a search field at full width with a clear button once there is text. The
+/// caller adds `label`, `on_edit` and a key.
+pub fn filter(edit: &TextEdit, placeholder: &str) -> TextInput {
+    let mut input = TextInput::new(edit).placeholder(placeholder).leading_icon(&glyphs::SEARCH).width(None);
+    if !edit.text.is_empty() {
+        input = input.clear_button();
+    }
+    input
+}
+
+/// Segments that narrow a list ("All 12", "Broken 1"), for `Page::segments`: as wide as the
+/// labels need, at the list's control height (the kit's segments are 28, `Place::List`). `label`
+/// is the accessible name of the choice ("Show"). The caller adds a key, then builds it.
+pub fn segments<S: 'static>(labels: &[String], current: Option<usize>, label: &str, on_pick: impl Fn(&mut S, usize, &mut Tx) + Clone + 'static) -> SegmentedControl {
+    SegmentedControl::new(labels, current).label(label).fit().on_pick(on_pick)
+}
+
+/// Tabs that switch what a window shows (Skills / MCP servers): the kit's segments as they look
+/// in a toolbar, at `Place::Bar` height, but each segment keyed by the caller, since the kit's
+/// `SegmentedControl` keys its segments `segment<i>`. `items` are (key, label); `label` is the
+/// group's accessible name; `on_pick` gets the picked index and the press's `Tx`, as `segments`
+/// does. The caller keys the group. It also serves keyed segments inside a form (an MCP
+/// server's Command / URL), where the segments keep caller keys too.
+pub fn tabs<S: 'static>(k: &Kit, label: &str, items: &[(&str, &str)], current: usize, on_pick: impl Fn(&mut S, usize, &mut Tx) + Clone + 'static) -> El {
+    // The raw values here (0.5 hairline, 2/1 focus ring, 13-point line) and the kit's own colours
+    // and type mirror the kit's `SegmentedControl`, so these tabs read as the same control.
+    let c = &k.c;
+    let height = Place::Bar.height();
+    let hairline = |color| Shadow { spread: 0.5, color, ..Default::default() };
+    let mut group = row().role("radiogroup").label(label.to_string()).focus_group().h(height).center_y().radius(radius::CONTROL).fill(c.layer_01).box_shadow(hairline(c.border_base));
+    for (i, (key, name)) in items.iter().enumerate() {
+        let on = i == current;
+        let pick = on_pick.clone();
+        let ink = if on { c.text_base } else { c.text_muted };
+        let mut seg = row()
+            .key(key.to_string())
+            .role("radio")
+            .label(name.to_string())
+            .position_in_set(i + 1, items.len())
+            .focusable(true)
+            .focus_selected(on)
+            .focus_ring(2.0, 1.0, c.border_focus)
+            .h(height)
+            .px(space::S3)
+            .center()
+            .radius(radius::CONTROL)
+            .cursor(rune::Cursor::Pointer)
+            .on_press_tx(move |s: &mut S, tx: &mut Tx| pick(s, i, tx))
+            .child(text(name.to_string()).font(TextStyle { line_height: 13.0, ..k.ty.ui }).color(ink).a11y_hidden());
+        seg = if on { seg.fill(c.bg_base).box_shadow(hairline(c.border_strong)) } else { seg.hover(c.hover) };
+        group = group.child(seg);
+    }
+    group
+}
+
+/// A toolbar title, in the kit's toolbar type, at the leading edge. It truncates before the
+/// toolbar's buttons give way: the kit's centred title does not, so in the narrowest list
+/// (`size::LIST_MIN`) it would sit under the buttons.
+pub fn toolbar_title(k: &Kit, title: impl Into<String>) -> El {
+    text(title.into()).key("title").font(k.ty.ui_medium).color(k.c.text_base).truncate()
+}
+
+/// The width `toolbar_title` takes untruncated.
+pub fn toolbar_title_width(k: &Kit, title: &str) -> f32 {
+    rune::text::measure(title, &[], k.ty.ui_medium, None).0
+}
+
+/// One entry of an overflow menu.
+pub struct MenuAction<S> {
+    pub label: String,
+    pub description: Option<String>,
+    pub disabled: bool,
+    pub run: Box<dyn Fn(&mut S)>,
+}
+
+impl<S> MenuAction<S> {
+    pub fn new(label: impl Into<String>, run: impl Fn(&mut S) + 'static) -> Self {
+        MenuAction { label: label.into(), description: None, disabled: false, run: Box::new(run) }
+    }
+
+    /// A line under the label: what a button's tooltip would say.
+    pub fn description(mut self, s: impl Into<String>) -> Self {
+        self.description = Some(s.into());
+        self
+    }
+
+    pub fn disabled(mut self, on: bool) -> Self {
+        self.disabled = on;
+        self
+    }
+}
+
+/// A "more" button that opens a menu of `actions`. The button is keyed `key`; the menu goes into
+/// `layer`, anchors to the button, and its items are keyed `<key>-popup-item<i>` (rune-kit's
+/// `Menu` fixes the item keys). Choosing an item closes the menu, then runs its action.
+#[allow(clippy::too_many_arguments)] // the brief's signature plus `place`
+pub fn overflow<S: 'static>(
+    k: &Kit,
+    key: &str,
+    place: Place,
+    open: bool,
+    toggle: impl Fn(&mut S) + 'static,
+    close: impl Fn(&mut S) + 'static,
+    actions: Vec<MenuAction<S>>,
+    layer: &mut Vec<El>,
+) -> El {
+    let trigger = icon_button(&MORE, "More actions", place).expanded(open).on_press(toggle).build(k).key(key);
+    let close = Rc::new(close);
+    let mut menu = Menu::new(format!("{key}-popup")).trigger(trigger).open(open).on_close({
+        let close = close.clone();
+        move |s: &mut S| close(s)
+    });
+    for a in actions {
+        let close = close.clone();
+        let run = a.run;
+        let mut item = MenuItem::new(a.label).disabled(a.disabled);
+        if let Some(d) = a.description {
+            item = item.description(d);
+        }
+        menu = menu.item(item.on_select(move |s: &mut S| {
+            close(s);
+            run(s);
+        }));
+    }
+    menu.build(k, layer)
+}

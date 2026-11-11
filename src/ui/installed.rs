@@ -1,97 +1,93 @@
 //! The skills installed in a scope: the toolbar, the filters, the list and its bulk bar.
 
-use rune::{Color, El, Tx, col, row, text};
+use rune::{El, Tx, row};
+use rune_kit::Kit;
 use rune_kit::shell::Toolbar;
-use rune_kit::{Button, ButtonVariant, Checkbox, ControlSize, IconButton, IconButtonVariant, Kit, SegmentedControl, TextInput, glyphs};
 
-use super::{PLUS, REFRESH, SYNC, UPDATE, dot, empty, inspector, page_tabs, scope_title, scroll_pane};
+use super::{PLUS, REFRESH, SYNC, UPDATE, inspector, scope_title};
 use crate::agents::{AGENTS, tilde};
 use crate::app::{App, Filter};
+use crate::ds::{self, ListRow, MenuAction, Page, Place, Selection, Tone, space};
 use crate::scan::{Placement, Skill};
 
 const FILTERS: [Filter; 4] = [Filter::All, Filter::NeedsSync, Filter::Broken, Filter::Updates];
 
-pub fn page(s: &App, k: &Kit, _layer: &mut Vec<El>) -> (El, Toolbar, El) {
+/// `room` is what the toolbar has beside its tabs (`ui::toolbar_room`); `None` before the first
+/// layout. `inspector` is the inspector's drawn width (`ui::inspector_pane`), `None` when the
+/// window has no room for it: then there is no inspector, nor its "…" menu.
+pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>, reduced: bool, room: Option<f32>, inspector: Option<f32>) -> (El, Toolbar, Option<El>) {
     let targets = s.targets();
     let visible = s.visible();
     let unsynced = s.filter_count(Filter::NeedsSync);
-    (main(s, &visible, &targets, k), toolbar(s, unsynced, k), inspector::installed(s, k))
+    let toolbar = toolbar(s, unsynced, room, k, layer);
+    (main(s, &visible, &targets, k, reduced), toolbar, inspector.map(|width| inspector::installed(s, k, layer, width)))
 }
 
-fn toolbar(s: &App, unsynced: usize, k: &Kit) -> Toolbar {
+/// Tabs, the title, New skill, Check skills.sh for updates, Rescan and Sync. When the list pane
+/// is too narrow for them, the title goes, the three icon buttons fold into "…" (⌘N and ⌘R still
+/// reach them through `ui::on_key`) and Sync shows only its icon.
+fn toolbar(s: &App, unsynced: usize, room: Option<f32>, k: &Kit, layer: &mut Vec<El>) -> Toolbar {
     let checking = s.checking.contains(&s.scope);
     // skills.sh is this machine's: a host's skills aren't checked against it.
     let remote = s.is_remote();
     let check_label = if checking { "Checking for updates…" } else { "Check skills.sh for updates" };
-    Toolbar::new().leading(page_tabs(s, k)).title(scope_title(&s.scope, "skills")).trailing(
-        row()
-            .gap(6.0)
-            .center_y()
+    let sync_label = sync_label(unsynced);
+    let title = scope_title(&s.scope, "skills");
+    let trailing = row().gap(space::S2).center_y();
+    if toolbar_folds(s, k, room) {
+        let actions = vec![
+            MenuAction::new("New skill", |s: &mut App| s.open_new_skill()),
+            MenuAction::new(check_label, |s: &mut App| s.check_updates()).disabled(checking || remote),
+            MenuAction::new("Rescan", |s: &mut App| s.rescan()),
+        ];
+        let more = ds::overflow(k, "toolbar-more", Place::Bar, s.toolbar_menu, |s: &mut App| s.toolbar_menu = !s.toolbar_menu, |s: &mut App| s.toolbar_menu = false, actions, layer);
+        let sync = ds::icon_button(&SYNC, sync_label, Place::Bar).on_press(|s: &mut App| s.open_sync()).build(k).key("sync");
+        return super::toolbar_untitled(s, k, trailing.child(more).child(sync));
+    }
+    // The one primary action, unless skills are ticked: then the bulk bar's is.
+    let sync = if unsynced > 0 && s.checked.is_empty() { ds::primary(sync_label, Place::Bar) } else { ds::button(sync_label, Place::Bar) };
+    super::toolbar(
+        s,
+        k,
+        title,
+        trailing
+            .child(ds::icon_button(&PLUS, "New skill", Place::Bar).shortcut("cmd+n").on_press(|s: &mut App| s.open_new_skill()).build(k).key("new-skill"))
+            .child(ds::icon_button(&UPDATE, check_label, Place::Bar).disabled(checking || remote).on_press(|s: &mut App| s.check_updates()).build(k).key("check-updates"))
+            .child(ds::icon_button(&REFRESH, "Rescan", Place::Bar).shortcut("cmd+r").on_press(|s: &mut App| s.rescan()).build(k).key("rescan"))
             .child(
-                IconButton::new(&PLUS)
-                    .variant(IconButtonVariant::GhostMuted)
-                    .label("New skill")
-                    .help("New skill")
-                    .shortcut("cmd+n")
-                    .on_press(|s: &mut App| s.open_new_skill())
+                sync.icon(&SYNC)
+                    .help("Link every skill from .agents into your sync targets")
+                    .on_press(|s: &mut App| s.open_sync())
                     .build(k)
-                    .key("new-skill"),
-            )
-            .child(
-                IconButton::new(&UPDATE)
-                    .variant(IconButtonVariant::GhostMuted)
-                    .label(check_label)
-                    .help(check_label)
-                    .disabled(checking || remote)
-                    .on_press(|s: &mut App| s.check_updates())
-                    .build(k)
-                    .key("check-updates"),
-            )
-            .child(
-                IconButton::new(&REFRESH)
-                    .variant(IconButtonVariant::GhostMuted)
-                    .label("Rescan")
-                    .help("Rescan")
-                    .shortcut("cmd+r")
-                    .on_press(|s: &mut App| s.rescan())
-                    .build(k)
-                    .key("rescan"),
-            )
-            .child(
-                Button::new(match unsynced {
-                    0 => "Sync".to_string(),
-                    1 => "Sync 1 skill".to_string(),
-                    n => format!("Sync {n} skills"),
-                })
-                .icon(&SYNC)
-                // The one primary action, unless skills are ticked: then the bulk bar's is.
-                .variant(if unsynced == 0 || !s.checked.is_empty() { ButtonVariant::Ghost } else { ButtonVariant::Contrast })
-                .control_size(ControlSize::Regular)
-                .help("Link every skill from .agents into your sync targets")
-                .on_press(|s: &mut App| s.open_sync())
-                .build(k)
-                .key("sync"),
+                    .key("sync"),
             ),
     )
 }
 
-fn main(s: &App, visible: &[usize], targets: &[usize], k: &Kit) -> El {
-    let filter = TextInput::new(&s.filter)
-        .placeholder("Filter skills")
-        .leading_icon(&glyphs::SEARCH)
-        .clear_button()
-        .label("Filter skills")
-        .width(None)
-        .on_edit(|s: &mut App| &mut s.filter)
-        .build(k)
-        .key("filter");
-    let mut list = col().key("skills").w_full().gap(2.0);
+/// "Sync", "Sync 1 skill", "Sync 3 skills".
+fn sync_label(unsynced: usize) -> String {
+    match unsynced {
+        0 => "Sync".to_string(),
+        1 => "Sync 1 skill".to_string(),
+        n => format!("Sync {n} skills"),
+    }
+}
+
+/// Whether the Skills toolbar folds into "…" in `room` (`ui::toolbar_room`): the wide one, the
+/// title, three icon buttons and Sync, doesn't fit.
+pub fn toolbar_folds(s: &App, k: &Kit, room: Option<f32>) -> bool {
+    !super::toolbar_fits(k, room, &scope_title(&s.scope, "skills"), 3, &sync_label(s.filter_count(Filter::NeedsSync)))
+}
+
+fn main(s: &App, visible: &[usize], targets: &[usize], k: &Kit, reduced: bool) -> El {
+    let filter = ds::filter(&s.filter, "Filter skills").label("Filter skills").on_edit(|s: &mut App| &mut s.filter).build(k).key("filter");
+    let mut page = Page::new("installed").filter(filter).segments(filters(s, k)).selection(selection(s, visible, k));
     if s.inv.skills.is_empty() {
         let hint = match s.host() {
             Some(h) => format!("Install one from skills.sh, then copy it to {} with prism skills copy --to-host {}.", h.name, h.name),
             None => format!("Install one from skills.sh, or make one with New skill ({}).", crate::ui::key_label("N")),
         };
-        list = list.child(empty("No skills here yet", &hint, k));
+        page = page.empty(ds::empty(k, "No skills here yet", hint));
     } else if visible.is_empty() {
         let hint = match s.status_filter {
             Filter::All => "Try another word.",
@@ -100,21 +96,9 @@ fn main(s: &App, visible: &[usize], targets: &[usize], k: &Kit) -> El {
             Filter::Updates if s.checking.contains(&s.scope) => "Still checking skills.sh…",
             Filter::Updates => "Everything is up to date.",
         };
-        list = list.child(empty("Nothing to show", hint, k));
+        page = page.empty(ds::empty(k, "Nothing to show", hint));
     }
-    for &i in visible {
-        list = list.child(skill_row(s, &s.inv.skills[i], targets, k));
-    }
-    col()
-        .key("installed")
-        .w_full()
-        .h_full()
-        .min_h(0.0)
-        .padding(16.0)
-        .gap(10.0)
-        .child(filters(s, filter, k))
-        .child(list_header(s, visible, k))
-        .child(scroll_pane("skills-scroll", list).grow(1.0))
+    page.rows(visible.iter().map(|&i| skill_row(s, &s.inv.skills[i], targets, k, reduced))).build(k)
 }
 
 fn filter_label(s: &App, f: Filter) -> String {
@@ -127,101 +111,54 @@ fn filter_label(s: &App, f: Filter) -> String {
     }
 }
 
-/// The text filter, then the status filters under it.
-fn filters(s: &App, filter: El, k: &Kit) -> El {
+/// The status filters under the text filter.
+fn filters(s: &App, k: &Kit) -> El {
     let labels: Vec<String> = FILTERS.iter().map(|&f| filter_label(s, f)).collect();
     let current = FILTERS.iter().position(|&f| f == s.status_filter);
-    let segments = SegmentedControl::new(&labels, current)
-        .label("Show")
-        .fit()
-        .on_pick(|s: &mut App, i: usize, _: &mut Tx| s.set_status_filter(FILTERS[i]))
-        .build(k)
-        .key("status-filter");
-    // The search on its own line keeps both readable however narrow the pane gets.
-    col().w_full().gap(10.0).child(filter).child(row().w_full().child(segments))
+    ds::segments(&labels, current, "Show", |s: &mut App, i: usize, _: &mut Tx| s.set_status_filter(FILTERS[i])).build(k).key("status-filter")
 }
 
-/// Above the list: a tick-all box, then either the scope's summary or, with skills ticked,
-/// what can be done to them all.
-fn list_header(s: &App, visible: &[usize], k: &Kit) -> El {
+/// Above the list: a tick-all box, then either the scope's summary (and Clean up) or, with skills
+/// ticked, what can be done to them all.
+fn selection(s: &App, visible: &[usize], k: &Kit) -> El {
     let ticked = visible.iter().filter(|&&i| s.is_checked(&s.inv.skills[i].name)).count();
     let partial = ticked > 0 && ticked < visible.len();
-    let mut all = Checkbox::new(!visible.is_empty() && ticked == visible.len()).indeterminate(partial);
-    if partial {
-        // The kit draws its check for a mixed state unless given another mark.
-        all = all.icon(&glyphs::DASH);
-    }
-    let all = all
-        .label(if ticked == visible.len() && ticked > 0 { "Untick all" } else { "Tick all shown" })
-        .hide_label()
-        .disabled(visible.is_empty())
-        .on_toggle(|s: &mut App| s.toggle_all_visible())
-        .build(k)
-        .key("check-all");
+    let all = !visible.is_empty() && ticked == visible.len();
+    let sel = Selection::new(all, partial, !visible.is_empty(), |s: &mut App| s.toggle_all_visible())
+        .label(if all { "Untick all" } else { "Tick all shown" })
+        .clear_help("Clear selection (Esc)");
     let n = s.checked.len();
-    let middle = if n == 0 {
-        let total = s.inv.skills.len();
-        let root = tilde(&s.inv.scope.root(&s.paths), &s.paths);
-        let summary = format!("{total} skill{} in {root} · {} to pick several", if total == 1 { "" } else { "s" }, crate::ui::pick_hint());
-        let mut r = row().grow(1.0).min_w(0.0).gap(12.0).center_y().child(text(summary).font(k.ty.small).color(k.c.text_faint).grow(1.0).min_w(0.0).truncate());
-        let broken = crate::sync::broken_links(&s.inv).len();
-        if broken > 0 {
-            r = r.child(
-                Button::new(format!("Clean up {broken} broken link{}", if broken == 1 { "" } else { "s" }))
-                    .variant(ButtonVariant::GhostMuted)
-                    .control_size(ControlSize::Small)
-                    .help("Delete links whose target is gone (Undo brings them back)")
-                    .on_press(|s: &mut App| s.remove_broken())
-                    .build(k)
-                    .key("clean-broken"),
-            );
-        }
-        r
-    } else {
-        bulk_bar(s, n, k)
-    };
-    row().w_full().h(36.0).px(12.0).gap(12.0).center_y().child(all).child(middle)
+    if n > 0 {
+        return bulk_bar(s, n, sel, k).build(k);
+    }
+    let total = s.inv.skills.len();
+    let root = tilde(&s.inv.scope.root(&s.paths), &s.paths);
+    let mut sel = sel.summary(format!("{total} skill{} in {root} · {} to pick several", if total == 1 { "" } else { "s" }, crate::ui::pick_hint()));
+    let broken = crate::sync::broken_links(&s.inv).len();
+    if broken > 0 {
+        sel = sel.action(
+            ds::quiet(format!("Clean up {broken} broken link{}", if broken == 1 { "" } else { "s" }), Place::List)
+                .help("Delete links whose target is gone (Undo brings them back)")
+                .on_press(|s: &mut App| s.remove_broken())
+                .build(k)
+                .key("clean-broken"),
+        );
+    }
+    sel.build(k)
 }
 
-fn bulk_bar(s: &App, n: usize, k: &Kit) -> El {
+/// The selection line with `n` skills ticked: Sync, Update (when any has one), Copy to…, and
+/// Remove… on the right.
+fn bulk_bar(s: &App, n: usize, sel: Selection<App>, k: &Kit) -> Selection<App> {
     let with_updates: Vec<String> = s.checked.iter().filter(|x| s.has_update(x)).cloned().collect();
-    let mut bar = row()
-        .key("bulk-bar")
-        .grow(1.0)
-        .min_w(0.0)
-        .gap(8.0)
-        .center_y()
-        .child(
-            row()
-                .key("bulk-clear")
-                .role("button")
-                .label("Clear selection")
-                .help("Clear selection (Esc)")
-                .focusable(true)
-                .cursor(rune::Cursor::Pointer)
-                .gap(4.0)
-                .center_y()
-                .on_press(|s: &mut App| s.clear_checked())
-                .child(text(format!("{n} selected")).font(k.ty.small_medium).color(k.c.text_base))
-                .child(rune::icon(&glyphs::CLOSE, 12.0).color(k.c.icon_muted)),
-        )
-        .child(
-            Button::new("Sync")
-                .icon(&SYNC)
-                .variant(ButtonVariant::Contrast)
-                .control_size(ControlSize::Small)
-                .help("Sync only the selected skills")
-                .on_press(|s: &mut App| s.open_sync_checked())
-                .build(k)
-                .key("bulk-sync"),
-        );
+    let mut sel = sel
+        .picked(n, |s: &mut App| s.clear_checked())
+        .action(ds::primary("Sync", Place::List).icon(&SYNC).help("Sync only the selected skills").on_press(|s: &mut App| s.open_sync_checked()).build(k).key("bulk-sync"));
     if !with_updates.is_empty() {
         let count = with_updates.len();
-        bar = bar.child(
-            Button::new(if count == n { "Update".to_string() } else { format!("Update {count}") })
+        sel = sel.action(
+            ds::button(if count == n { "Update".to_string() } else { format!("Update {count}") }, Place::List)
                 .icon(&UPDATE)
-                .variant(ButtonVariant::Outline)
-                .control_size(ControlSize::Small)
                 .disabled(s.updating.is_some())
                 .on_press(move |s: &mut App| s.update(with_updates.clone()))
                 .build(k)
@@ -229,120 +166,70 @@ fn bulk_bar(s: &App, n: usize, k: &Kit) -> El {
         );
     }
     if s.can_copy() {
-        bar = bar.child(
-            Button::new("Copy to…")
-                .variant(ButtonVariant::Outline)
-                .control_size(ControlSize::Small)
+        sel = sel.action(
+            ds::button("Copy to…", Place::List)
                 .help("Copy the selected skills into another scope or machine")
                 .on_press(|s: &mut App| s.open_copy(s.checked.clone()))
                 .build(k)
                 .key("bulk-copy"),
         );
     }
-    bar.child(row().grow(1.0)).child(
-        Button::new("Remove…")
-            .variant(ButtonVariant::Danger)
-            .control_size(ControlSize::Small)
-            .on_press(|s: &mut App| s.confirm_remove_checked())
-            .build(k)
-            .key("bulk-remove"),
-    )
+    sel.danger(ds::danger("Remove…", Place::List).on_press(|s: &mut App| s.confirm_remove_checked()).build(k).key("bulk-remove"))
 }
 
-/// The agents a row shows chips for: every agent that has it, `.agents` first.
+/// The agents a row shows tags for: every agent that has it, `.agents` first.
 fn shown_agents(skill: &Skill) -> Vec<usize> {
     (0..AGENTS.len()).filter(|&a| skill.placements[a] != Placement::Missing).collect()
 }
 
-/// A skill's sync state in a few words, its colour, and the detail for its tooltip.
-fn sync_status(skill: &Skill, targets: &[usize], k: &Kit) -> (String, Color, String) {
+/// A skill's sync state in a few words, its tone, and the detail for its tooltip.
+pub(super) fn sync_status(skill: &Skill, targets: &[usize]) -> (String, Tone, String) {
     let missing: Vec<&str> = targets.iter().filter(|&&t| skill.placements[t] == Placement::Missing).map(|&t| AGENTS[t].name).collect();
     match skill.canonical() {
-        Placement::Broken(_) => ("broken in .agents".into(), k.c.danger.icon, "Its .agents entry is a link to nothing".into()),
-        Placement::Missing if !skill.placements.iter().any(Placement::present) => {
-            ("broken links".into(), k.c.danger.icon, "Every copy is a link to nothing".into())
-        }
-        Placement::Missing => ("not in .agents".into(), k.c.warning.icon, "Sync moves it into .agents and links it back".into()),
-        _ if missing.is_empty() => ("synced".into(), k.c.success.icon, "Linked into every sync target".into()),
-        _ => (format!("{} to link", missing.len()), k.c.text_faint, format!("Not linked into {}", missing.join(", "))),
+        Placement::Broken(_) => ("broken in .agents".into(), Tone::Bad, "Its .agents entry is a link to nothing".into()),
+        Placement::Missing if !skill.placements.iter().any(Placement::present) => ("broken links".into(), Tone::Bad, "Every copy is a link to nothing".into()),
+        Placement::Missing => ("not in .agents".into(), Tone::Warn, "Sync moves it into .agents and links it back".into()),
+        _ if missing.is_empty() => ("synced".into(), Tone::Ok, "Linked into every sync target".into()),
+        _ => (format!("{} to link", missing.len()), Tone::Neutral, format!("Not linked into {}", missing.join(", "))),
     }
 }
 
-fn skill_row(s: &App, skill: &Skill, targets: &[usize], k: &Kit) -> El {
-    let selected = s.selected.as_deref() == Some(skill.name.as_str());
-    let ticked = s.is_checked(&skill.name);
-    let name = skill.name.clone();
-    let tick_name = skill.name.clone();
-    let tick = Checkbox::new(ticked)
-        .label(format!("Select {}", skill.name))
-        .hide_label()
-        .on_toggle_tx(move |s: &mut App, tx: &mut Tx| s.click_tick(&tick_name, tx.mods()))
-        .build(k)
-        .key(format!("check-{}", skill.name));
-    let mut chips = row().gap(4.0).center_y();
+fn skill_row(s: &App, skill: &Skill, targets: &[usize], k: &Kit, reduced: bool) -> El {
+    let mut tags = Vec::new();
     if s.has_update(&skill.name) {
-        chips = chips.child(tag("update", Some(k.c.info.icon), "A newer version is on skills.sh", k).key("update-tag"));
+        tags.push(ds::tag(k, "update", Some(Tone::Info), "A newer version is on skills.sh").key("update-tag"));
     }
     if !s.scope.is_global() && s.global_names.contains(&skill.name) {
-        chips = chips.child(tag("also global", None, "A global skill has the same name; agents see both", k).key("shadow-tag"));
+        tags.push(ds::tag(k, "also global", None, "A global skill has the same name; agents see both").key("shadow-tag"));
     }
     for a in shown_agents(skill) {
         let p = &skill.placements[a];
         let help = format!("{}: {}", AGENTS[a].short, if s.inv.shares_canonical[a] { "same folder as .agents" } else { p.label() });
-        chips = chips.child(tag(AGENTS[a].short, placement_color(p, k), &help, k));
+        tags.push(ds::tag(k, AGENTS[a].short, placement_tone(p), help));
     }
-    let (status, color, why) = sync_status(skill, targets, k);
-    let status = row()
-        .key("status")
-        .w(104.0)
-        .gap(6.0)
-        .center_y()
-        .justify_end()
-        .help(why)
-        .child(dot(color))
-        .child(text(status).font(k.ty.small).color(k.c.text_muted));
-    let mut info = col().gap(2.0).grow(1.0).min_w(120.0).child(text(skill.name.clone()).font(k.ty.ui_medium).color(k.c.text_base).truncate());
+    let (word, tone, why) = sync_status(skill, targets);
+    let (name, tick) = (skill.name.clone(), skill.name.clone());
+    let mut r = ListRow::new(format!("skill-{}", skill.name), skill.name.clone())
+        .pick(s.is_checked(&skill.name), format!("Select {}", skill.name), move |s: &mut App, tx: &mut Tx| s.click_tick(&tick, tx.mods()))
+        .pick_key(format!("check-{}", skill.name))
+        .tags(tags)
+        .trailing(ds::status(k, tone, word).key("status").help(why))
+        .selected(s.selected.as_deref() == Some(skill.name.as_str()))
+        .reduced(reduced);
     if !skill.description.is_empty() {
-        info = info.child(text(skill.description.clone()).font(k.ty.small).color(k.c.text_muted).truncate());
+        r = r.meta(skill.description.clone());
     }
-    let r = row()
-        .key(format!("skill-{}", skill.name))
-        .role("button")
-        .label(skill.name.clone())
-        .focusable(true)
-        .w_full()
-        .px(12.0)
-        .py(8.0)
-        .gap(12.0)
-        .center_y()
-        .radius(k.radius.md)
-        .on_press_tx(move |s: &mut App, tx: &mut Tx| s.click_row(&name, tx.mods()))
-        .child(tick)
-        .child(info)
-        .child(chips)
-        .child(status);
-    match (selected, ticked) {
-        (true, _) => r.fill(k.c.layer_02),
-        (false, true) => r.fill(k.c.layer_01).hover(k.c.hover),
-        (false, false) => r.hover(k.c.hover),
-    }
+    r.build_tx(k, move |s: &mut App, tx: &mut Tx| s.click_row(&name, tx.mods()))
 }
 
-pub fn placement_color(p: &Placement, k: &Kit) -> Option<Color> {
+/// The tone of an agent's copy: linked, its own folder, a link elsewhere, broken; none when it
+/// has none.
+pub fn placement_tone(p: &Placement) -> Option<Tone> {
     match p {
-        Placement::Linked => Some(k.c.success.icon),
-        Placement::Dir => Some(k.c.info.icon),
-        Placement::Link(_) => Some(k.c.warning.icon),
-        Placement::Broken(_) => Some(k.c.danger.icon),
+        Placement::Linked => Some(Tone::Ok),
+        Placement::Dir => Some(Tone::Info),
+        Placement::Link(_) => Some(Tone::Warn),
+        Placement::Broken(_) => Some(Tone::Bad),
         Placement::Missing => None,
     }
-}
-
-/// A quiet label, with a dot when it has a state to show.
-pub(super) fn tag(label: &str, color: Option<Color>, help: &str, k: &Kit) -> El {
-    let mut c = row().h(20.0).px(6.0).gap(4.0).center_y().radius(k.radius.sm).border(1.0, k.c.border_weak).help(help.to_string());
-    if let Some(color) = color {
-        c = c.child(dot(color));
-    }
-    c.child(text(label.to_string()).font(k.ty.small).color(k.c.text_muted))
 }

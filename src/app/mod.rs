@@ -21,6 +21,7 @@ use rune::{Latest, TextEdit, Waker};
 use rune_kit::shell::PaneState;
 
 use crate::agents::{self, AGENTS, CANONICAL, Paths, Scope};
+use crate::ds::size;
 use crate::fsops::Journal;
 use crate::hosts::runner::{self as host_runner, MakeRunner};
 use crate::mcp::scan::{self as mcp_scan, McpInventory, McpServer};
@@ -32,6 +33,8 @@ use crate::sync::Plan;
 pub use across::{Across, Planned, Target};
 pub use env::{AddHost, Env, PreviewAnswer, RemoteAnswer, RemoteState, Stash};
 pub use installed::{open_path, reveal_path};
+#[cfg(test)]
+pub use installed::reveal_log;
 pub use mcp::McpFilter;
 pub use mcp_edit::{McpChange, McpDialog, McpForm};
 pub use remote::{RepoListing, UpdateJob};
@@ -58,6 +61,20 @@ pub enum Filter {
     Broken,
     /// With a newer version on its source.
     Updates,
+}
+
+/// Where layout last put what decides which parts of the window are drawn, as `on_layout`
+/// handlers report it (`ui::view` attaches them). The view never writes it and never reads it:
+/// it reads layout through `Cx`. Key handling (`ui::on_key`) has no layout to read, so it goes by
+/// these to tell which menus are drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Seen {
+    /// The window's width.
+    pub window: Option<f32>,
+    /// The list pane's right edge.
+    pub pane_end: Option<f32>,
+    /// The page tabs' right edge.
+    pub tabs_end: Option<f32>,
 }
 
 pub struct Notice {
@@ -99,6 +116,8 @@ pub struct Found {
 }
 
 pub struct App {
+    /// Show the design system's gallery instead of the app (`--scene ds`).
+    pub gallery: bool,
     pub paths: Paths,
     pub settings: Settings,
     pub sidebar: PaneState,
@@ -117,6 +136,19 @@ pub struct App {
     pub anchor: Option<String>,
     /// The inspector lists every agent, not only the relevant ones.
     pub show_all_agents: bool,
+    /// The Skills toolbar's "…" menu is open: the narrow toolbar's New skill, Check skills.sh
+    /// for updates and Rescan. Cleared when the page changes.
+    pub toolbar_menu: bool,
+    /// The skill inspector's "…" menu is open. Cleared when the selection changes or goes, and
+    /// when the scope or page changes; it holds the keys only while it is drawn
+    /// (`skill_menu_shown`).
+    pub skill_menu: bool,
+    /// The MCP server inspector's "…" menu is open. Cleared when the selected server changes or
+    /// goes, and when the scope or page changes; it holds the keys only while it is drawn
+    /// (`mcp_menu_shown`).
+    pub mcp_menu: bool,
+    /// The layout `ui::on_key` goes by (`Seen`).
+    pub seen: Seen,
     /// The open sync dialog's plan.
     pub sync_plan: Option<Plan>,
     /// The open sync dialog's plan, made by the host in view.
@@ -224,10 +256,11 @@ impl App {
         let mcp = mcp_scan::scan(&scope, &paths);
         let last_change = store::load_last_change(&paths);
         let mut app = App {
+            gallery: false,
             paths,
             settings,
-            sidebar: PaneState::new(248.0).range(180.0, 420.0),
-            inspector: PaneState::new(380.0).range(300.0, 640.0).collapsed(),
+            sidebar: PaneState::new(232.0).range(180.0, 420.0),
+            inspector: PaneState::new(380.0).range(size::INSPECTOR_MIN, size::INSPECTOR_READ_MAX).collapsed(),
             page: Page::Installed,
             scope,
             inv,
@@ -238,6 +271,10 @@ impl App {
             checked: Vec::new(),
             anchor: None,
             show_all_agents: false,
+            toolbar_menu: false,
+            skill_menu: false,
+            mcp_menu: false,
+            seen: Seen::default(),
             sync_plan: None,
             sync_host: None,
             sync_only: None,
@@ -408,6 +445,9 @@ impl App {
 
     /// Opens `scope` on the page that's open (skills or MCP); from skills.sh, on its skills.
     pub fn open_scope(&mut self, scope: Scope) {
+        self.toolbar_menu = false;
+        self.skill_menu = false;
+        self.mcp_menu = false;
         if self.page == Page::Browse {
             self.page = Page::Installed;
         }
@@ -437,6 +477,9 @@ impl App {
         self.mcp_filter = McpFilter::All;
         self.mcp_revealed.clear();
         self.host_values.clear();
+        self.toolbar_menu = false;
+        self.skill_menu = false;
+        self.mcp_menu = false;
     }
 
     /// The settings as on disk, where the CLI may have changed them. Settings built in memory
@@ -489,6 +532,7 @@ impl App {
         self.inv = scan::scan(&self.scope, &self.paths);
         if self.selected.as_deref().is_some_and(|n| self.inv.get(n).is_none()) {
             self.selected = None;
+            self.skill_menu = false;
         }
         let inv = &self.inv;
         self.checked.retain(|n| inv.get(n).is_some());
@@ -624,6 +668,32 @@ impl App {
 }
 
 /// [`Latest::set_waker`] over answers of any type.
+impl App {
+    /// The inspector pane as it is drawn in a window `window` wide, or `None` when the window has
+    /// no room for it. The list keeps `size::LIST_MIN`: the inspector is drawn at the stored
+    /// width, or narrower (down to `size::INSPECTOR_MIN`) when that is all the room there is.
+    /// Below that it hides. The stored width in `App::inspector` is never changed, so the
+    /// inspector returns to the width the user chose when the window widens. Before the first
+    /// layout (`window` is `None`) it shows at the stored width. The view asks through
+    /// `ui::inspector_pane`, key handling with `Seen::window`.
+    pub fn inspector_pane(&self, window: Option<f32>) -> Option<PaneState> {
+        let stored = self.inspector;
+        let Some(window) = window else { return Some(stored) };
+        let room = window - self.sidebar.shown_width() - size::LIST_MIN;
+        if room < size::INSPECTOR_MIN {
+            return None;
+        }
+        let mut pane = stored;
+        pane.set_width(stored.width().min(room));
+        Some(pane)
+    }
+
+    /// Whether the inspector pane is drawn in the window as layout last reported it (`Seen`).
+    pub fn inspector_drawn(&self) -> bool {
+        self.inspector_pane(self.seen.window).is_some()
+    }
+}
+
 trait SetWaker {
     fn set(&self, waker: Waker);
 }
