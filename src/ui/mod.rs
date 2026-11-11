@@ -76,7 +76,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     };
     dialogs::sync(s, &k, &mut layer);
     dialogs::remove(s, &k, &mut layer);
-    dialogs::copy(s, &k, &mut layer);
+    dialogs::copy(s, &k, &mut layer, cx.is_reduced_motion());
     dialogs::new_skill(s, &k, &mut layer);
     dialogs::found(s, &k, &mut layer);
     mcp_dialogs::form(s, &k, &mut layer);

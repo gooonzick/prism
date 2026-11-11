@@ -2924,3 +2924,91 @@ fn repo_footer_is_side_by_side_when_it_fits_and_stacks_when_not() {
         assert!(r[0] >= pane[0] && r[0] + r[2] <= pane[0] + pane[2] + 0.5 && r[1] + r[3] <= pane[1] + pane[3] + 0.5, "{r:?} inside {pane:?}");
     }
 }
+
+// Skill dialogs.
+
+impl Harness {
+    /// Sets the window up as the scene `name` does (`--scene name`).
+    fn scene(&mut self, name: &str) {
+        let (_, set) = crate::SCENES.iter().find(|(n, _)| *n == name).unwrap_or_else(|| panic!("no scene {name}"));
+        let set = *set;
+        self.rt.update(move |s, _| set(s));
+        self.settle();
+    }
+}
+
+/// Each skill dialog has its kind's width: Sync is Wide, the confirmations Confirm, the forms
+/// and a host's copy plan Form.
+#[test]
+fn dialog_widths() {
+    use crate::ds::size;
+    let width = |scene: &str, key: &str| {
+        let mut h = three_skills();
+        h.rescan();
+        h.scene(scene);
+        rect_of(&h, key)[2]
+    };
+    assert_eq!(width("sync", "sync-dialog"), size::DIALOG_WIDE);
+    assert_eq!(width("remove", "remove-dialog"), size::DIALOG_CONFIRM);
+    assert_eq!(width("bulk-remove", "remove-dialog"), size::DIALOG_CONFIRM);
+    assert_eq!(width("copy", "copy-dialog"), size::DIALOG_CONFIRM);
+    assert_eq!(width("copy-to-host", "copy-dialog"), size::DIALOG_CONFIRM);
+    assert_eq!(width("new-skill", "new-skill-dialog"), size::DIALOG_FORM);
+    assert_eq!(width("found", "found-dialog"), size::DIALOG_FORM);
+
+    let mut h = Harness::project();
+    let laptop = host_home(crate::hosts::install::VERSION);
+    h.with_laptop(laptop.path());
+    h.click("skill-review");
+    h.click("copy");
+    h.land_remote();
+    h.click("copy-to-laptop-0");
+    h.land_remote();
+    assert!(h.rt.find("copy-apply").is_some(), "the copy plan is open");
+    assert_eq!(rect_of(&h, "copy-dialog")[2], size::DIALOG_FORM);
+}
+
+/// Review Focus 3: Sync in the smallest window with 10 targets and 20 skills keeps its footer
+/// in view; the body scrolls instead.
+#[test]
+fn sync_fits_minimum_window() {
+    let home = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(home.path()).unwrap();
+    let project = root.join("work/app");
+    for i in 0..20 {
+        skill(&project.join(".claude/skills"), &format!("skill-{i:02}"));
+    }
+    let targets = ["claude", "codex", "opencode", "cursor", "gemini", "copilot", "windsurf", "goose", "kiro", "roo"];
+    let settings = Settings { targets: Some(targets.iter().map(|t| t.to_string()).collect()), ..Settings::default() };
+    let mut app = App::new(Paths::isolated(&root), settings);
+    app.add_project(project);
+    let mut rt = Runtime::new(app, crate::ui::view, crate::ui::MIN_WINDOW, Env { system_dark: false, scale: 2.0 });
+    rt.on_key = Some(crate::ui::on_key);
+    rt.frame(0.0);
+    let mut h = Harness { _home: home, root, rt };
+    h.scene("sync");
+
+    let (w, hgt) = crate::ui::MIN_WINDOW;
+    let panel = rect_of(&h, "sync-dialog");
+    assert!(panel[0] >= 0.0 && panel[0] + panel[2] <= w && panel[1] + panel[3] <= hgt, "the dialog {panel:?} is inside the window");
+    for key in ["sync-cancel", "sync-apply"] {
+        let r = rect_of(&h, key);
+        assert!(r[1] >= panel[1] && r[1] + r[3] <= panel[1] + panel[3] + 0.5 && r[1] + r[3] <= hgt, "{key} {r:?} is fully visible in {panel:?}");
+    }
+    let body = rect_of(&h, "sync-body");
+    let content = h.rt.elements().into_iter().find(|e| e.key.as_deref() == Some("sync-targets")).expect("the targets card");
+    assert!(content.visible[3] < content.rect[3] && content.visible[3] <= body[3] + 0.5, "the body scrolls: shows {} of {}", content.visible[3], content.rect[3]);
+}
+
+/// Escape closes every skill dialog, as the kit's dialog did.
+#[test]
+fn escape_closes_skill_dialogs() {
+    for (scene, dialog) in [("sync", "sync-dialog"), ("remove", "remove-dialog"), ("copy", "copy-dialog"), ("new-skill", "new-skill-dialog"), ("found", "found-dialog")] {
+        let mut h = three_skills();
+        h.rescan();
+        h.scene(scene);
+        assert!(h.rt.find(dialog).is_some(), "{scene} opens {dialog}");
+        key(&mut h, rune::Key::Escape, rune::Mods::default());
+        assert!(h.rt.find(dialog).is_none(), "Escape closes {dialog}");
+    }
+}

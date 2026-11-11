@@ -4,13 +4,25 @@
 use rune::{El, Tx, col, icon, row, text};
 use rune_kit::{Button, ButtonVariant, Dialog, Kit, Placement, Select, SelectAppearance, TextInput, glyphs};
 
-use super::dialogs::{dialog_body, field_block, note};
 use crate::app::{App, Env, RemoteState};
 use crate::ds::{self, Place, size, space};
 use crate::hosts::copy::this_machine;
 use crate::hosts::install::{Health, VERSION};
 
 const ADD_HOST: &str = "Add host…";
+
+// The kit dialog's layout, until the host dialogs move onto `ds::DialogFrame`.
+fn dialog_body() -> El {
+    col().w_full().px(16.0).pb(16.0).gap(16.0)
+}
+
+fn note(t: &str, k: &Kit) -> El {
+    text(t.to_string()).font(k.ty.ui).color(k.c.text_muted).wrap()
+}
+
+fn field_block(label: &str, input: El, k: &Kit) -> El {
+    col().w_full().gap(6.0).child(text(label.to_string()).font(k.ty.small_medium).color(k.c.text_base)).child(input)
+}
 
 /// This machine, the saved hosts, and "Add host…".
 pub fn switcher(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {

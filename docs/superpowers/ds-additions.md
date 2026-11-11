@@ -31,6 +31,7 @@ Keysmith base: `287ebb5`.
 | `tokens.rs` | `Place::height()` (24 / 28 / 28) | A control's height for a place, as the kit draws `Place::control()`: `tabs` uses it, and tests can assert heights without a literal (Task 4). |
 | `gallery.rs` | A "Tabs" section in the fifth column | Every new block in the gallery (Task 4). |
 | `controls.rs` | `button_width(k, label, place, icon) -> f32`, `toolbar_title_width(k, title) -> f32` | What a text button and an untruncated `toolbar_title` take, measured before layout with the kit's push-button metrics (padding 12/14, 16 icon + 6 gap, medium UI face): the Skills toolbar folds its buttons into "…" when the list pane is narrower than they need. Not blocks, so no gallery entry; a ds test checks them against the laid-out widths (Task 5). |
+| `tokens.rs` | `size::DIALOG_PICKS` (250) | The picks column on the left of a Wide dialog (Sync's "Link into"; MCP Copy/Merge next); the plan takes the rest (Task 9). |
 
 ## Fixes to Keysmith's ds
 

@@ -35,6 +35,8 @@ pub mod size {
     /// A dialog whose picks on the left change a plan on the right (`DialogKind::Wide`). Fits
     /// the 860 minimum window with `S4` either side.
     pub const DIALOG_WIDE: f32 = 760.0;
+    /// The picks column on the left of a Wide dialog; the plan takes the rest.
+    pub const DIALOG_PICKS: f32 = 250.0;
     pub const DIALOG_TOP: f32 = 96.0;
     /// The inspector's narrowest width: the Keys action row ("Remove from agent", "…", "Move to
     /// Trash…") fits at 352, not at the 320 first planned.
