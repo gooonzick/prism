@@ -799,6 +799,10 @@ fn read_only_server_has_no_actions() {
     for key in ["mcp-copy", "mcp-edit", "mcp-remove", "mcp-more"] {
         assert!(h.rt.find(key).is_none(), "pencil offers no {key}");
     }
+    assert!(h.in_row("copy-0", "mcp-copy-0-lock"), "the app's copy carries the lock");
+    assert!(h.texts().contains("managed by"), "and says who manages it: {}", h.texts());
+    h.click("mcp-row-plata");
+    assert!(h.rt.find("mcp-copy-0-lock").is_none(), "a copy Prism may change has none");
 }
 
 #[test]
@@ -2763,10 +2767,17 @@ fn mcp_menu_closes_on_selection_change() {
     h.click("mcp-row-envy");
     h.click("mcp-more");
     assert!(h.rt.state.mcp_menu && h.rt.find("mcp-more-popup-item0").is_some(), "the menu is open");
-    // While it is drawn the menu holds the arrows.
-    key(&mut h, rune::Key::Down, rune::Mods::default());
-    assert_eq!(h.rt.state.mcp_selected.as_deref(), Some("envy"));
-    assert!(h.rt.find("mcp-more-popup-item0").is_some(), "the arrows stay in the menu");
+    // While it is drawn the menu holds the keys: ⌘N doesn't open Add server behind it.
+    let cmd = rune::Mods { cmd: true, ..rune::Mods::default() };
+    key(&mut h, rune::Key::Command('n'), cmd);
+    assert!(h.rt.state.mcp_form.is_none(), "⌘N waits while the menu is open");
+    assert!(h.rt.find("mcp-more-popup-item0").is_some(), "the menu stays");
+    key(&mut h, rune::Key::Escape, rune::Mods::default());
+    assert!(!h.rt.state.mcp_menu);
+    key(&mut h, rune::Key::Command('n'), cmd);
+    assert!(h.rt.state.mcp_form.is_some(), "with the menu closed ⌘N opens Add server");
+    h.click("mcp-add-cancel");
+    h.click("mcp-more");
     // The selection changes under it: the menu goes and the flag clears.
     h.rt.update(|s, _| s.select_mcp("webby"));
     h.settle();

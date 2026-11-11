@@ -2,13 +2,13 @@
 //! inspector with a server's values (masked until revealed), its copies and their drift.
 
 use rune::{El, Tx, col, row};
-use rune_kit::Kit;
+use rune_kit::{Kit, glyphs};
 use rune_kit::shell::Toolbar;
 
 use super::{PLUS, REFRESH, scope_title};
 use crate::agents::{self, Scope, tilde};
 use crate::app::{App, McpFilter};
-use crate::ds::{self, Card, Inspector, ListRow, MenuAction, Notice, Page, Place, Tone, item_row, pair_row, space, stacked_row, stacked_row_with, text, value_row};
+use crate::ds::{self, Card, Inspector, ListRow, MenuAction, Notice, Page, Place, Tone, item_row, size, pair_row, space, stacked_row, stacked_row_with, text, value_row};
 use crate::mcp::agents::MCP_AGENTS;
 use crate::mcp::model::{EnvValue, McpCopy, Place as CopyPlace, Transport, masked_args, masked_url};
 use crate::mcp::scan::{McpServer, Status, safe_error};
@@ -316,6 +316,10 @@ fn copies(s: &App, server: &McpServer, k: &Kit) -> Option<El> {
         let mut name = row().gap(space::S2).center_y().min_w(0.0).child(text::name(k, MCP_AGENTS[c.agent].name).shrink());
         if off {
             name = name.child(ds::dot(k, Tone::Warn));
+        }
+        // An app manages this copy: Prism leaves it alone.
+        if c.read_only.is_some() {
+            name = name.child(rune::icon(&glyphs::LOCK, size::ICON).color(ds::color::text_muted(k)).key(format!("mcp-copy-{i}-lock")));
         }
         let mut detail = tilde(&c.file, &s.paths);
         if let Some(app) = &c.read_only {
