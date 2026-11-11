@@ -454,6 +454,7 @@ impl App {
                         self.host_done(&machine, done, String::new(), label);
                         if let Some(name) = select {
                             self.mcp_selected = Some(name);
+                            self.mcp_menu = false;
                         }
                     }
                     Outcome::Failed { why, undoable, label } => {

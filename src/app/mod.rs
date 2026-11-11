@@ -129,6 +129,10 @@ pub struct App {
     /// when the scope or page changes; it holds the keys only while it is drawn
     /// (`skill_menu_shown`).
     pub skill_menu: bool,
+    /// The MCP server inspector's "…" menu is open. Cleared when the selected server changes or
+    /// goes, and when the scope or page changes; it holds the keys only while it is drawn
+    /// (`mcp_menu_shown`).
+    pub mcp_menu: bool,
     /// The open sync dialog's plan.
     pub sync_plan: Option<Plan>,
     /// The open sync dialog's plan, made by the host in view.
@@ -253,6 +257,7 @@ impl App {
             show_all_agents: false,
             toolbar_menu: false,
             skill_menu: false,
+            mcp_menu: false,
             sync_plan: None,
             sync_host: None,
             sync_only: None,
@@ -425,6 +430,7 @@ impl App {
     pub fn open_scope(&mut self, scope: Scope) {
         self.toolbar_menu = false;
         self.skill_menu = false;
+        self.mcp_menu = false;
         if self.page == Page::Browse {
             self.page = Page::Installed;
         }
@@ -456,6 +462,7 @@ impl App {
         self.host_values.clear();
         self.toolbar_menu = false;
         self.skill_menu = false;
+        self.mcp_menu = false;
     }
 
     /// The settings as on disk, where the CLI may have changed them. Settings built in memory

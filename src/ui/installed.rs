@@ -7,7 +7,7 @@ use rune_kit::shell::Toolbar;
 use super::{PLUS, REFRESH, SYNC, UPDATE, inspector, scope_title};
 use crate::agents::{AGENTS, tilde};
 use crate::app::{App, Filter};
-use crate::ds::{self, ListRow, MenuAction, Page, Place, Selection, Tone, size, space};
+use crate::ds::{self, ListRow, MenuAction, Page, Place, Selection, Tone, space};
 use crate::scan::{Placement, Skill};
 
 const FILTERS: [Filter; 4] = [Filter::All, Filter::NeedsSync, Filter::Broken, Filter::Updates];
@@ -36,13 +36,9 @@ fn toolbar(s: &App, unsynced: usize, room: Option<f32>, k: &Kit, layer: &mut Vec
         n => format!("Sync {n} skills"),
     };
     let title = scope_title(&s.scope, "skills");
-    // The wide toolbar: the title, three icon buttons and Sync, `S2` apart.
-    // The title counts at most `ROW_NAME_MIN`: past that it truncates, so a long project name
-    // never folds the buttons into "…" while they fit beside a shortened title.
-    let icons = 3.0 * (Place::Bar.height() + space::S2);
-    let wide = space::S3 + ds::toolbar_title_width(k, &title).min(size::ROW_NAME_MIN) + icons + ds::button_width(k, &sync_label, Place::Bar, true);
     let trailing = row().gap(space::S2).center_y();
-    if room.is_some_and(|room| room < wide) {
+    // The wide toolbar: the title, three icon buttons and Sync.
+    if !super::toolbar_fits(k, room, &title, 3, &sync_label) {
         let actions = vec![
             MenuAction::new("New skill", |s: &mut App| s.open_new_skill()),
             MenuAction::new(check_label, |s: &mut App| s.check_updates()).disabled(checking || remote),

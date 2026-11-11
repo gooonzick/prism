@@ -71,7 +71,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         // A host whose state isn't in yet: what is happening with it, in place of the page.
         (Page::Installed | Page::Mcp, Some(pane)) => (pane, toolbar(s, &k, s.env_label(), row()), inspector_body(&k)),
         (Page::Installed, None) => installed::page(s, &k, &mut layer, cx.is_reduced_motion(), toolbar_room(cx), inspector_width),
-        (Page::Mcp, None) => mcp::page(s, &k, &mut layer),
+        (Page::Mcp, None) => mcp::page(s, &k, &mut layer, cx.is_reduced_motion(), toolbar_room(cx)),
         (Page::Browse, _) => browse::page(s, &k, &mut layer),
     };
     dialogs::sync(s, &k, &mut layer);
@@ -243,6 +243,17 @@ fn toolbar_room(cx: &Cx<App>) -> Option<f32> {
     Some(pane_end - tabs_end - space::S3 - 2.0 * space::S2)
 }
 
+/// Whether a page's wide toolbar fits the `room` beside its tabs (`toolbar_room`; `None` before
+/// the first layout fits): the title, `icons` icon buttons and one text button with an icon
+/// labelled `button`, `S2` apart. The title counts at most `ROW_NAME_MIN`: past that it
+/// truncates, so a long project name never folds the buttons while they fit beside a shortened
+/// title.
+pub fn toolbar_fits(k: &Kit, room: Option<f32>, title: &str, icons: usize, button: &str) -> bool {
+    let icons = icons as f32 * (Place::Bar.height() + space::S2);
+    let wide = space::S3 + ds::toolbar_title_width(k, title).min(size::ROW_NAME_MIN) + icons + ds::button_width(k, button, Place::Bar, true);
+    room.is_none_or(|room| room >= wide)
+}
+
 /// The toolbar of a page without tabs (skills.sh): the title on the leading side, `trailing` on
 /// the other.
 pub fn toolbar_untabbed(k: &Kit, title: impl Into<String>, trailing: El) -> Toolbar {
@@ -280,11 +291,12 @@ pub fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
         s.toolbar_menu = false;
         // The inspector's width may change too, and with it what its "…" holds.
         s.skill_menu = false;
+        s.mcp_menu = false;
         return true;
     }
-    // The skill inspector's open "…" takes the keys: arrows move through it, Escape closes it.
-    // Only while it is drawn, so a flag left behind never swallows a key.
-    if s.skill_menu_shown() {
+    // An inspector's open "…" takes the keys: arrows move through it, Escape closes it. Only
+    // while it is drawn, so a flag left behind never swallows a key.
+    if s.skill_menu_shown() || s.mcp_menu_shown() {
         return false;
     }
     if ev.key == rune::Key::Escape && !s.checked.is_empty() && !s.sync_open() && s.confirm_remove.is_none() {
@@ -378,16 +390,6 @@ pub fn prop(label: &str, value: El, k: &Kit) -> El {
 /// A boxed block of monospace text.
 pub fn code_box(inner: El, k: &Kit) -> El {
     col().w_full().px(10.0).py(7.0).radius(k.radius.md).fill(k.c.layer_01).border(1.0, k.c.border_muted).child(inner)
-}
-
-/// Monospace words that wrap only between words, so `--stdio` never splits; a word longer than
-/// the line still breaks.
-pub fn words(line: &str, k: &Kit) -> El {
-    let mut flow = row().w_full().flex_wrap().gaps(0.0, 7.0);
-    for w in line.split(' ').filter(|w| !w.is_empty()) {
-        flow = flow.child(text(w.to_string()).font(k.ty.mono).color(k.c.text_base).wrap_anywhere().shrink().min_w(0.0).selectable(true).selection_color(k.selection()));
-    }
-    flow
 }
 
 /// A SKILL.md body in an inspector: body text at UI size and headings below the inspector's

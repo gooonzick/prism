@@ -555,6 +555,12 @@ impl Harness {
     fn texts(&self) -> String {
         self.rt.elements().into_iter().filter_map(|e| e.text).collect::<Vec<_>>().join("\n")
     }
+
+    /// Whether an element keyed `key` is drawn inside the row keyed `row`.
+    fn in_row(&self, row: &str, key: &str) -> bool {
+        let inside = format!("/{row}/");
+        self.rt.elements().into_iter().any(|e| e.key.as_deref() == Some(key) && e.path.contains(&inside) && !e.exiting)
+    }
 }
 
 #[test]
@@ -565,7 +571,7 @@ fn mcp_tab_lists_servers_with_agents() {
     assert_eq!(h.rt.state.page, crate::app::Page::Mcp);
     assert!(h.rt.find("mcp-row-plata").is_some());
     for agent in ["claude", "cursor"] {
-        assert!(h.rt.find(&format!("mcp-row-plata/agents/agent-{agent}")).is_some(), "{agent} chip");
+        assert!(h.in_row("mcp-row-plata", &format!("agent-{agent}")), "{agent} chip");
     }
     assert!(h.texts().contains("in sync"), "{}", h.texts());
 
@@ -625,10 +631,10 @@ fn inherited_global_server_shows_in_project() {
     h.click("tab-mcp");
     assert_eq!(h.rt.state.scope, Scope::Project(h.project_dir()));
     assert!(h.rt.state.mcp.get("plata").is_some_and(|s| s.inherited));
-    assert!(h.rt.find("mcp-row-plata/tags/global-tag").is_some(), "the inherited row says global");
-    assert!(h.rt.find("mcp-row-plata/tags/disabled-tag").is_some(), "Claude Code skips it here");
+    assert!(h.in_row("mcp-row-plata", "global-tag"), "the inherited row says global");
+    assert!(h.in_row("mcp-row-plata", "disabled-tag"), "Claude Code skips it here");
     assert!(h.rt.find("mcp-row-local-db").is_some());
-    assert!(h.rt.find("mcp-row-local-db/tags/global-tag").is_none(), "the project's own server isn't");
+    assert!(!h.in_row("mcp-row-local-db", "global-tag"), "the project's own server isn't");
 }
 
 #[test]
@@ -790,7 +796,7 @@ fn read_only_server_has_no_actions() {
         assert!(h.rt.find(key).is_some(), "plata offers {key}");
     }
     h.click("mcp-row-pencil");
-    for key in ["mcp-copy", "mcp-edit", "mcp-remove", "mcp-disable", "mcp-enable"] {
+    for key in ["mcp-copy", "mcp-edit", "mcp-remove", "mcp-more"] {
         assert!(h.rt.find(key).is_none(), "pencil offers no {key}");
     }
 }
@@ -800,7 +806,9 @@ fn inherited_row_offers_edit_and_switch_only() {
     let mut h = mcp_home();
     h.click("tab-mcp");
     h.click("mcp-row-plata");
-    assert!(h.rt.find("mcp-enable").is_some(), "Claude Code skips plata here");
+    h.click("mcp-more");
+    assert_eq!(h.item_label("mcp-more", 0).as_deref(), Some("Enable here"), "Claude Code skips plata here");
+    key(&mut h, rune::Key::Escape, rune::Mods::default());
     assert!(h.rt.find("mcp-edit").is_some(), "editing an inherited row edits the global server");
     for key in ["mcp-copy", "mcp-remove"] {
         assert!(h.rt.find(key).is_none(), "a global server offers no {key} in a project");
@@ -811,7 +819,8 @@ fn inherited_row_offers_edit_and_switch_only() {
     let d = h.rt.state.mcp_dialog.as_ref().expect("the edit plan is open");
     assert!(d.plan.clone().unwrap().unwrap().warnings.iter().any(|w| w == "edits the global server"));
     h.click("mcp-cancel");
-    h.click("mcp-enable");
+    h.click("mcp-more");
+    h.click("mcp-more-popup-item0");
     h.click("mcp-apply");
     let claude = json(&h.root.join(".claude.json"));
     let project = h.project_dir().display().to_string();
@@ -931,7 +940,8 @@ fn cmd_n_opens_add_on_mcp_page() {
     assert_eq!(h.rt.state.mcp_form.as_ref().unwrap().name.text, "typed");
     h.click("mcp-add-cancel");
     h.click("mcp-row-plata");
-    h.click("mcp-enable");
+    h.click("mcp-more");
+    h.click("mcp-more-popup-item0");
     key(&mut h, rune::Key::Command('n'), cmd);
     assert!(h.rt.state.mcp_form.is_none() && h.rt.state.mcp_dialog.is_some());
 }
@@ -2246,7 +2256,7 @@ fn bulk_bar_replaces_summary() {
 
 /// The toolbar's elements as drawn: none may cover another.
 fn toolbar_overlaps(h: &Harness) -> Vec<String> {
-    let keys = ["tab-skills", "tab-mcp", "title", "new-skill", "check-updates", "rescan", "toolbar-more", "sync"];
+    let keys = ["tab-skills", "tab-mcp", "title", "new-skill", "check-updates", "rescan", "toolbar-more", "sync", "mcp-add"];
     let rects: Vec<(&str, [f32; 4])> = keys.iter().filter_map(|&k| h.rt.presented(k).map(|(r, _)| (k, r))).collect();
     let (pane, _) = h.rt.presented("main-pane").unwrap();
     let mut bad = Vec::new();
@@ -2600,4 +2610,213 @@ fn sidebar_toggle_lets_go_of_the_skill_menu() {
     key(&mut h, rune::Key::Command('b'), rune::Mods { cmd: true, shift: true, ..rune::Mods::default() });
     assert_ne!(h.rt.state.sidebar.is_open(), open, "⇧⌘B toggles the sidebar");
     assert!(!h.rt.state.skill_menu, "and lets go of the menu");
+}
+
+// The MCP page and inspector.
+
+/// Global scope, Claude Code with `envy` (a token in its env) and `webby` (a bearer token in a
+/// header).
+fn secrets_home() -> Harness {
+    let mut h = Harness::project();
+    fs::create_dir_all(h.root.join(".claude")).unwrap();
+    let servers = serde_json::json!({ "mcpServers": {
+        "envy": { "command": "envy-mcp", "env": { "TOKEN": "sk-live-abc" } },
+        "webby": { "type": "http", "url": "https://mcp.example.com/mcp", "headers": { "Authorization": "Bearer abc" } },
+    } });
+    fs::write(h.root.join(".claude.json"), servers.to_string()).unwrap();
+    h.mcp_global();
+    h
+}
+
+impl Harness {
+    /// Every text, accessible name and tooltip in the window that holds `needle`.
+    fn presenting(&self, needle: &str) -> Vec<String> {
+        self.rt
+            .elements()
+            .into_iter()
+            .filter(|e| !e.exiting)
+            .flat_map(|e| [e.text, e.label, e.help].into_iter().flatten().map(move |t| (e.path.clone(), t)))
+            .filter(|(_, t)| t.contains(needle))
+            .map(|(path, t)| format!("{path}: {t}"))
+            .collect()
+    }
+}
+
+#[test]
+fn secrets_masked_until_shown() {
+    let mut h = secrets_home();
+    assert!(h.presenting("abc").is_empty(), "the rows: {:?}", h.presenting("abc"));
+    h.click("mcp-row-envy");
+    assert!(h.presenting("abc").is_empty(), "envy before Show values: {:?}", h.presenting("abc"));
+    assert!(h.in_row("mcp-env", "mcp-env-TOKEN"), "an Environment card with TOKEN");
+    h.click("mcp-row-webby");
+    assert!(h.presenting("abc").is_empty(), "webby before Show values: {:?}", h.presenting("abc"));
+    assert!(h.in_row("mcp-headers", "mcp-headers-Authorization"), "a Headers card with Authorization");
+
+    h.click("mcp-row-envy");
+    h.click("mcp-reveal");
+    let shown = h.presenting("sk-live-abc");
+    assert!(!shown.is_empty() && shown.iter().all(|t| t.contains("/mcp-env/")), "the Environment card shows it: {shown:?}");
+    // Only the selected server: webby stays masked.
+    h.click("mcp-row-webby");
+    assert!(h.presenting("abc").is_empty(), "webby is still masked: {:?}", h.presenting("abc"));
+    h.click("mcp-reveal");
+    let shown = h.presenting("Bearer abc");
+    assert!(!shown.is_empty() && shown.iter().all(|t| t.contains("/mcp-headers/")), "the Headers card shows it: {shown:?}");
+    // As today, Show values is remembered per server until hidden or a rescan drops it.
+    h.click("mcp-reveal");
+    h.click("mcp-row-envy");
+    assert!(!h.presenting("sk-live-abc").is_empty(), "envy was shown and stays shown");
+}
+
+#[test]
+fn long_command_wraps_in_card() {
+    use crate::ds::size;
+    let mut h = Harness::project();
+    fs::create_dir_all(h.root.join(".claude")).unwrap();
+    let args: Vec<String> = (0..12).map(|i| format!("--verbose-option-{i:02}")).collect();
+    let line = std::iter::once("npx".to_string()).chain(args.iter().cloned()).collect::<Vec<_>>().join(" ");
+    assert!(line.len() >= 200, "{} characters", line.len());
+    fs::write(h.root.join(".claude.json"), serde_json::json!({ "mcpServers": { "long": { "command": "npx", "args": args } } }).to_string()).unwrap();
+    h.rt.set_viewport(crate::ui::MIN_WINDOW, 2.0);
+    h.settle();
+    h.mcp_global();
+    h.click("mcp-row-long");
+    let pane = rect_of(&h, "inspector");
+    assert!((pane[2] - size::INSPECTOR_MIN).abs() < 0.5, "the inspector at its minimum: {pane:?}");
+    let (command, card) = (rect_of(&h, "mcp-command"), rect_of(&h, "mcp-values"));
+    assert!(command[0] >= card[0] - 0.5 && command[0] + command[2] <= card[0] + card[2] + 0.5, "the command {command:?} inside the card {card:?}");
+    let word = h.rt.elements().into_iter().find(|e| e.text.as_deref() == Some("--verbose-option-00")).expect("a word").rect;
+    assert!(command[3] > 2.0 * word[3], "the command wraps: {command:?}, a line is {}", word[3]);
+}
+
+#[test]
+fn mcp_actions_fit_one_row_at_minimum() {
+    use crate::ds::size;
+    let mut h = mcp_home();
+    h.rt.set_viewport(crate::ui::MIN_WINDOW, 2.0);
+    h.settle();
+    h.mcp_global();
+    h.click("mcp-row-plata");
+    let pane = rect_of(&h, "inspector");
+    let keys = ["mcp-copy", "mcp-edit", "mcp-more", "mcp-remove"];
+    let rects: Vec<[f32; 4]> = keys.iter().map(|k| rect_of(&h, k)).collect();
+    let mid = |r: &[f32; 4]| r[1] + r[3] / 2.0;
+    for (k, r) in keys.iter().zip(&rects) {
+        assert!((mid(r) - mid(&rects[0])).abs() < 0.5, "{k} {r:?} on the row of mcp-copy {:?}", rects[0]);
+    }
+    for w in rects.windows(2) {
+        assert!(w[0][0] + w[0][2] <= w[1][0] + 0.5, "in order and apart: {rects:?}");
+    }
+    let remove = rects[3];
+    assert!((remove[0] + remove[2] - (pane[0] + pane[2] - size::PANE_EDGE)).abs() < 0.5, "Remove… {remove:?} ends on the content edge of {pane:?}");
+}
+
+#[test]
+fn merge_notice_in_status_line() {
+    let mut h = Harness::project();
+    fs::create_dir_all(h.root.join(".cursor")).unwrap();
+    let servers = serde_json::json!({ "mcpServers": {
+        "figma": { "command": "npx", "args": ["-y", "figma-developer-mcp", "--stdio"] },
+        "figma-dev": { "command": "npx", "args": ["figma-developer-mcp"] },
+    } });
+    fs::write(h.root.join(".cursor/mcp.json"), servers.to_string()).unwrap();
+    h.mcp_global();
+    let (notice, row) = (rect_of(&h, "mcp-merge-notice-0"), rect_of(&h, "mcp-row-figma"));
+    assert!(notice[1] + notice[3] <= row[1], "the notice {notice:?} above the first row {row:?}");
+    let count = h.rt.elements().into_iter().find(|e| e.text.as_deref() == Some("2 servers for ~")).expect("the count line").rect;
+    assert!(count[1] < notice[1], "under the count {count:?}");
+    assert!(h.in_row("mcp-merge-notice-0", "mcp-merge-0"), "Merge… in the notice");
+    h.click("mcp-merge-0");
+    assert!(h.rt.state.mcp_dialog.is_some(), "Merge… opens the merge");
+}
+
+#[test]
+fn disable_here_in_menu() {
+    let mut h = mcp_home();
+    let own = h.project_dir().join(".cursor/mcp.json");
+    fs::create_dir_all(own.parent().unwrap()).unwrap();
+    fs::write(&own, r#"{"mcpServers":{"local-db":{"command":"db-mcp"}}}"#).unwrap();
+    h.rescan();
+    h.click("tab-mcp");
+    h.click("mcp-row-local-db");
+    h.click("mcp-more");
+    assert_eq!(h.item_label("mcp-more", 0).as_deref(), Some("Disable here"));
+    assert!(h.item_enabled("mcp-more", 0));
+    assert!(h.rt.find("mcp-more-popup-item1").is_none(), "one item");
+    key(&mut h, rune::Key::Escape, rune::Mods::default());
+    h.click("mcp-row-plata");
+    h.click("mcp-more");
+    assert_eq!(h.item_label("mcp-more", 0).as_deref(), Some("Enable here"), "Claude Code skips plata here");
+    key(&mut h, rune::Key::Escape, rune::Mods::default());
+
+    h.mcp_global();
+    h.click("mcp-row-plata");
+    h.click("mcp-more");
+    assert_eq!(h.item_label("mcp-more", 0).as_deref(), Some("Disable here"));
+    assert!(!h.item_enabled("mcp-more", 0), "nothing to disable a server for in Global");
+}
+
+#[test]
+fn mcp_menu_closes_on_selection_change() {
+    let mut h = secrets_home();
+    h.click("mcp-row-envy");
+    h.click("mcp-more");
+    assert!(h.rt.state.mcp_menu && h.rt.find("mcp-more-popup-item0").is_some(), "the menu is open");
+    // While it is drawn the menu holds the arrows.
+    key(&mut h, rune::Key::Down, rune::Mods::default());
+    assert_eq!(h.rt.state.mcp_selected.as_deref(), Some("envy"));
+    assert!(h.rt.find("mcp-more-popup-item0").is_some(), "the arrows stay in the menu");
+    // The selection changes under it: the menu goes and the flag clears.
+    h.rt.update(|s, _| s.select_mcp("webby"));
+    h.settle();
+    assert!(!h.rt.state.mcp_menu, "the flag clears");
+    assert!(h.rt.find("mcp-more-popup-item0").is_none(), "the menu is gone");
+
+    // Escape closes it.
+    h.click("mcp-more");
+    key(&mut h, rune::Key::Escape, rune::Mods::default());
+    assert!(!h.rt.state.mcp_menu && h.rt.find("mcp-more-popup-item0").is_none());
+
+    // The server goes: so does its menu.
+    h.click("mcp-more");
+    assert!(h.rt.state.mcp_menu);
+    fs::write(h.root.join(".claude.json"), r#"{"mcpServers":{"envy":{"command":"envy-mcp"}}}"#).unwrap();
+    h.rescan();
+    assert!(h.rt.state.mcp_selected.is_none() && !h.rt.state.mcp_menu, "the server and its menu are gone");
+    assert!(!h.rt.state.mcp_menu_shown());
+
+    // The sidebar toggle lets go of it too.
+    h.click("mcp-row-envy");
+    h.click("mcp-more");
+    key(&mut h, rune::Key::Command('b'), rune::Mods { cmd: true, shift: true, ..rune::Mods::default() });
+    assert!(!h.rt.state.mcp_menu, "⇧⌘B lets go of the menu");
+}
+
+#[test]
+fn mcp_toolbar_fits_the_smallest_window() {
+    let mut h = mcp_home();
+    h.rt.set_viewport(crate::ui::MIN_WINDOW, 2.0);
+    h.settle();
+    h.mcp_global();
+    h.click("mcp-row-plata");
+    assert!(h.rt.find("inspector").is_some(), "the inspector is open");
+    let bad = toolbar_overlaps(&h);
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+    assert!(h.rt.find("title").is_none(), "no room for the title");
+    assert!(h.rt.find("rescan").is_some(), "Rescan stays");
+    let add = h.rt.elements().into_iter().find(|e| e.key.as_deref() == Some("mcp-add")).expect("Add server");
+    assert_eq!(add.label.as_deref(), Some("Add server"), "the icon keeps the label as its name");
+    assert!(add.text.is_none() && add.rect[2] <= crate::ds::Place::Bar.height() + 0.5, "icon only: {:?}", add.rect);
+    h.click("mcp-add");
+    assert!(h.rt.state.mcp_form.is_some(), "and opens the form");
+
+    let mut wide = mcp_home();
+    wide.mcp_global();
+    wide.click("mcp-row-plata");
+    assert!(toolbar_overlaps(&wide).is_empty(), "{}", toolbar_overlaps(&wide).join("\n"));
+    for k in ["title", "rescan", "mcp-add"] {
+        assert!(wide.rt.find(k).is_some(), "{k} in a wide toolbar");
+    }
+    assert!(wide.texts().contains("Add server"), "the wide button has its words");
 }

@@ -351,6 +351,7 @@ impl App {
                 self.checked.retain(|n| inv.get(n).is_some());
                 if self.mcp_selected.as_deref().is_some_and(|n| self.mcp.get(n).is_none()) {
                     self.mcp_selected = None;
+                    self.mcp_menu = false;
                 }
                 self.load_preview();
                 match install_error {

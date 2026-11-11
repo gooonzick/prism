@@ -27,6 +27,7 @@ impl App {
         self.page = Page::Browse;
         self.toolbar_menu = false;
         self.skill_menu = false;
+        self.mcp_menu = false;
         self.query.focused = true;
     }
 

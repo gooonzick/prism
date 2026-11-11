@@ -1,49 +1,42 @@
 //! The MCP servers in a scope: the list with its status filters and merge hints, and the
 //! inspector with a server's values (masked until revealed), its copies and their drift.
 
-use rune::{Color, El, Tx, col, row, text};
+use rune::{El, Tx, col, row};
+use rune_kit::Kit;
 use rune_kit::shell::Toolbar;
-use rune_kit::{Button, ButtonVariant, ControlSize, Divider, IconButton, IconButtonVariant, Kit, SegmentedControl, glyphs};
 
-use crate::ds::{self, Tone};
-use super::{PLUS, REFRESH, code_box, dot, empty, inspector_body, inspector_title, mono, prop, section, words, scope_title, scroll_pane};
+use super::{PLUS, REFRESH, scope_title};
 use crate::agents::{self, Scope, tilde};
 use crate::app::{App, McpFilter};
+use crate::ds::{self, Card, Inspector, ListRow, MenuAction, Notice, Page, Place, Tone, item_row, pair_row, space, stacked_row, stacked_row_with, text, value_row};
 use crate::mcp::agents::MCP_AGENTS;
-use crate::mcp::model::{EnvValue, McpCopy, Place, Transport, masked_args, masked_url};
+use crate::mcp::model::{EnvValue, McpCopy, Place as CopyPlace, Transport, masked_args, masked_url};
 use crate::mcp::scan::{McpServer, Status, safe_error};
 
-pub fn page(s: &App, k: &Kit, _layer: &mut Vec<El>) -> (El, Toolbar, El) {
-    (main(s, k), toolbar(s, k), inspector(s, k))
+/// `room` is what the toolbar has beside its tabs (`ui::toolbar_room`); `None` before the first
+/// layout.
+pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>, reduced: bool, room: Option<f32>) -> (El, Toolbar, El) {
+    (main(s, k, reduced), toolbar(s, k, room), inspector(s, k, layer))
 }
 
-fn toolbar(s: &App, k: &Kit) -> Toolbar {
-    super::toolbar(s, k, scope_title(&s.scope, "MCP servers"),
-        row()
-            .gap(6.0)
-            .center_y()
-            .child(
-                IconButton::new(&REFRESH)
-                    .variant(IconButtonVariant::GhostMuted)
-                    .label("Rescan")
-                    .help("Rescan")
-                    .shortcut("cmd+r")
-                    .on_press(|s: &mut App| s.rescan())
-                    .build(k)
-                    .key("rescan"),
-            )
-            .child(
-                Button::new("Add server")
-                    .icon(&PLUS)
-                    .variant(ButtonVariant::Ghost)
-                    .control_size(ControlSize::Regular)
-                    .help("Add an MCP server to your agents")
-                    .shortcut("cmd+n")
-                    .on_press(|s: &mut App| s.open_mcp_add())
-                    .build(k)
-                    .key("mcp-add"),
-            ),
-    )
+/// Tabs, the title, Rescan and Add server. When the list pane is too narrow for them, the title
+/// goes and Add server shows only its icon.
+fn toolbar(s: &App, k: &Kit, room: Option<f32>) -> Toolbar {
+    let title = scope_title(&s.scope, "MCP servers");
+    let rescan = ds::icon_button(&REFRESH, "Rescan", Place::Bar).shortcut("cmd+r").on_press(|s: &mut App| s.rescan()).build(k).key("rescan");
+    let trailing = row().gap(space::S2).center_y().child(rescan);
+    if !super::toolbar_fits(k, room, &title, 1, "Add server") {
+        let add = ds::icon_button(&PLUS, "Add server", Place::Bar).shortcut("cmd+n").on_press(|s: &mut App| s.open_mcp_add()).build(k).key("mcp-add");
+        return super::toolbar_untitled(s, k, trailing.child(add));
+    }
+    let add = ds::primary("Add server", Place::Bar)
+        .icon(&PLUS)
+        .help("Add an MCP server to your agents")
+        .shortcut("cmd+n")
+        .on_press(|s: &mut App| s.open_mcp_add())
+        .build(k)
+        .key("mcp-add");
+    super::toolbar(s, k, title, trailing.child(add))
 }
 
 /// The filters a scope offers: nothing is disabled globally, so that filter is for projects.
@@ -66,22 +59,40 @@ fn filter_label(s: &App, f: McpFilter) -> String {
     }
 }
 
-fn main(s: &App, k: &Kit) -> El {
+fn main(s: &App, k: &Kit, reduced: bool) -> El {
     let shown = filters(&s.scope);
     let labels: Vec<String> = shown.iter().map(|&f| filter_label(s, f)).collect();
     let current = shown.iter().position(|&f| f == s.mcp_filter);
     let picks = shown.clone();
-    let segments = SegmentedControl::new(&labels, current)
-        .label("Show")
-        .fit()
-        .on_pick(move |s: &mut App, i: usize, _: &mut Tx| s.set_mcp_filter(picks[i]))
-        .build(k)
-        .key("mcp-filter");
+    let segments = ds::segments(&labels, current, "Show", move |s: &mut App, i: usize, _: &mut Tx| s.set_mcp_filter(picks[i])).build(k).key("mcp-filter");
+
+    let total = s.mcp.servers.len();
+    let root = tilde(&s.mcp.scope.root(&s.paths), &s.paths);
+    let mut page = Page::new("mcp").segments(segments).count(format!("{total} server{} for {root}", if total == 1 { "" } else { "s" }));
+    for (i, (file, e)) in s.mcp.errors.iter().enumerate() {
+        let line = format!("Couldn't read {}: {}", tilde(file, &s.paths), safe_error(e));
+        page = page.notice(Notice::new(Tone::Warn, line).build(k).key(format!("mcp-error-{i}")));
+    }
+    for (i, m) in s.mcp.merges.iter().enumerate() {
+        let mut notice = Notice::new(Tone::Info, format!("Maybe one server: {} ({})", m.names.join(", "), m.reason));
+        // The core merges only servers this scope owns and Prism may change.
+        let mergeable = m.names.iter().all(|n| s.mcp.get(n).is_some_and(|x| !x.inherited && x.status != Status::ReadOnly));
+        if mergeable {
+            let names = m.names.clone();
+            notice = notice.action(
+                ds::button("Merge…", Place::List)
+                    .help("Rename the copies to one name")
+                    .on_press(move |s: &mut App| s.open_mcp_merge(names.clone()))
+                    .build(k)
+                    .key(format!("mcp-merge-{i}")),
+            );
+        }
+        page = page.notice(notice.build(k).key(format!("mcp-merge-notice-{i}")));
+    }
 
     let visible = s.mcp_visible();
-    let mut list = col().key("mcp-servers").w_full().gap(2.0);
     if s.mcp.servers.is_empty() {
-        list = list.child(empty("No MCP servers here", "Servers your agents' configs list for this scope show up here.", k));
+        page = page.empty(ds::empty(k, "No MCP servers here", "Servers your agents' configs list for this scope show up here."));
     } else if visible.is_empty() {
         let hint = match s.mcp_filter {
             McpFilter::All => "",
@@ -89,52 +100,9 @@ fn main(s: &App, k: &Kit) -> El {
             McpFilter::Disabled => "No server is switched off in this project.",
             McpFilter::ReadOnly => "No app manages a server here.",
         };
-        list = list.child(empty("Nothing to show", hint, k));
+        page = page.empty(ds::empty(k, "Nothing to show", hint));
     }
-    for &i in &visible {
-        list = list.child(server_row(s, &s.mcp.servers[i], k));
-    }
-    if !s.mcp.merges.is_empty() {
-        let mut hints = col().key("mcp-merges").w_full().pt(10.0).px(12.0).gap(6.0);
-        for (i, m) in s.mcp.merges.iter().enumerate() {
-            let mut line = notice_line(k.c.info.icon, format!("Maybe one server: {} ({})", m.names.join(", "), m.reason), k);
-            // The core merges only servers this scope owns and Prism may change.
-            let mergeable = m.names.iter().all(|n| s.mcp.get(n).is_some_and(|x| !x.inherited && x.status != Status::ReadOnly));
-            if mergeable {
-                let names = m.names.clone();
-                line = line.child(
-                    Button::new("Merge…")
-                        .variant(ButtonVariant::Outline)
-                        .control_size(ControlSize::Small)
-                        .help("Rename the copies to one name")
-                        .on_press(move |s: &mut App| s.open_mcp_merge(names.clone()))
-                        .build(k)
-                        .key(format!("mcp-merge-{i}")),
-                );
-            }
-            hints = hints.child(line);
-        }
-        list = list.child(hints);
-    }
-
-    let total = s.mcp.servers.len();
-    let root = tilde(&s.mcp.scope.root(&s.paths), &s.paths);
-    let summary = format!("{total} server{} for {root}", if total == 1 { "" } else { "s" });
-    let header = row().w_full().h(36.0).px(12.0).center_y().child(text(summary).font(k.ty.small).color(k.c.text_faint).truncate());
-    let mut page = col().key("mcp").w_full().h_full().min_h(0.0).padding(16.0).gap(10.0);
-    if !s.mcp.errors.is_empty() {
-        let mut errors = col().key("mcp-errors").w_full().px(12.0).gap(4.0);
-        for (file, e) in &s.mcp.errors {
-            errors = errors.child(notice_line(k.c.warning.icon, format!("Couldn't read {}: {}", tilde(file, &s.paths), safe_error(e)), k));
-        }
-        page = page.child(errors);
-    }
-    page.child(row().w_full().child(segments)).child(header).child(scroll_pane("mcp-scroll", list).grow(1.0))
-}
-
-/// A quiet line of small text after a coloured dot.
-fn notice_line(color: Color, line: String, k: &Kit) -> El {
-    row().w_full().gap(8.0).center_y().child(dot(color)).child(text(line).font(k.ty.small).color(k.c.text_muted).grow(1.0).min_w(0.0).wrap())
+    page.rows(visible.iter().map(|&i| server_row(s, &s.mcp.servers[i], k, reduced))).build(k)
 }
 
 /// The short name a chip shows: the skills table's, where the agent is in it.
@@ -154,13 +122,14 @@ fn agents_of(server: &McpServer) -> Vec<usize> {
     agents
 }
 
-fn status(server: &McpServer, k: &Kit) -> (&'static str, Color, String) {
+/// A server's state in a word, its tone, and the detail for its tooltip.
+pub fn status(server: &McpServer) -> (&'static str, Tone, String) {
     match server.status {
-        Status::InSync => ("in sync", k.c.success.icon, "Every copy has the same transport and values".into()),
-        Status::Differs => ("differs", k.c.warning.icon, "The copies disagree; the inspector shows how".into()),
+        Status::InSync => ("in sync", Tone::Ok, "Every copy has the same transport and values".into()),
+        Status::Differs => ("differs", Tone::Warn, "The copies disagree; the inspector shows how".into()),
         Status::ReadOnly => {
             let apps: Vec<&str> = server.copies.iter().filter_map(|c| c.read_only.as_deref()).collect();
-            ("read-only", k.c.text_faint, format!("Managed by {}", apps.join(", ")))
+            ("read-only", Tone::Neutral, format!("Managed by {}", apps.join(", ")))
         }
     }
 }
@@ -173,77 +142,50 @@ fn summary(t: &Transport) -> String {
     }
 }
 
-fn server_row(s: &App, server: &McpServer, k: &Kit) -> El {
-    let selected = s.mcp_selected.as_deref() == Some(server.name.as_str());
-    let name = server.name.clone();
-    let mut tags = row().key("tags").gap(4.0).center_y();
+fn server_row(s: &App, server: &McpServer, k: &Kit, reduced: bool) -> El {
+    let mut tags = Vec::new();
     if server.inherited {
-        tags = tags.child(ds::tag(k, "global", None, "A global server; it applies in this project too").key("global-tag"));
+        tags.push(ds::tag(k, "global", None, "A global server; it applies in this project too").key("global-tag"));
     }
     if !server.disabled_for.is_empty() {
         let who: Vec<&str> = server.disabled_for.iter().map(|&a| MCP_AGENTS[a].name).collect();
-        tags = tags.child(ds::tag(k, "disabled", Some(Tone::Warn), format!("Switched off here for {}", who.join(", "))).key("disabled-tag"));
+        tags.push(ds::tag(k, "disabled", Some(Tone::Warn), format!("Switched off here for {}", who.join(", "))).key("disabled-tag"));
     }
-    let mut chips = row().key("agents").gap(4.0).center_y();
     for a in agents_of(server) {
         let copies: Vec<&McpCopy> = server.copies.iter().filter(|c| c.agent == a).collect();
         let files: Vec<String> = copies.iter().map(|c| tilde(&c.file, &s.paths)).collect();
         let off = server.disabled_for.contains(&a);
         let tone = if off { Some(Tone::Warn) } else { None };
         let help = format!("{}: {}{}", MCP_AGENTS[a].name, files.join(", "), if off { " (off here)" } else { "" });
-        chips = chips.child(ds::tag(k, short(a), tone, help).key(format!("agent-{}", MCP_AGENTS[a].id)));
+        tags.push(ds::tag(k, short(a), tone, help).key(format!("agent-{}", MCP_AGENTS[a].id)));
     }
-    let (word, color, why) = status(server, k);
-    let status = row()
-        .key("status")
-        .w(88.0)
-        .gap(6.0)
-        .center_y()
-        .justify_end()
-        .help(why)
-        .child(dot(color))
-        .child(text(word).font(k.ty.small).color(k.c.text_muted));
-    let info = col()
-        .gap(2.0)
-        .grow(1.0)
-        .min_w(120.0)
-        .child(text(server.name.clone()).font(k.ty.ui_medium).color(k.c.text_base).truncate())
-        .child(text(summary(&server.copies[0].server.transport)).font(k.ty.small).color(k.c.text_muted).truncate());
-    let r = row()
-        .key(format!("mcp-row-{}", server.name))
-        .role("button")
-        .label(server.name.clone())
-        .focusable(true)
-        .w_full()
-        .px(12.0)
-        .py(8.0)
-        .gap(12.0)
-        .center_y()
-        .radius(k.radius.md)
-        .on_press(move |s: &mut App| s.select_mcp(&name))
-        .child(info)
-        .child(tags)
-        .child(chips)
-        .child(status);
-    let r = if selected { r.fill(k.c.layer_02) } else { r.hover(k.c.hover) };
-    // A global server seen from a project: there, but not the project's own.
-    if server.inherited { r.dim(0.6) } else { r }
+    let (word, tone, why) = status(server);
+    let name = server.name.clone();
+    ListRow::new(format!("mcp-row-{}", server.name), server.name.clone())
+        .meta(summary(&server.copies[0].server.transport))
+        .tags(tags)
+        .trailing(ds::status(k, tone, word).key("status").help(why))
+        .selected(s.mcp_selected.as_deref() == Some(server.name.as_str()))
+        // A global server seen from a project: there, but not the project's own.
+        .dim(server.inherited)
+        .reduced(reduced)
+        .build(k, move |s: &mut App| s.select_mcp(&name))
 }
 
-fn place_label(p: &Place) -> &'static str {
+fn place_label(p: &CopyPlace) -> &'static str {
     match p {
-        Place::Global => "global",
-        Place::ClaudeLocal(_) => "local",
-        Place::Project(_) => "project",
+        CopyPlace::Global => "global",
+        CopyPlace::ClaudeLocal(_) => "local",
+        CopyPlace::Project(_) => "project",
     }
 }
 
-fn inspector(s: &App, k: &Kit) -> El {
+fn inspector(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let Some(server) = s.mcp_selected.as_deref().and_then(|n| s.mcp.get(n)) else {
-        return inspector_body(k).child(empty("No server selected", "Click a server to see its values and where each agent keeps it.", k));
+        return Inspector::empty(k, "No server selected", "Click a server to see its values and where each agent keeps it.");
     };
     let revealed = s.mcp_revealed.contains(&server.name);
-    let (word, color, why) = status(server, k);
+    let (word, tone, why) = status(server);
     let mut about = vec![match server.status {
         Status::InSync if server.copies.len() > 1 => "Every copy has the same transport and values".to_string(),
         Status::InSync => "One copy".to_string(),
@@ -257,25 +199,14 @@ fn inspector(s: &App, k: &Kit) -> El {
         let who: Vec<&str> = server.disabled_for.iter().map(|&a| MCP_AGENTS[a].name).collect();
         about.push(format!("Switched off here for {}", who.join(", ")));
     }
-    let title = row()
-        .w_full()
-        .gap(8.0)
-        .center_y()
-        .child(inspector_title(server.name.clone(), k).grow(1.0).min_w(0.0))
-        .child(row().gap(6.0).center_y().child(dot(color)).child(text(word).font(k.ty.small).color(k.c.text_muted)));
-    let head = col().w_full().gap(4.0).child(title).child(text(about.join(". ")).font(k.ty.caption()).color(k.c.text_muted).wrap());
-    let mut body = inspector_body(k).child(head);
-    if let Some(actions) = actions(s, server, k) {
-        body = body.child(actions);
+    let mut ins = Inspector::new().title(server.name.clone()).status(ds::status(k, tone, word).key("mcp-status")).description(about.join(". "));
+    if let Some((left, right)) = actions(s, server, k, layer) {
+        ins = ins.actions(left, right);
     }
     // On a host, shown values are the server as written there, fetched for this one only.
     let shown = s.shown_server(server);
-    body = body.child(Divider::horizontal().build(k)).child(values(shown, revealed, k));
-    body = body.child(Divider::horizontal().build(k)).child(copies(s, server, k));
-    if !shown.diffs.is_empty() {
-        body = body.child(Divider::horizontal().build(k)).child(diffs(shown, revealed, k));
-    }
-    body
+    let (env_card, headers_card) = secrets(shown, revealed, k);
+    ins.card(configuration(shown, revealed, k)).card(env_card).card(headers_card).card(copies(s, server, k)).card(diffs(shown, revealed, k)).build(k)
 }
 
 /// "Copies differ in command and args", naming up to two fields.
@@ -289,125 +220,102 @@ fn differ_line(server: &McpServer) -> String {
     }
 }
 
-/// The transport and its values, as the first copy has them.
-fn values(server: &McpServer, revealed: bool, k: &Kit) -> El {
+/// The transport and its command or URL, as the first copy has them; Show values on the card.
+fn configuration(server: &McpServer, revealed: bool, k: &Kit) -> Option<El> {
     let first = &server.copies[0];
-    let t = &first.server.transport;
     let name = server.name.clone();
-    let reveal = Button::new(if revealed { "Hide values" } else { "Show values" })
-        .icon(if revealed { &glyphs::EYE_OFF } else { &glyphs::EYE })
-        .variant(ButtonVariant::Ghost)
-        .control_size(ControlSize::Small)
+    let reveal = ds::reveal(revealed, Place::Inspector)
         .help("Env and header values, args and the URL may hold secrets")
         .on_press(move |s: &mut App| s.toggle_reveal(&name))
         .build(k)
         .key("mcp-reveal");
-    let mut c = col().key("mcp-values").w_full().gap(12.0).child(section("Configuration", Some(reveal), k));
+    let mut card = Card::new("mcp-values").label("Configuration").trailing(reveal);
     if server.status == Status::Differs {
-        c = c.child(text(format!("As {} has it", MCP_AGENTS[first.agent].name)).font(k.ty.caption()).color(k.c.text_faint));
+        card = card.row(text::hint(k, format!("As {} has it", MCP_AGENTS[first.agent].name)));
     }
+    let t = &first.server.transport;
     let kind = match t {
         Transport::Stdio { .. } => "stdio",
         Transport::Http { sse: true, .. } => "SSE",
         Transport::Http { .. } => "HTTP",
     };
-    c = c.child(prop("Transport", text(kind.to_string()).font(k.ty.ui).color(k.c.text_base), k));
+    card = card.row(pair_row(k, "Transport", text::value(k, kind)));
     let shown = |v: &String| if revealed { v.clone() } else { masked_url(v) };
     match t {
-        Transport::Stdio { command, args, env, cwd } => {
+        Transport::Stdio { command, args, cwd, .. } => {
             let line: Vec<String> = if revealed {
                 std::iter::once(command.clone()).chain(args.iter().cloned()).collect()
             } else {
                 std::iter::once(masked_url(command)).chain(masked_args(args)).collect()
             };
-            c = c.child(prop("Command", code_box(words(&line.join(" "), k), k).key("mcp-command"), k));
+            card = card.row(stacked_row(k, "Command", text::command(k, line.join(" ")).key("mcp-command")));
             if let Some(cwd) = cwd {
-                c = c.child(prop("Working folder", code_box(words(&shown(cwd), k), k), k));
-            }
-            if !env.is_empty() {
-                c = c.child(prop("Environment", code_box(pairs(env.iter(), revealed, k), k), k));
+                card = card.row(stacked_row(k, "Working folder", text::code(k, shown(cwd))));
             }
         }
-        Transport::Http { url, headers, .. } => {
-            c = c.child(prop("URL", code_box(words(&shown(url), k), k).key("mcp-url"), k));
-            if !headers.is_empty() {
-                c = c.child(prop("Headers", code_box(pairs(headers.iter(), revealed, k), k), k));
-            }
+        Transport::Http { url, .. } => {
+            card = card.row(stacked_row(k, "URL", text::code(k, shown(url)).key("mcp-url")));
         }
     }
-    c
+    card.build(k)
 }
 
-/// Copy, edit and the project switch on the left; Remove apart on the right. An app's server
-/// has none; a global server seen from a project offers only Edit and the switch.
-fn actions(s: &App, server: &McpServer, k: &Kit) -> Option<El> {
+/// The Environment and Headers cards: a row per key, its value masked, or as written once
+/// revealed. Each is left out when there is nothing in it.
+fn secrets(server: &McpServer, revealed: bool, k: &Kit) -> (Option<El>, Option<El>) {
+    let card = |key: &str, label: &str, items: Vec<(&String, &EnvValue)>| {
+        let rows = items.into_iter().map(|(name, v)| {
+            let value = if revealed { v.written() } else { v.masked() };
+            value_row(text::code(k, name.clone()), name, text::code(k, value.clone()), &value).key(format!("{key}-{name}"))
+        });
+        Card::new(key).label(label).rows(rows).build(k)
+    };
+    match &server.copies[0].server.transport {
+        Transport::Stdio { env, .. } => (card("mcp-env", "Environment", env.iter().collect()), None),
+        Transport::Http { headers, .. } => (None, card("mcp-headers", "Headers", headers.iter().collect())),
+    }
+}
+
+/// Copy to… and Edit… on the left, then "…" with Disable here / Enable here; Remove… on the
+/// right. An app's server has none; a global server seen from a project offers only Edit… and
+/// the switch.
+fn actions(s: &App, server: &McpServer, k: &Kit, layer: &mut Vec<El>) -> Option<(Vec<El>, Option<El>)> {
     if server.status == Status::ReadOnly {
         return None;
     }
-    let small = |label: &str| Button::new(label).variant(ButtonVariant::Outline).control_size(ControlSize::Small);
     let (copy, edit, switch, remove) = (server.name.clone(), server.name.clone(), server.name.clone(), server.name.clone());
-    let mut left = row().gap(6.0).center_y();
+    let mut left = Vec::new();
     // A global server seen from a project is copied from the global scope.
     if !server.inherited {
-        left = left.child(small("Copy to…").help("Write it to more agents").on_press(move |s: &mut App| s.open_mcp_copy(&copy)).build(k).key("mcp-copy"));
+        left.push(ds::button("Copy to…", Place::Inspector).help("Write it to more agents").on_press(move |s: &mut App| s.open_mcp_copy(&copy)).build(k).key("mcp-copy"));
     }
-    left = left.child(
-            small("Edit…")
-                .help(if server.inherited { "Edits the global server" } else { "Change its command, URL or values in every copy" })
-                .on_press(move |s: &mut App| s.open_mcp_edit(&edit))
-                .build(k)
-                .key("mcp-edit"),
-        );
-    if !s.scope.is_global() {
-        let (label, key, help) = if server.disabled_for.is_empty() {
-            ("Disable here", "mcp-disable", "Switch it off for this project only")
-        } else {
-            ("Enable here", "mcp-enable", "Switch it back on for this project")
-        };
-        left = left.child(small(label).help(help).on_press(move |s: &mut App| s.toggle_mcp_disabled(&switch)).build(k).key(key));
-    }
-    let mut actions = row().key("mcp-actions").w_full().gap(8.0).center_y().child(left).child(row().grow(1.0));
-    if !server.inherited {
-        actions = actions.child(
-            Button::new("Remove…")
-                .variant(ButtonVariant::Danger)
-                .control_size(ControlSize::Small)
-                .on_press(move |s: &mut App| s.confirm_mcp_remove(&remove))
-                .build(k)
-                .key("mcp-remove"),
-        );
-    }
-    Some(actions)
-}
-
-/// Env or header keys with their values: masked, or as written once revealed.
-fn pairs<'a>(items: impl Iterator<Item = (&'a String, &'a EnvValue)>, revealed: bool, k: &Kit) -> El {
-    let mut c = col().w_full().gap(4.0);
-    for (key, v) in items {
-        let value = if revealed { v.written() } else { v.masked() };
-        c = c.child(
-            row()
-                .w_full()
-                .gap(7.0)
-                .child(text(key.clone()).font(k.ty.mono).color(k.c.text_base).shrink().min_w(0.0).truncate())
-                .child(text("=").font(k.ty.mono).color(k.c.text_faint))
-                .child(mono(value, k).color(k.c.text_base).grow(1.0).min_w(0.0)),
-        );
-    }
-    c
+    left.push(
+        ds::button("Edit…", Place::Inspector)
+            .help(if server.inherited { "Edits the global server" } else { "Change its command, URL or values in every copy" })
+            .on_press(move |s: &mut App| s.open_mcp_edit(&edit))
+            .build(k)
+            .key("mcp-edit"),
+    );
+    // One item whose label follows the state; a global scope has no project to switch it off in.
+    let (label, help) = if server.disabled_for.is_empty() {
+        ("Disable here", "Switch it off for this project only")
+    } else {
+        ("Enable here", "Switch it back on for this project")
+    };
+    let items = vec![MenuAction::new(label, move |s: &mut App| s.toggle_mcp_disabled(&switch)).description(help).disabled(s.scope.is_global())];
+    left.push(ds::overflow::<App>(k, "mcp-more", Place::Inspector, s.mcp_menu, |s: &mut App| s.mcp_menu = !s.mcp_menu, |s: &mut App| s.mcp_menu = false, items, layer));
+    let remove = (!server.inherited)
+        .then(|| ds::danger("Remove…", Place::Inspector).on_press(move |s: &mut App| s.confirm_mcp_remove(&remove)).build(k).key("mcp-remove"));
+    Some((left, remove))
 }
 
 /// Where each agent keeps its copy.
-fn copies(s: &App, server: &McpServer, k: &Kit) -> El {
-    let mut list = col().key("mcp-copies").w_full().gap(10.0).child(section("Agents", None, k));
-    for (i, c) in server.copies.iter().enumerate() {
+fn copies(s: &App, server: &McpServer, k: &Kit) -> Option<El> {
+    let rows = server.copies.iter().enumerate().map(|(i, c)| {
         let off = server.disabled_for.contains(&c.agent) || !c.enabled;
-        let mut name = row().gap(6.0).center_y().grow(1.0).min_w(0.0).child(text(MCP_AGENTS[c.agent].name).font(k.ty.ui).color(k.c.text_base));
+        let mut name = row().gap(space::S2).center_y().min_w(0.0).child(text::name(k, MCP_AGENTS[c.agent].name).shrink());
         if off {
-            name = name.child(dot(k.c.warning.icon));
-        }
-        if c.read_only.is_some() {
-            name = name.child(rune::icon(&glyphs::LOCK, 12.0).color(k.c.icon_muted));
+            name = name.child(ds::dot(k, Tone::Warn));
         }
         let mut detail = tilde(&c.file, &s.paths);
         if let Some(app) = &c.read_only {
@@ -416,36 +324,25 @@ fn copies(s: &App, server: &McpServer, k: &Kit) -> El {
         if off {
             detail.push_str(" · off here");
         }
-        list = list.child(
-            col()
-                .key(format!("copy-{i}"))
-                .w_full()
-                .gap(1.0)
-                .child(row().w_full().gap(8.0).center_y().child(name).child(text(place_label(&c.place)).font(k.ty.small).color(k.c.text_muted)))
-                .child(text(detail).font(k.ty.caption()).color(k.c.text_faint).wrap_anywhere()),
-        );
-    }
-    list
+        item_row(name, Some(text::hint(k, detail)), Some(text::label(k, place_label(&c.place)))).key(format!("copy-{i}"))
+    });
+    Card::new("mcp-copies").label("Agents").rows(rows).build(k)
 }
 
 /// Field by field, what each copy has where they disagree: masked, or as written once revealed.
-fn diffs(server: &McpServer, revealed: bool, k: &Kit) -> El {
-    let mut table = col().key("mcp-diffs").w_full().gap(10.0).child(section("Differences", None, k));
-    for d in &server.diffs {
-        let mut rows = col().w_full().gap(6.0).child(text(d.field.clone()).font(k.ty.mono).color(k.c.text_base).wrap_anywhere());
+fn diffs(server: &McpServer, revealed: bool, k: &Kit) -> Option<El> {
+    let rows = server.diffs.iter().map(|d| {
+        let mut values = col().w_full().gap(space::S1);
         for (agent, value) in d.shown(revealed) {
-            let shown = match value {
-                Some(v) => words(v, k).grow(1.0).min_w(0.0),
-                None => text("missing").font(k.ty.caption()).color(k.c.text_faint),
-            };
-            rows = rows.child(
-                row().w_full().gap(10.0).items_start().child(text(short(agent)).font(k.ty.caption()).color(k.c.text_muted).w(56.0).pt(1.0)).child(shown),
-            );
+            values = values.child(match value {
+                Some(v) => value_row(text::label(k, short(agent)), short(agent), text::code(k, v.to_string()), v),
+                None => pair_row(k, short(agent), text::hint(k, "missing")),
+            });
         }
         if d.hidden_only() && !revealed {
-            rows = rows.child(text("Only hidden values differ; Show values compares them").font(k.ty.caption()).color(k.c.text_faint).wrap());
+            values = values.child(text::hint(k, "Only hidden values differ; Show values compares them"));
         }
-        table = table.child(col().w_full().px(10.0).py(9.0).radius(k.radius.md).border(1.0, k.c.border_muted).child(rows));
-    }
-    table
+        stacked_row_with(text::code(k, d.field.clone()), values)
+    });
+    Card::new("mcp-diffs").label("Differences").rows(rows).build(k)
 }
