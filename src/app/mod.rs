@@ -33,6 +33,8 @@ use crate::sync::Plan;
 pub use across::{Across, Planned, Target};
 pub use env::{AddHost, Env, PreviewAnswer, RemoteAnswer, RemoteState, Stash};
 pub use installed::{open_path, reveal_path};
+#[cfg(test)]
+pub use installed::reveal_log;
 pub use mcp::McpFilter;
 pub use mcp_edit::{McpChange, McpDialog, McpForm};
 pub use remote::{RepoListing, UpdateJob};
@@ -123,6 +125,10 @@ pub struct App {
     /// The Skills toolbar's "…" menu is open: the narrow toolbar's New skill, Check skills.sh
     /// for updates and Rescan. Cleared when the page changes.
     pub toolbar_menu: bool,
+    /// The skill inspector's "…" menu is open. Cleared when the selection changes or goes, and
+    /// when the scope or page changes; it holds the keys only while it is drawn
+    /// (`skill_menu_shown`).
+    pub skill_menu: bool,
     /// The open sync dialog's plan.
     pub sync_plan: Option<Plan>,
     /// The open sync dialog's plan, made by the host in view.
@@ -246,6 +252,7 @@ impl App {
             anchor: None,
             show_all_agents: false,
             toolbar_menu: false,
+            skill_menu: false,
             sync_plan: None,
             sync_host: None,
             sync_only: None,
@@ -417,6 +424,7 @@ impl App {
     /// Opens `scope` on the page that's open (skills or MCP); from skills.sh, on its skills.
     pub fn open_scope(&mut self, scope: Scope) {
         self.toolbar_menu = false;
+        self.skill_menu = false;
         if self.page == Page::Browse {
             self.page = Page::Installed;
         }
@@ -447,6 +455,7 @@ impl App {
         self.mcp_revealed.clear();
         self.host_values.clear();
         self.toolbar_menu = false;
+        self.skill_menu = false;
     }
 
     /// The settings as on disk, where the CLI may have changed them. Settings built in memory
@@ -499,6 +508,7 @@ impl App {
         self.inv = scan::scan(&self.scope, &self.paths);
         if self.selected.as_deref().is_some_and(|n| self.inv.get(n).is_none()) {
             self.selected = None;
+            self.skill_menu = false;
         }
         let inv = &self.inv;
         self.checked.retain(|n| inv.get(n).is_some());

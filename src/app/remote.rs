@@ -26,6 +26,7 @@ impl App {
     pub fn open_browse(&mut self) {
         self.page = Page::Browse;
         self.toolbar_menu = false;
+        self.skill_menu = false;
         self.query.focused = true;
     }
 
@@ -73,6 +74,7 @@ impl App {
         }
         self.scope = scope;
         self.selected = None;
+        self.skill_menu = false;
         self.rescan();
     }
 

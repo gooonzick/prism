@@ -490,6 +490,7 @@ impl App {
                 let detail = if code == 0 { String::new() } else { "It couldn't be linked into every target".to_string() };
                 self.notify(self.on_host(&format!("Created {name}")), detail, code != 0);
                 self.selected = Some(name);
+                self.skill_menu = false;
                 self.reload_host();
             }
             (Then::NewSkill { name }, outcome) => {

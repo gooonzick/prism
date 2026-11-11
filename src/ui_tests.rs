@@ -2361,3 +2361,187 @@ fn selecting_a_row_lets_go_of_a_stale_menu() {
     h.settle();
     assert!(h.rt.find("toolbar-more-popup-item0").is_none(), "the menu doesn't reopen by itself");
 }
+
+/// What a presented element covers, by key.
+fn rect_of(h: &Harness, key: &str) -> [f32; 4] {
+    h.rt.presented(key).unwrap_or_else(|| panic!("no element keyed {key}")).0
+}
+
+#[test]
+fn skill_actions_fit_one_row_at_minimum() {
+    use crate::ds::size;
+    let long = "vercel-react-best-practices-for-large-apps";
+    // 315 points of title: one line at 320. The longer one has to wrap.
+    let longer = "vercel-react-best-practices-for-large-apps-and-monorepos";
+    let mut h = Harness::project();
+    skill(&h.project_dir().join(".claude/skills"), long);
+    skill(&h.project_dir().join(".claude/skills"), longer);
+    h.rescan();
+    h.rt.set_viewport(crate::ui::MIN_WINDOW, 2.0);
+    h.settle();
+    h.click(&format!("skill-{long}"));
+    let pane = rect_of(&h, "inspector");
+    assert!((pane[2] - size::INSPECTOR_MIN).abs() < 0.5, "the inspector at its minimum: {pane:?}");
+
+    // Open SKILL.md, Copy to…, "…" and Remove… are 340 points; the narrowest inspector has 320,
+    // so Open SKILL.md goes into "…" after Reveal.
+    assert!(h.rt.find("open-md").is_none(), "Open SKILL.md doesn't fit beside Copy to…");
+    let keys = ["copy", "skill-more", "remove"];
+    let rects: Vec<[f32; 4]> = keys.iter().map(|k| rect_of(&h, k)).collect();
+    let mid = |r: &[f32; 4]| r[1] + r[3] / 2.0;
+    for (k, r) in keys.iter().zip(&rects) {
+        assert!((mid(r) - mid(&rects[0])).abs() < 0.5, "{k} {r:?} is on the row of copy {:?}", rects[0]);
+    }
+    for w in rects.windows(2) {
+        assert!(w[0][0] + w[0][2] <= w[1][0] + 0.5, "in order and apart: {rects:?}");
+    }
+    let remove = rects[2];
+    assert!(remove[0] + remove[2] <= pane[0] + pane[2] - size::PANE_EDGE + 0.5, "Remove… {remove:?} ends on the content edge of {pane:?}");
+
+    let overflowing = |h: &Harness| -> Vec<String> {
+        h.rt.elements()
+            .into_iter()
+            .filter(|e| e.path.contains("inspector-scroll") && !e.exiting && e.rect[2] > 0.0)
+            .filter(|e| e.rect[0] < pane[0] - 0.5 || e.rect[0] + e.rect[2] > pane[0] + pane[2] + 0.5)
+            .map(|e| format!("{} {:?}", e.path, e.rect))
+            .collect()
+    };
+    let wide = overflowing(&h);
+    assert!(wide.is_empty(), "wider than the inspector {pane:?}:\n{}", wide.join("\n"));
+
+    h.click(&format!("skill-{longer}"));
+    let title = h.rt.elements().into_iter().find(|e| e.text.as_deref() == Some(longer) && e.path.contains("inspector")).expect("the title");
+    assert!(title.rect[3] > 30.0, "the longer title wraps: {:?}", title.rect);
+    assert!(title.rect[0] + title.rect[2] <= pane[0] + pane[2] - size::PANE_EDGE + 0.5, "inside the content edge: {:?}", title.rect);
+    let wide = overflowing(&h);
+    assert!(wide.is_empty(), "wider than the inspector {pane:?}:\n{}", wide.join("\n"));
+
+    h.click("skill-more");
+    assert_eq!(h.item_label("skill-more", 0).as_deref(), Some("Reveal"));
+    assert_eq!(h.item_label("skill-more", 1).as_deref(), Some("Open SKILL.md"), "after Reveal");
+    assert!(h.item_enabled("skill-more", 1));
+}
+
+#[test]
+fn open_md_stays_in_the_row_when_it_fits() {
+    // A global skill with no project and no host: nowhere to copy to, so no Copy to….
+    let home = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(home.path()).unwrap();
+    skill(&root.join(".agents/skills"), "solo");
+    let mut app = App::new(Paths::isolated(&root), Settings::default());
+    app.open_scope(Scope::Global);
+    let mut rt = Runtime::new(app, crate::ui::view, crate::ui::MIN_WINDOW, Env { system_dark: false, scale: 2.0 });
+    rt.on_key = Some(crate::ui::on_key);
+    rt.frame(0.0);
+    let mut h = Harness { _home: home, root, rt };
+    h.settle();
+    h.click("skill-solo");
+    assert!(h.rt.find("copy").is_none(), "nowhere to copy to");
+    let (open, more, remove) = (rect_of(&h, "open-md"), rect_of(&h, "skill-more"), rect_of(&h, "remove"));
+    assert!((open[1] - more[1]).abs() < 0.5 && (open[1] - remove[1]).abs() < 0.5, "one row: {open:?} {more:?} {remove:?}");
+    h.click("skill-more");
+    assert_eq!(h.item_label("skill-more", 0).as_deref(), Some("Reveal"));
+    assert!(h.rt.find("skill-more-popup-item1").is_none(), "Reveal alone in the menu");
+}
+
+impl Harness {
+    /// Whether item `i` of the menu keyed `menu` takes presses (a disabled item isn't focusable).
+    fn item_enabled(&self, menu: &str, i: usize) -> bool {
+        let key = format!("{menu}-popup-item{i}");
+        self.rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key.as_str())).unwrap_or_else(|| panic!("no {key}")).focusable
+    }
+
+    fn item_label(&self, menu: &str, i: usize) -> Option<String> {
+        let key = format!("{menu}-popup-item{i}");
+        self.rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key.as_str())).and_then(|e| e.label)
+    }
+}
+
+#[test]
+fn reveal_is_in_the_menu() {
+    let mut h = Harness::project();
+    h.click("skill-review");
+    assert!(h.rt.find("reveal").is_none(), "Reveal is no longer a button in the row");
+    h.click("skill-more");
+    assert!(h.rt.state.skill_menu, "the menu is open");
+    assert_eq!(h.item_label("skill-more", 0).as_deref(), Some("Reveal"));
+    assert!(h.item_enabled("skill-more", 0), "a skill on this machine can be revealed");
+    let revealed = crate::app::reveal_log();
+    h.click("skill-more-popup-item0");
+    assert!(!h.rt.state.skill_menu, "choosing closes the menu");
+    let folder = h.project_dir().join(".claude/skills/review");
+    assert_eq!(crate::app::reveal_log()[revealed.len()..], [folder], "Reveal shows the skill's folder");
+}
+
+#[test]
+fn menu_closes_on_selection_change() {
+    let mut h = three_skills();
+    h.rescan();
+    h.click("skill-alpha");
+    h.click("skill-more");
+    assert!(h.rt.state.skill_menu && h.rt.find("skill-more-popup-item0").is_some(), "the menu is open");
+    // While it is drawn the menu holds the arrows, as a menu does; the list stays put.
+    key(&mut h, rune::Key::Down, rune::Mods::default());
+    key(&mut h, rune::Key::Down, rune::Mods::default());
+    assert_eq!(h.rt.state.selected.as_deref(), Some("alpha"), "the arrows move through the menu");
+    assert!(h.rt.find("skill-more-popup-item0").is_some());
+    // The selection moves under it (what ↓ does in the list): the menu goes, and the arrows are
+    // the list's again.
+    h.rt.update(|s, _| {
+        s.step_selection(1, false);
+    });
+    h.settle();
+    assert_eq!(h.rt.state.selected.as_deref(), Some("beta"));
+    assert!(!h.rt.state.skill_menu, "the flag clears");
+    assert!(h.rt.find("skill-more-popup-item0").is_none(), "the menu is gone");
+    key(&mut h, rune::Key::Down, rune::Mods::default());
+    assert_eq!(h.rt.state.selected.as_deref(), Some("gamma"), "↓ moves the selection");
+    key(&mut h, rune::Key::Up, rune::Mods::default());
+    assert_eq!(h.rt.state.selected.as_deref(), Some("beta"), "and keeps moving");
+
+    // Escape closes it too, and ↓ is the list's at once.
+    h.click("skill-more");
+    key(&mut h, rune::Key::Escape, rune::Mods::default());
+    assert!(!h.rt.state.skill_menu && h.rt.find("skill-more-popup-item0").is_none());
+    key(&mut h, rune::Key::Down, rune::Mods::default());
+    assert_eq!(h.rt.state.selected.as_deref(), Some("gamma"));
+}
+
+#[test]
+fn an_open_skill_menu_keeps_list_keys_from_the_list() {
+    let mut h = three_skills();
+    h.rescan();
+    h.click("skill-alpha");
+    h.click("skill-more");
+    key(&mut h, rune::Key::Command('a'), rune::Mods { cmd: true, ..rune::Mods::default() });
+    assert!(h.rt.state.checked.is_empty(), "⌘A doesn't tick rows behind the menu");
+    assert!(h.rt.state.skill_menu);
+}
+
+#[test]
+fn a_skill_menu_left_open_lets_go_when_the_skill_goes() {
+    let mut h = three_skills();
+    h.rescan();
+    h.click("skill-alpha");
+    h.click("skill-more");
+    assert!(h.rt.state.skill_menu);
+    fs::remove_dir_all(h.project_dir().join(".claude/skills/alpha")).unwrap();
+    h.rescan();
+    assert!(h.rt.state.selected.is_none(), "the skill is gone");
+    assert!(!h.rt.state.skill_menu, "and its menu with it");
+    assert!(h.rt.find("skill-more-popup-item0").is_none());
+    key(&mut h, rune::Key::Down, rune::Mods::default());
+    assert!(h.rt.state.selected.is_some(), "↓ selects again");
+}
+
+#[test]
+fn host_disables_local_actions() {
+    let (mut h, _remote) = on_host();
+    h.click("skill-far");
+    h.land_remote();
+    h.click("skill-more");
+    assert_eq!(h.item_label("skill-more", 0).as_deref(), Some("Reveal"));
+    assert!(!h.item_enabled("skill-more", 0), "Reveal stays in the menu, disabled");
+    assert_eq!(h.item_label("skill-more", 1).as_deref(), Some("Open SKILL.md"));
+    assert!(!h.item_enabled("skill-more", 1), "a host's SKILL.md can't be opened here");
+}

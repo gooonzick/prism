@@ -55,10 +55,20 @@ impl App {
         self.selected = Some(name.to_string());
         // Opening the inspector narrows the list: a "…" left open from before must not pop up.
         self.toolbar_menu = false;
+        // The inspector's "…" was for the skill selected before.
+        self.skill_menu = false;
         self.load_preview();
         if !self.inspector.is_open() {
             self.inspector.toggle();
         }
+    }
+
+    /// The skill inspector's "…" menu is drawn: open, on the Skills page, over a skill that is
+    /// there, with no host's connecting or error pane in place of the page. Only then does it
+    /// hold the keys.
+    pub fn skill_menu_shown(&self) -> bool {
+        let host_pending = matches!(&self.env, super::Env::Remote { state, .. } if *state != super::RemoteState::Ready);
+        self.skill_menu && self.page == super::Page::Installed && !host_pending && self.selected.as_deref().is_some_and(|n| self.inv.get(n).is_some())
     }
 
     pub(super) fn load_preview(&mut self) {
@@ -425,8 +435,22 @@ pub fn open_path(path: &std::path::Path) {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// What `reveal_path` was asked to show on this thread, in tests.
+    static REVEALED: std::cell::RefCell<Vec<std::path::PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The paths `reveal_path` was asked to show on this thread so far.
+#[cfg(test)]
+pub fn reveal_log() -> Vec<std::path::PathBuf> {
+    REVEALED.with(|r| r.borrow().clone())
+}
+
 /// Shows a file or folder in Finder, or the desktop's file manager.
 pub fn reveal_path(path: &std::path::Path) {
+    #[cfg(test)]
+    REVEALED.with(|r| r.borrow_mut().push(path.to_path_buf()));
     if cfg!(test) {
         return;
     }

@@ -345,6 +345,7 @@ impl App {
                 self.mcp_revealed.clear();
                 if self.selected.as_deref().is_some_and(|n| self.inv.get(n).is_none()) {
                     self.selected = None;
+                    self.skill_menu = false;
                 }
                 let inv = &self.inv;
                 self.checked.retain(|n| inv.get(n).is_some());

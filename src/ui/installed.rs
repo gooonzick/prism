@@ -18,7 +18,8 @@ pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>, reduced: bool, room: Option<f
     let targets = s.targets();
     let visible = s.visible();
     let unsynced = s.filter_count(Filter::NeedsSync);
-    (main(s, &visible, &targets, k, reduced), toolbar(s, unsynced, room, k, layer), inspector::installed(s, k))
+    let toolbar = toolbar(s, unsynced, room, k, layer);
+    (main(s, &visible, &targets, k, reduced), toolbar, inspector::installed(s, k, layer))
 }
 
 /// Tabs, the title, New skill, Check skills.sh for updates, Rescan and Sync. When the list pane

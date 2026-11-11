@@ -277,6 +277,11 @@ pub fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
         s.toolbar_menu = false;
         return true;
     }
+    // The skill inspector's open "…" takes the keys: arrows move through it, Escape closes it.
+    // Only while it is drawn, so a flag left behind never swallows a key.
+    if s.skill_menu_shown() {
+        return false;
+    }
     if ev.key == rune::Key::Escape && !s.checked.is_empty() && !s.sync_open() && s.confirm_remove.is_none() {
         s.clear_checked();
         return true;
