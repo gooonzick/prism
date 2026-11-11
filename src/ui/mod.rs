@@ -64,10 +64,13 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         let g = crate::ds::gallery::<App>(&k, &mut layer);
         return rune_kit::root(g, layer);
     }
+    // The inspector as it will be drawn: its width decides which actions fit in its row.
+    let pane = inspector_pane(s, cx);
+    let inspector_width = pane.map_or(size::INSPECTOR_MIN, |p| p.width());
     let (main, toolbar, inspector) = match (s.page.clone(), hosts::pending(s, &k)) {
         // A host whose state isn't in yet: what is happening with it, in place of the page.
         (Page::Installed | Page::Mcp, Some(pane)) => (pane, toolbar(s, &k, s.env_label(), row()), inspector_body(&k)),
-        (Page::Installed, None) => installed::page(s, &k, &mut layer, cx.is_reduced_motion(), toolbar_room(cx)),
+        (Page::Installed, None) => installed::page(s, &k, &mut layer, cx.is_reduced_motion(), toolbar_room(cx), inspector_width),
         (Page::Mcp, None) => mcp::page(s, &k, &mut layer),
         (Page::Browse, _) => browse::page(s, &k, &mut layer),
     };
@@ -93,7 +96,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         layer.push(ToastRegion::new().toast(toast.build(&k)).build(&k));
     }
     let mut split = SplitView::new(main).sidebar(&s.sidebar, |s: &mut App| &mut s.sidebar, sidebar(s, &k, &mut layer));
-    if let Some(pane) = inspector_pane(s, cx) {
+    if let Some(pane) = pane {
         split = split.inspector(&pane, |s: &mut App| &mut s.inspector, scroll_pane("inspector-scroll", inspector));
     }
     let split = split
@@ -275,6 +278,8 @@ pub fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
         s.sidebar.toggle();
         // The list's width changes, and with it whether the Skills toolbar folds into "…".
         s.toolbar_menu = false;
+        // The inspector's width may change too, and with it what its "…" holds.
+        s.skill_menu = false;
         return true;
     }
     // The skill inspector's open "…" takes the keys: arrows move through it, Escape closes it.

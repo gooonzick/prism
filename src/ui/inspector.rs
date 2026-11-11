@@ -11,7 +11,8 @@ use crate::ds::{self, Card, Inspector, MenuAction, Notice, Place, Tone, item_row
 use crate::scan::{Placement, Skill};
 use crate::skill::manifest_path;
 
-pub fn installed(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
+/// `width` is the inspector's drawn width (`ui::inspector_pane`).
+pub fn installed(s: &App, k: &Kit, layer: &mut Vec<El>, width: f32) -> El {
     let Some(skill) = s.selected.as_deref().and_then(|n| s.inv.get(n)) else {
         return Inspector::empty(k, "No skill selected", "Click a skill, or move through the list with ↑ and ↓.");
     };
@@ -19,7 +20,7 @@ pub fn installed(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     if !skill.description.is_empty() {
         ins = ins.description(skill.description.clone());
     }
-    let (left, right) = actions(s, skill, k, layer);
+    let (left, right) = actions(s, skill, k, layer, width);
     ins = ins.actions(left, Some(right));
     if s.has_update(&skill.name) {
         ins = ins.notice(update_notice(s, &skill.name, k));
@@ -42,29 +43,29 @@ fn update_notice(s: &App, name: &str, k: &Kit) -> El {
     Notice::new(Tone::Info, "A newer version is on skills.sh").action(update).build(k).key("update-banner")
 }
 
-/// Whether the action row fits on one line in the narrowest inspector with Open SKILL.md
+/// Whether the action row fits on one line in an inspector `width` wide with Open SKILL.md
 /// visible (Copy to… when `copy`), measured as the kit lays the buttons out.
-fn row_fits(k: &Kit, copy: bool) -> bool {
+fn row_fits(k: &Kit, width: f32, copy: bool) -> bool {
     let place = Place::Inspector;
     let mut buttons = vec![ds::button_width(k, "Open SKILL.md", place, false)];
     if copy {
         buttons.push(ds::button_width(k, "Copy to…", place, false));
     }
     // The overflow button, then Remove… pinned right; one gap before each control after the first.
-    let width = buttons.iter().sum::<f32>() + place.height() + ds::button_width(k, "Remove…", place, false) + (buttons.len() + 1) as f32 * space::S2;
-    width <= size::INSPECTOR_MIN - 2.0 * size::PANE_EDGE
+    let row = buttons.iter().sum::<f32>() + place.height() + ds::button_width(k, "Remove…", place, false) + (buttons.len() + 1) as f32 * space::S2;
+    row <= width - 2.0 * size::PANE_EDGE
 }
 
 /// Open SKILL.md and Copy to… on the left, then "…" with Reveal; Remove… on the right. When
-/// the row would not fit the narrowest inspector, Open SKILL.md goes into "…" after Reveal.
-fn actions(s: &App, skill: &Skill, k: &Kit, layer: &mut Vec<El>) -> (Vec<El>, El) {
+/// the row would not fit an inspector `width` wide, Open SKILL.md goes into "…" after Reveal.
+fn actions(s: &App, skill: &Skill, k: &Kit, layer: &mut Vec<El>, width: f32) -> (Vec<El>, El) {
     // A host's files aren't on this machine: nothing here opens or reveals them.
     let remote = s.is_remote();
     // Looking for the file reads the disk: a host's folder isn't on this machine.
     let manifest = if remote { None } else { skill.source.as_deref().and_then(manifest_path) };
     let folder = skill.source.clone();
     let can_copy = s.can_copy();
-    let open_visible = row_fits(k, can_copy);
+    let open_visible = row_fits(k, width, can_copy);
     let open_disabled = remote || manifest.is_none();
     let open = move |_: &mut App| {
         if let Some(p) = &manifest {
@@ -117,7 +118,9 @@ fn agents(s: &App, skill: &Skill, k: &Kit) -> Option<El> {
     }
     let label = if s.show_all_agents { "Show fewer agents".to_string() } else { format!("Show {} more agents", hidden.len()) };
     let more = ds::quiet(label, Place::Inspector).on_press(|s: &mut App| s.show_all_agents = !s.show_all_agents).build(k).key("more-agents");
-    card.row(plain_row(row().child(more))).build(k)
+    // The kit pads a Regular button's label by `S3`: pulled out by as much, the words line up
+    // with the agent names above them.
+    card.row(plain_row(row().child(more.ml(-space::S3)))).build(k)
 }
 
 fn placement_row(s: &App, skill: &Skill, a: usize, k: &Kit) -> El {

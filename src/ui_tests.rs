@@ -2539,9 +2539,65 @@ fn host_disables_local_actions() {
     let (mut h, _remote) = on_host();
     h.click("skill-far");
     h.land_remote();
+    let open = h.rt.elements().into_iter().find(|e| e.key.as_deref() == Some("open-md")).expect("Open SKILL.md in the row");
+    assert!(!open.focusable, "a host's SKILL.md can't be opened here");
     h.click("skill-more");
     assert_eq!(h.item_label("skill-more", 0).as_deref(), Some("Reveal"));
     assert!(!h.item_enabled("skill-more", 0), "Reveal stays in the menu, disabled");
+    key(&mut h, rune::Key::Escape, rune::Mods::default());
+    // At 352 Open SKILL.md is in the menu, disabled there too.
+    h.rt.set_viewport(crate::ui::MIN_WINDOW, 2.0);
+    h.settle();
+    h.click("skill-more");
     assert_eq!(h.item_label("skill-more", 1).as_deref(), Some("Open SKILL.md"));
-    assert!(!h.item_enabled("skill-more", 1), "a host's SKILL.md can't be opened here");
+    assert!(!h.item_enabled("skill-more", 1), "disabled in the menu too");
+}
+
+#[test]
+fn open_md_follows_the_inspector_width() {
+    // The default window: a 380 inspector has room for Open SKILL.md beside Copy to….
+    let mut h = Harness::project();
+    h.click("skill-review");
+    assert!((rect_of(&h, "inspector")[2] - 380.0).abs() < 0.5, "the default inspector");
+    let keys = ["open-md", "copy", "skill-more", "remove"];
+    let rects: Vec<[f32; 4]> = keys.iter().map(|k| rect_of(&h, k)).collect();
+    for (k, r) in keys.iter().zip(&rects) {
+        assert!((r[1] - rects[0][1]).abs() < 0.5, "{k} {r:?} on one row with open-md {:?}", rects[0]);
+    }
+    h.click("skill-more");
+    assert_eq!(h.item_label("skill-more", 0).as_deref(), Some("Reveal"));
+    assert!(h.rt.find("skill-more-popup-item1").is_none(), "Open SKILL.md is in the row, not the menu");
+    key(&mut h, rune::Key::Escape, rune::Mods::default());
+
+    // The smallest window: a 352 inspector, so Open SKILL.md goes into "…" after Reveal.
+    h.rt.set_viewport(crate::ui::MIN_WINDOW, 2.0);
+    h.settle();
+    assert!(h.rt.find("open-md").is_none(), "no room at 352");
+    let (copy, remove) = (rect_of(&h, "copy"), rect_of(&h, "remove"));
+    assert!((copy[1] - remove[1]).abs() < 0.5, "one row: {copy:?} {remove:?}");
+    h.click("skill-more");
+    assert_eq!(h.item_label("skill-more", 1).as_deref(), Some("Open SKILL.md"));
+}
+
+#[test]
+fn show_more_agents_lines_up_with_the_names() {
+    let mut h = Harness::project();
+    h.click("skill-review");
+    let elements = h.rt.elements();
+    let text_x = |pred: &dyn Fn(&str) -> bool| elements.iter().find(|e| e.text.as_deref().is_some_and(pred) && e.path.contains("placements")).map(|e| e.rect[0]);
+    let name = text_x(&|t| t == ".agents").expect("the .agents name");
+    let more = text_x(&|t| t.starts_with("Show ") && t.ends_with(" more agents")).expect("Show N more agents");
+    assert!((more - name).abs() < 0.5, "Show more agents at {more}, names at {name}");
+}
+
+#[test]
+fn sidebar_toggle_lets_go_of_the_skill_menu() {
+    let mut h = Harness::project();
+    h.click("skill-review");
+    h.click("skill-more");
+    assert!(h.rt.state.skill_menu);
+    let open = h.rt.state.sidebar.is_open();
+    key(&mut h, rune::Key::Command('b'), rune::Mods { cmd: true, shift: true, ..rune::Mods::default() });
+    assert_ne!(h.rt.state.sidebar.is_open(), open, "⇧⌘B toggles the sidebar");
+    assert!(!h.rt.state.skill_menu, "and lets go of the menu");
 }

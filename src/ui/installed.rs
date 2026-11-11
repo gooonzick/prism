@@ -13,13 +13,13 @@ use crate::scan::{Placement, Skill};
 const FILTERS: [Filter; 4] = [Filter::All, Filter::NeedsSync, Filter::Broken, Filter::Updates];
 
 /// `room` is what the toolbar has beside its tabs (`ui::toolbar_room`); `None` before the first
-/// layout.
-pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>, reduced: bool, room: Option<f32>) -> (El, Toolbar, El) {
+/// layout. `inspector` is the inspector's drawn width (`ui::inspector_pane`).
+pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>, reduced: bool, room: Option<f32>, inspector: f32) -> (El, Toolbar, El) {
     let targets = s.targets();
     let visible = s.visible();
     let unsynced = s.filter_count(Filter::NeedsSync);
     let toolbar = toolbar(s, unsynced, room, k, layer);
-    (main(s, &visible, &targets, k, reduced), toolbar, inspector::installed(s, k, layer))
+    (main(s, &visible, &targets, k, reduced), toolbar, inspector::installed(s, k, layer, inspector))
 }
 
 /// Tabs, the title, New skill, Check skills.sh for updates, Rescan and Sync. When the list pane
