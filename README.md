@@ -85,6 +85,14 @@ By default Prism links into the agents installed on your machine; you can change
 
 ## Install
 
+### Homebrew (macOS)
+
+```bash
+brew install --cask gooonzick/tap/prism
+```
+
+This installs `Prism.app` (Apple silicon) and puts `prism` on your `PATH`. The app isn't notarized; the cask clears the download flag so it opens without a Gatekeeper prompt. Run `prism setup` once to install the `prism` skill for your agents.
+
 ### Download
 
 Grab the latest build from [Releases](https://github.com/gooonzick/prism/releases/latest).
@@ -129,7 +137,7 @@ cargo run --release -- ~/path/to/project
 
 ## Command line
 
-The app is also a command line tool, for you and for your agents. On macOS, choose **Install Command Line Tool…** in the app menu, or run the binary inside the app once:
+The app is also a command line tool, for you and for your agents. With Homebrew, `prism` is already on your `PATH`. Otherwise, on macOS, choose **Install Command Line Tool…** in the app menu, or run the binary inside the app once:
 
 ```bash
 /Applications/Prism.app/Contents/MacOS/prism setup

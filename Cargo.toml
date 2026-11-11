@@ -1,6 +1,6 @@
 [package]
 name = "prism"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Browse, install and sync agent skills across .agents, .claude, .codex, .opencode and more"
 license = "MIT"
