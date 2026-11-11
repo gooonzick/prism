@@ -6,7 +6,7 @@ use rune_kit::{Button, ButtonVariant, Checkbox, Kit, Select, TextInput};
 
 use crate::agents::Scope;
 use crate::app::{App, RepoListing};
-use crate::ds::{self, Card, Inspector, ListRow, Page, Place, pair_row, space, stacked_row, text};
+use crate::ds::{self, Card, Inspector, ListRow, Page, Place, pair_row, size, space, stacked_row, text};
 use crate::remote::RemoteSkill;
 
 /// The scopes installs can go to, as labels: global first, then the projects. They are this
@@ -17,7 +17,8 @@ fn scope_options(s: &App) -> Vec<(String, Scope)> {
     v
 }
 
-pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>) -> (El, Toolbar, El) {
+/// `width` is the list pane's drawn width (`None` before the first layout).
+pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>, width: Option<f32>) -> (El, Toolbar, El) {
     let options = scope_options(s);
     let labels: Vec<String> = options.iter().map(|(l, _)| l.clone()).collect();
     let current = s.install_label(s.local_scope());
@@ -36,10 +37,10 @@ pub fn page(s: &App, k: &Kit, layer: &mut Vec<El>) -> (El, Toolbar, El) {
         .build(k, layer)
         .key("install-scope");
     let toolbar = super::toolbar_untabbed(k, "skills.sh", row().gap(space::S2).center_y().child(text::label(k, "Install into")).child(scope_select));
-    (main(s, k), toolbar, details(s, k))
+    (main(s, k, width), toolbar, details(s, k))
 }
 
-fn main(s: &App, k: &Kit) -> El {
+fn main(s: &App, k: &Kit, width: Option<f32>) -> El {
     let search = ds::filter(&s.query, "Search skills.sh")
         .label("Search skills.sh")
         .on_edit(|s: &mut App| &mut s.query)
@@ -61,12 +62,16 @@ fn main(s: &App, k: &Kit) -> El {
         }
         Ok(r) => page = page.rows(r.iter().map(|skill| result_row(s, skill, k))),
     }
-    page.footer(from_source(s, k)).build(k)
+    page.footer(from_source(s, k, width)).build(k)
 }
 
-/// "Or install straight from a repository": the source, then Show skills and Install all under
-/// it, so the input keeps its width in the narrowest list.
-fn from_source(s: &App, k: &Kit) -> El {
+/// The narrowest the source input may get beside its buttons.
+const SOURCE_MIN: f32 = 200.0;
+
+/// "Or install straight from a repository": the source, Show skills and Install all on one line
+/// when the list pane `width` has room for them, else the buttons under the input so it keeps
+/// its width in the narrowest list.
+fn from_source(s: &App, k: &Kit, width: Option<f32>) -> El {
     let source = TextInput::new(&s.source)
         .placeholder("owner/repo, owner/repo@skill or a URL")
         .width(None)
@@ -95,13 +100,18 @@ fn from_source(s: &App, k: &Kit) -> El {
                 .build(k)
                 .key("install-source"),
         );
+    let buttons_width = ds::button_width(k, "Show skills", Place::List, false) + ds::button_width(k, "Install all", Place::List, false) + space::S2;
+    let side_by_side = width.is_none_or(|w| w - 2.0 * size::PANE_EDGE >= SOURCE_MIN + space::S2 + buttons_width);
     col()
         .key("from-source")
         .w_full()
         .gap(space::S2)
         .child(text::label(k, "Or install straight from a repository"))
-        .child(source)
-        .child(buttons)
+        .child(if side_by_side {
+            row().w_full().gap(space::S2).center_y().child(col().grow(1.0).min_w(0.0).child(source)).child(buttons)
+        } else {
+            col().w_full().gap(space::S2).child(source).child(buttons)
+        })
 }
 
 fn result_row(s: &App, skill: &RemoteSkill, k: &Kit) -> El {

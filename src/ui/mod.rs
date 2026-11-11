@@ -72,7 +72,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         (Page::Installed | Page::Mcp, Some(pane)) => (pane, toolbar(s, &k, s.env_label(), row()), inspector_body(&k)),
         (Page::Installed, None) => installed::page(s, &k, &mut layer, cx.is_reduced_motion(), toolbar_room(cx), inspector_width),
         (Page::Mcp, None) => mcp::page(s, &k, &mut layer, cx.is_reduced_motion(), toolbar_room(cx)),
-        (Page::Browse, _) => browse::page(s, &k, &mut layer),
+        (Page::Browse, _) => browse::page(s, &k, &mut layer, cx.layout_with("main-pane", |r| r[2])),
     };
     dialogs::sync(s, &k, &mut layer);
     dialogs::remove(s, &k, &mut layer);

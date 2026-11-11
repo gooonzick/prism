@@ -2879,7 +2879,7 @@ fn installed_skill_wears_a_tag() {
 #[test]
 fn repo_footer_stays_visible() {
     let h = browse_with(40);
-    let (window, _) = h.rt.presented("browse-page").expect("the page");
+    let (window, _) = h.rt.presented("main-pane").expect("the pane");
     let (source, _) = h.rt.presented("source").expect("the repository input");
     let (list, _) = h.rt.presented("list").expect("the results");
     assert!(source[1] >= window[1] && source[1] + source[3] <= window[1] + window[3] + 0.5, "the input {source:?} is inside the page {window:?}");
@@ -2900,7 +2900,27 @@ fn skills_sh_toolbar_fits_the_smallest_window() {
     let (pane, _) = h.rt.presented("main-pane").unwrap();
     let (scope, _) = h.rt.presented("install-scope").expect("the scope select");
     assert!(scope[0] >= pane[0] && scope[0] + scope[2] <= pane[0] + pane[2] + 0.5, "the select {scope:?} is inside the pane {pane:?}");
-    if let Some((title, _)) = h.rt.presented("title") {
-        assert!(title[0] + title[2] <= scope[0] + 0.5, "the title {title:?} ends before the select {scope:?}");
+    let (title, _) = h.rt.presented("title").expect("the title");
+    assert!(title[0] + title[2] <= scope[0] + 0.5, "the title {title:?} ends before the select {scope:?}");
+}
+
+#[test]
+fn repo_footer_is_side_by_side_when_it_fits_and_stacks_when_not() {
+    let h = browse_with(3);
+    let rect = |k: &str| h.rt.presented(k).unwrap().0;
+    let (source, show, all) = (rect("source"), rect("list-source"), rect("install-source"));
+    assert!((source[1] - show[1]).abs() < 14.0 && (show[1] - all[1]).abs() < 0.5, "one row: {source:?} {show:?} {all:?}");
+    assert!(source[0] + source[2] <= show[0] && show[0] + show[2] <= all[0] + 0.5, "input, Show skills, Install all in order");
+
+    let mut h = browse_with(3);
+    h.rt.set_viewport(crate::ui::MIN_WINDOW, 2.0);
+    h.settle();
+    h.click("result-owner/repo/skill-0");
+    assert!(h.rt.find("inspector").is_some());
+    let rect = |k: &str| h.rt.presented(k).unwrap().0;
+    let (pane, source, show, all) = (rect("main-pane"), rect("source"), rect("list-source"), rect("install-source"));
+    assert!(source[1] + source[3] <= show[1] + 0.5 && show[1] == all[1], "stacked: {source:?} {show:?} {all:?}");
+    for r in [source, show, all] {
+        assert!(r[0] >= pane[0] && r[0] + r[2] <= pane[0] + pane[2] + 0.5 && r[1] + r[3] <= pane[1] + pane[3] + 0.5, "{r:?} inside {pane:?}");
     }
 }
