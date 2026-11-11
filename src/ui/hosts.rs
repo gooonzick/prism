@@ -1,28 +1,15 @@
 //! Environments in the window: the switcher above the scopes, the Add host dialog, and what
 //! the main pane shows until a host's state is in.
 
-use rune::{El, Tx, col, icon, row, text};
-use rune_kit::{Button, ButtonVariant, Dialog, Kit, Placement, Select, SelectAppearance, TextInput, glyphs};
+use rune::{El, Tx, col, row};
+use rune_kit::{Kit, Placement, Select, SelectAppearance, TextInput};
 
 use crate::app::{App, Env, RemoteState};
-use crate::ds::{self, Place, size, space};
+use crate::ds::{self, Card, DialogFrame, DialogKind, Place, field, size, space, text};
 use crate::hosts::copy::this_machine;
 use crate::hosts::install::{Health, VERSION};
 
 const ADD_HOST: &str = "Add host…";
-
-// The kit dialog's layout, until the host dialogs move onto `ds::DialogFrame`.
-fn dialog_body() -> El {
-    col().w_full().px(16.0).pb(16.0).gap(16.0)
-}
-
-fn note(t: &str, k: &Kit) -> El {
-    text(t.to_string()).font(k.ty.ui).color(k.c.text_muted).wrap()
-}
-
-fn field_block(label: &str, input: El, k: &Kit) -> El {
-    col().w_full().gap(6.0).child(text(label.to_string()).font(k.ty.small_medium).color(k.c.text_base)).child(input)
-}
 
 /// This machine, the saved hosts, and "Add host…".
 pub fn switcher(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
@@ -88,6 +75,11 @@ pub fn browse_note(s: &App, k: &Kit) -> Option<El> {
     Some(ds::text::hint(k, format!("skills.sh installs go to {here}; copy them to {} afterwards", host.name)).key("browse-host-note"))
 }
 
+/// Cancel in a dialog's footer.
+fn cancel(key: &str, k: &Kit, on: impl Fn(&mut App) + 'static) -> El {
+    ds::button("Cancel", Place::Bar).on_press(on).build(k).key(key.to_string())
+}
+
 /// A name and an ssh target, saved on this machine; then the window connects.
 pub fn add_host(s: &App, k: &Kit, layer: &mut Vec<El>) {
     let Some(form) = &s.add_host else { return };
@@ -107,33 +99,15 @@ pub fn add_host(s: &App, k: &Kit, layer: &mut Vec<El>) {
         .on_submit(|s: &mut App, _: &mut Tx| s.save_host())
         .build(k)
         .key("host-ssh");
-    let mut body = dialog_body()
-        .child(note("Prism connects with ssh and your keys, never a password; the host needs this version of prism, which the window can install.", k))
-        .child(field_block("Name", name, k))
-        .child(field_block("ssh target", ssh, k));
-    if let Some(e) = &form.error {
-        body = body.child(
-            row()
-                .key("host-error")
-                .gap(6.0)
-                .center_y()
-                .child(icon(&glyphs::CIRCLE_X, 14.0).color(k.c.danger.icon))
-                .child(text(e.clone()).font(k.ty.small).color(k.c.text_muted).wrap()),
-        );
-    }
-    let buttons = row()
-        .w_full()
-        .gap(8.0)
-        .justify_end()
-        .child(Button::new("Cancel").variant(ButtonVariant::Ghost).on_press(|s: &mut App| s.add_host = None).build(k).key("host-cancel"))
-        .child(Button::new("Add host").variant(ButtonVariant::Contrast).on_press(|s: &mut App| s.save_host()).build(k).key("host-add"));
-    Dialog::new("add-host-dialog", "Add host")
-        .width(480.0)
-        .fit()
-        .open(true)
-        .on_close(|s: &mut App| s.add_host = None)
-        .child(body.child(buttons))
-        .build(k, layer);
+    let fields = Card::new("add-host-fields").row(field(k, "Name", name)).row(field(k, "ssh target", ssh));
+    let add = ds::primary("Add host", Place::Bar).on_press(|s: &mut App| s.save_host()).build(k).key("host-add");
+    DialogFrame::new("add-host", "Add host", DialogKind::Form)
+        .body(text::body(k, "Prism connects with ssh and your keys, never a password; the host needs this version of prism, which the window can install."))
+        .body(fields.build(k).expect("two fields"))
+        .error(form.error.clone())
+        .error_key("host-error")
+        .footer(cancel("host-cancel", k, |s| s.add_host = None), add)
+        .build(k, |s: &mut App| s.add_host = None, layer);
 }
 
 /// Add project… on a host: the folder's path on that machine, typed, since no folder picker
@@ -150,30 +124,13 @@ pub fn add_project(s: &App, k: &Kit, layer: &mut Vec<El>) {
         .on_submit(|s: &mut App, _: &mut Tx| s.save_host_project())
         .build(k)
         .key("host-project-path");
-    let mut body = dialog_body()
-        .child(note(&format!("Type the project's folder on {name}. Its skills and MCP servers show once {name} lists it."), k))
-        .child(field_block("Folder", path, k));
-    if let Some(e) = &form.error {
-        body = body.child(
-            row()
-                .key("host-project-error")
-                .gap(6.0)
-                .center_y()
-                .child(icon(&glyphs::CIRCLE_X, 14.0).color(k.c.danger.icon))
-                .child(text(e.clone()).font(k.ty.small).color(k.c.text_muted).wrap()),
-        );
-    }
-    let buttons = row()
-        .w_full()
-        .gap(8.0)
-        .justify_end()
-        .child(Button::new("Cancel").variant(ButtonVariant::Ghost).on_press(|s: &mut App| s.host_project = None).build(k).key("host-project-cancel"))
-        .child(Button::new("Add project").variant(ButtonVariant::Contrast).on_press(|s: &mut App| s.save_host_project()).build(k).key("host-project-add"));
-    Dialog::new("host-project-dialog", format!("Add a project on {name}"))
-        .width(480.0)
-        .fit()
-        .open(true)
-        .on_close(|s: &mut App| s.host_project = None)
-        .child(body.child(buttons))
-        .build(k, layer);
+    let fields = Card::new("host-project-fields").row(field(k, "Folder", path));
+    let add = ds::primary("Add project", Place::Bar).on_press(|s: &mut App| s.save_host_project()).build(k).key("host-project-add");
+    // The frame keys its error line `host-project-error`.
+    DialogFrame::new("host-project", format!("Add a project on {name}"), DialogKind::Form)
+        .body(text::body(k, format!("Type the project's folder on {name}. Its skills and MCP servers show once {name} lists it.")))
+        .body(fields.build(k).expect("one field"))
+        .error(form.error.clone())
+        .footer(cancel("host-project-cancel", k, |s| s.host_project = None), add)
+        .build(k, |s: &mut App| s.host_project = None, layer);
 }

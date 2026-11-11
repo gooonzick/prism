@@ -9,7 +9,7 @@ mod installed;
 mod mcp;
 mod mcp_dialogs;
 
-use rune::{Chrome, Color, Cx, El, Icon, KeyEvent, ScrollSpec, Tx, col, el, row, text};
+use rune::{Chrome, Cx, El, Icon, KeyEvent, ScrollSpec, Tx, col, row};
 use rune_kit::shell::{self, PaneState, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar};
 use rune_kit::{Kit, Toast, ToastRegion, glyphs};
 
@@ -267,15 +267,6 @@ pub fn scroll_pane(key: &str, content: El) -> El {
     col().key(key.to_string()).w_full().h_full().min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(content)
 }
 
-/// A small heading over a group in a pane.
-pub fn heading(label: &str, k: &Kit) -> El {
-    text(label.to_string()).font(k.ty.small_medium).color(k.c.text_faint)
-}
-
-pub fn dot(color: Color) -> El {
-    el().size(7.0, 7.0).radius(3.5).fill(color)
-}
-
 pub fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if shell::is_sidebar_toggle(ev) {
         s.sidebar.toggle();
@@ -358,9 +349,5 @@ pub fn pick_hint() -> &'static str {
 
 pub fn inspector_body(k: &Kit) -> El {
     let _ = k;
-    col().key("inspector").w_full().padding(16.0).gap(16.0)
-}
-
-pub fn row_gap() -> El {
-    row().gap(8.0).center_y()
+    col().key("inspector").w_full().padding(space::S4).gap(space::S4)
 }

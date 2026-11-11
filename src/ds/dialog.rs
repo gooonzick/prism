@@ -37,6 +37,8 @@ pub struct DialogFrame {
     kind: DialogKind,
     body: Vec<El>,
     error: Option<String>,
+    /// A second key for the error's text, besides the line's `<key>-error`.
+    error_key: Option<String>,
     /// Cancel and, unless the footer is cancel-only, the primary action.
     footer: Option<(El, Option<El>)>,
     menus: Vec<El>,
@@ -44,7 +46,7 @@ pub struct DialogFrame {
 
 impl DialogFrame {
     pub fn new(key: impl Into<String>, title: impl Into<String>, kind: DialogKind) -> Self {
-        DialogFrame { key: key.into(), title: title.into(), kind, body: Vec::new(), error: None, footer: None, menus: Vec::new() }
+        DialogFrame { key: key.into(), title: title.into(), kind, body: Vec::new(), error: None, error_key: None, footer: None, menus: Vec::new() }
     }
 
     /// A block of the body; blocks stack with a gap of `S4`.
@@ -56,6 +58,13 @@ impl DialogFrame {
     /// A message shown above the footer with a danger icon.
     pub fn error(mut self, e: Option<String>) -> Self {
         self.error = e;
+        self
+    }
+
+    /// Keys the error's text `key`, for a screen whose error had a key of its own before it moved
+    /// into the frame. The line keeps its `<key>-error`.
+    pub fn error_key(mut self, key: impl Into<String>) -> Self {
+        self.error_key = Some(key.into());
         self
     }
 
@@ -112,6 +121,10 @@ impl DialogFrame {
             .child(header)
             .child(body);
         if let Some(e) = self.error {
+            let mut message = text::body(k, e).grow(1.0).min_w(0.0);
+            if let Some(key) = self.error_key {
+                message = message.key(key);
+            }
             panel = panel.child(
                 row()
                     .key(format!("{key}-error"))
@@ -121,7 +134,7 @@ impl DialogFrame {
                     .gap(space::S2)
                     .items_start()
                     .child(icon(&glyphs::CIRCLE_X, size::ICON).color(color::bad(k)).mt(2.0))
-                    .child(text::body(k, e).grow(1.0).min_w(0.0)),
+                    .child(message),
             );
         }
         match self.footer {

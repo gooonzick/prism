@@ -217,6 +217,18 @@ fn tick_all_follows_the_filter_and_toggles_off() {
 }
 
 impl Harness {
+    /// Clicks the element keyed `key` inside the one keyed `parent`: for rune-kit's segments,
+    /// which key themselves `segment<i>` in every group.
+    fn click_in(&mut self, parent: &str, key: &str) {
+        let inside = format!("/{parent}/");
+        let e = self.rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key) && e.path.contains(&inside) && !e.exiting);
+        let r = e.unwrap_or_else(|| panic!("no {key} in {parent}")).rect;
+        let (x, y) = (r[0] + r[2] * 0.5, r[1] + r[3] * 0.5);
+        self.rt.pointer_down(x, y);
+        self.rt.pointer_up(x, y);
+        self.settle();
+    }
+
     fn click_with(&mut self, key: &str, mods: rune::Mods) {
         self.rt.physical_input(rune::PhysicalInput::Modifiers(mods));
         self.rt.frame(0.0);
@@ -903,7 +915,7 @@ fn add_validation_messages() {
     h.click("mcp-add-save");
     assert_eq!(error(&h), "Two variables are named TOKEN");
     assert!(!h.texts().contains("fake-dup-secret"));
-    h.click("mcp-add-kind-http");
+    h.click_in("mcp-add-kind", "segment1");
     h.click("mcp-add-save");
     assert_eq!(error(&h), "Give the server's URL");
     h.fill_form(|f| {
@@ -3011,4 +3023,137 @@ fn escape_closes_skill_dialogs() {
         key(&mut h, rune::Key::Escape, rune::Mods::default());
         assert!(h.rt.find(dialog).is_none(), "Escape closes {dialog}");
     }
+}
+
+// MCP and host dialogs.
+
+/// The text drawn inside the element keyed `key` (its own and its descendants').
+fn texts_in(h: &Harness, key: &str) -> String {
+    let es = h.rt.elements();
+    let path = es.iter().find(|e| e.key.as_deref() == Some(key) && !e.exiting).map(|e| e.path.clone()).unwrap_or_else(|| panic!("no element keyed {key}"));
+    es.into_iter().filter(|e| e.path.starts_with(&path) && !e.exiting).filter_map(|e| e.text).collect::<Vec<_>>().join("\n")
+}
+
+/// Each MCP and host dialog has its kind's width: a plan with picks (Copy, Merge) is Wide, the
+/// form, the plans without picks beside them (Edit, Remove) and the host dialogs Form.
+#[test]
+fn mcp_dialog_widths() {
+    use crate::ds::size;
+    let mut h = mcp_home();
+    h.mcp_global();
+    h.click("mcp-add");
+    assert_eq!(rect_of(&h, "mcp-form-dialog")[2], size::DIALOG_FORM, "the add form");
+    h.click("mcp-add-cancel");
+
+    h.click("mcp-row-plata");
+    h.click("mcp-copy");
+    assert_eq!(rect_of(&h, "mcp-plan-dialog")[2], size::DIALOG_WIDE, "copy, with picks");
+    h.click("mcp-cancel");
+
+    h.click("mcp-remove");
+    assert!(h.rt.find("mcp-remove-from-claude").is_some(), "remove's picks");
+    assert_eq!(rect_of(&h, "mcp-plan-dialog")[2], size::DIALOG_FORM, "remove: its picks above the plan");
+    h.click("mcp-cancel");
+
+    h.click("mcp-edit");
+    assert_eq!(rect_of(&h, "mcp-form-dialog")[2], size::DIALOG_FORM, "the edit form");
+    h.fill_form(|f| f.env.retain(|p| p.key.text != "PLATA_HOST"));
+    h.click("mcp-add-save");
+    assert!(h.rt.state.mcp_dialog.is_some(), "the edit plan is open");
+    assert_eq!(rect_of(&h, "mcp-plan-dialog")[2], size::DIALOG_FORM, "edit's plan, no picks");
+    h.click("mcp-cancel");
+
+    let mut h = mcp_home();
+    fs::write(h.root.join(".cursor/mcp.json"), r#"{"mcpServers":{"plata-two":{"command":"npx","args":["-y","plata-mcp"]}}}"#).unwrap();
+    h.mcp_global();
+    h.click("mcp-merge-0");
+    assert!(h.rt.find("mcp-merge-into").is_some(), "merge's picks");
+    assert_eq!(rect_of(&h, "mcp-plan-dialog")[2], size::DIALOG_WIDE, "merge, with picks");
+
+    let mut h = Harness::project();
+    h.rt.update(|s, _| s.open_add_host());
+    h.settle();
+    assert_eq!(rect_of(&h, "add-host-dialog")[2], size::DIALOG_FORM, "add host");
+
+    let (mut h, _remote) = on_host();
+    h.click("add-project");
+    assert_eq!(rect_of(&h, "host-project-dialog")[2], size::DIALOG_FORM, "add a project on a host");
+}
+
+/// Review Focus 2: editing a server with secrets masks its prefilled values; an eye shows one.
+#[test]
+fn edit_form_masks_prefilled_secrets() {
+    let mut h = mcp_home();
+    h.mcp_global();
+    h.click("mcp-row-plata");
+    h.click("mcp-edit");
+    let i = h.rt.state.mcp_form.as_ref().unwrap().env.iter().position(|p| p.key.text == "PLATA_TOKEN").unwrap();
+    let value = format!("mcp-add-env-{i}-value");
+    let masked = texts_in(&h, &value);
+    // A secure field reports no text while masked.
+    assert!(!masked.contains("fake-env-secret"), "the env value is masked: {masked:?}");
+    let line = texts_in(&h, "mcp-add-command");
+    assert!(!line.contains("fake-arg-secret"), "the command with a secret is masked: {line:?}");
+
+    let eye = |h: &Harness, key: &str| h.rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key) && !e.exiting).and_then(|e| e.label);
+    let f = h.rt.state.mcp_form.as_ref().unwrap();
+    assert!(f.line_secret && !f.line_shown && !f.env[i].shown, "both start masked");
+    assert_eq!(eye(&h, &format!("mcp-add-env-{i}-show")).as_deref(), Some("Show value"));
+    assert_eq!(eye(&h, "mcp-add-line-show").as_deref(), Some("Show value"));
+
+    h.click(&format!("mcp-add-env-{i}-show"));
+    assert!(h.rt.state.mcp_form.as_ref().unwrap().env[i].shown, "its eye shows it");
+    assert_eq!(eye(&h, &format!("mcp-add-env-{i}-show")).as_deref(), Some("Hide value"));
+    h.click("mcp-add-line-show");
+    assert!(h.rt.state.mcp_form.as_ref().unwrap().line_shown, "and the command's eye shows the command");
+}
+
+/// The machine Select in MCP Copy opens its menu by the select, not in the window's corner:
+/// the menu is laid out after the dialog that holds the select.
+#[test]
+fn copy_scope_menu_opens_by_its_select() {
+    let mut h = mcp_home();
+    let laptop = host_home(crate::hosts::install::VERSION);
+    h.with_laptop(laptop.path());
+    h.mcp_global();
+    h.click("mcp-row-plata");
+    h.click("mcp-copy");
+    h.land_remote();
+    h.click("mcp-copy-machine-trigger");
+    assert!(h.rt.state.across.machine_menu, "the menu is open");
+    let (select, menu) = (rect_of(&h, "mcp-copy-machine-trigger"), rect_of(&h, "mcp-copy-machine-content"));
+    let near = (menu[1] - (select[1] + select[3])).abs() < 40.0 || (select[1] - (menu[1] + menu[3])).abs() < 40.0;
+    assert!(near && (menu[0] - select[0]).abs() < 40.0, "the menu {menu:?} opens by the select {select:?}");
+}
+
+/// Errors moved into the frame's error line keep the keys they had.
+#[test]
+fn dialog_errors_keep_their_keys() {
+    let shows = |h: &Harness, key: &str| h.rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key) && !e.exiting).and_then(|e| e.text);
+    let mut h = mcp_home();
+    h.mcp_global();
+    h.click("mcp-add");
+    h.click("mcp-add-save");
+    let e = h.rt.state.mcp_form.as_ref().and_then(|f| f.error.clone()).expect("an empty form is refused");
+    assert_eq!(shows(&h, "mcp-add-error"), Some(e));
+
+    let mut h = Harness::project();
+    h.rt.update(|s, _| {
+        s.open_add_host();
+        let f = s.add_host.as_mut().unwrap();
+        f.name = rune::TextEdit::new("box");
+        f.ssh = rune::TextEdit::new("-oProxyCommand=x");
+    });
+    h.settle();
+    h.click("host-add");
+    let e = h.rt.state.add_host.as_ref().and_then(|f| f.error.clone()).expect("an option for a target is refused");
+    assert_eq!(shows(&h, "host-error"), Some(e));
+
+    let (mut h, _remote) = on_host();
+    h.click("add-project");
+    h.click("host-project-add");
+    h.land_remote();
+    let e = h.rt.state.host_project.as_ref().and_then(|f| f.error.clone()).expect("an empty folder is refused");
+    assert!(h.rt.find("host-project-error").is_some(), "the error line");
+    assert!(h.texts().contains(&e), "says {e}");
 }

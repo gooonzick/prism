@@ -493,6 +493,26 @@ mod dialog {
         col().key("layer").w_full().h_full().children(layer)
     }
 
+    fn with_error(_: &Shown, _: &mut Cx<Shown>) -> El {
+        let k = Kit::neutral(false);
+        let mut layer = Vec::new();
+        DialogFrame::new("d", "Title", DialogKind::Form)
+            .body(el().key("block").w_full().h(40.0))
+            .error(Some("Name is taken".into()))
+            .error_key("field-error")
+            .build(&k, |_: &mut Shown| {}, &mut layer);
+        rune_kit::root(col().w_full().h_full(), layer)
+    }
+
+    #[test]
+    fn error_line_keeps_its_key_and_takes_another() {
+        let rt = run(with_error, (1200.0, 760.0));
+        let (line, text) = (rt.presented("d-error").expect("the error line").0, rt.presented("field-error").expect("the error's own key").0);
+        assert!(text[1] >= line[1] && text[1] + text[3] <= line[1] + line[3] + 0.5, "the keyed text {text:?} is in the line {line:?}");
+        let shown = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("field-error")).and_then(|e| e.text);
+        assert_eq!(shown.as_deref(), Some("Name is taken"));
+    }
+
     #[test]
     fn menu_layer_order() {
         let rt = run(with_menu, (1200.0, 760.0));
